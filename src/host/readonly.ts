@@ -211,79 +211,307 @@ export function lastSandboxMode(session: SessionPort): string | undefined {
 }
 
 /**
- * Events a fresh child writes for itself before its first request, checked
- * against every `SessionEventMap` member in DSH 0.2.1-alpha.3
- * (`known-event-types.ts`). Anything else is parent history: the parent
- * conversation, or a type this build cannot prove is free of it.
+ * How a session event is classified for a child that must not inherit history.
+ * Checked against every `SessionEventMap` member in DSH 0.2.1-alpha.3
+ * (`known-event-types.ts`). The same function judges a `prepareContinuable`
+ * seed and the live log, for every role that does not inherit the parent
+ * conversation.
  *
- * Allowed here:
- * `agent-preset/selected`, `approval/policy`, `permission/preset`,
- * `sandbox/mode`, `session/end-seed`, `subagent/descriptor`,
- * `subagent/model-selection-policy`, `working-directory/change`, and
- * `plugin:` records. `agent/inbox/spliced` is allowed only when every
- * inserted message is a working-directory notice, which child setup writes.
- *
- * Refused, because the payload carries parent content or parent-owned work:
- * `agent/inbox/spliced` (other messages), `approval/asked`, `approval/decided`,
- * `assistant/attempt`, `assistant/message`, `command/done`, `command/run`,
- * `compaction/end`, `compaction/prune`, `compaction/start`, `compaction/summary`,
- * `deliverables/presented`, `developer/message`, `feedback/message-delete`,
- * `feedback/message-put`, `feedback/record`, `goal/change`, `hook/invoked`,
- * `hook/result`, `image/offload`, `job/registered`, `job/settled`, `llm/retry`,
- * `llm/retry-started`, `model/selection`, `plan/mode`, `request/context`,
- * `request/header`, `schedule/change`, `session-log-deepseek/delivery-accepted`,
- * `session/title`, `session/title-llm-request`, `step/end`, `step/start`,
- * `subagent/catalog`, `system/message`, `team/member`, `team/message/delivered`,
- * `team/message/queued`, `team/task`, `todo/write`, `tool-workflow/agent-end`,
- * `tool-workflow/agent-start`, `tool-workflow/run-end`, `tool-workflow/run-start`,
- * `tool/call`, `tool/ptc-dispatch`, `tool/ptc-dispatch-start`, `tool/result`,
- * `turn/end`, `turn/start`, `user/message`, `web/deepseek-search-llm-request`,
- * `workspace/changes`. A type that is not in either list is refused too.
+ * `setup` events carry mode, route, and boundary metadata. They are allowed
+ * when the payload does not embed a conversation message. `schedule/change`
+ * is the exception that also carries a reminder prompt: a `prompt` field
+ * refuses it. `message` events carry conversation text and are refused even
+ * when the payload is empty. `splice` is `agent/inbox/spliced`, judged from
+ * its inserted messages. `plugin` is a `plugin:` record, allowed only for
+ * this plugin's namespace and only without a transcript. Anything else is
+ * `unknown` and refused.
  */
-const CHILD_OWN_EVENT_TYPES: ReadonlySet<string> = new Set([
+export type ChildEventClass = 'setup' | 'message' | 'splice' | 'plugin' | 'unknown'
+
+/** Records this plugin writes. Other `plugin:` namespaces can carry a transcript. */
+const PLUGIN_RECORD_PREFIX = 'plugin:dsh-rolesubagents/'
+
+/** How far a payload is walked before an unscanned remainder is treated as parent content. */
+const PAYLOAD_SCAN_LIMIT = 32
+
+const CONVERSATION_ROLES: ReadonlySet<string> = new Set(['user', 'assistant', 'system', 'developer', 'tool'])
+
+/**
+ * Fields that carry conversation text. A plugin record with one of these is
+ * refused. Role instructions use `instructions` and `description`, which stay.
+ */
+const TRANSCRIPT_FIELDS: ReadonlySet<string> = new Set(['message', 'messages', 'transcript', 'prompt', 'prompts'])
+
+/**
+ * Setup a fresh child, or the host around it, writes without copying the
+ * parent conversation. Strings here are labels, paths, model ids, and tool
+ * schemas. A nested conversation message still refuses the event.
+ */
+const SETUP_EVENT_TYPES: ReadonlySet<string> = new Set([
   'agent-preset/selected',
   'approval/policy',
+  'model/selection',
   'permission/preset',
+  'plan/mode',
+  'request/context',
+  'request/header',
   'sandbox/mode',
+  'schedule/change',
   'session/end-seed',
+  'session/title',
+  'step/end',
+  'step/start',
+  'subagent/catalog',
   'subagent/descriptor',
   'subagent/model-selection-policy',
+  'turn/end',
+  'turn/start',
   'working-directory/change',
 ])
 
-/** A splice child setup writes when it records the working directory. */
-function isWorkingDirectoryNotice(event: Record<string, unknown>): boolean {
-  const data = event.data
-  if (!isRecord(data) || !Array.isArray(data.inserted) || data.inserted.length === 0) return false
-  return data.inserted.every(message => {
-    if (!isRecord(message)) return false
-    const source = message.source
-    return isRecord(source) && source.kind === 'working-directory'
-  })
+/**
+ * Events whose payload is conversation text or parent-owned work.
+ * DSH 0.2.1-alpha.3 writes several of these during the child's own first
+ * step, after `startActivation` has already returned, so refusing them does
+ * not reject a legitimate start. A seed that contains them is parent history.
+ */
+const MESSAGE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'approval/asked',
+  'approval/decided',
+  'assistant/attempt',
+  'assistant/message',
+  'command/done',
+  'command/run',
+  'compaction/end',
+  'compaction/prune',
+  'compaction/start',
+  'compaction/summary',
+  'deliverables/presented',
+  'developer/message',
+  'feedback/message-delete',
+  'feedback/message-put',
+  'feedback/record',
+  'goal/change',
+  'hook/invoked',
+  'hook/result',
+  'image/offload',
+  'job/registered',
+  'job/settled',
+  'llm/retry',
+  'llm/retry-started',
+  'session-log-deepseek/delivery-accepted',
+  'session/title-llm-request',
+  'system/message',
+  'team/member',
+  'team/message/delivered',
+  'team/message/queued',
+  'team/task',
+  'todo/write',
+  'tool-workflow/agent-end',
+  'tool-workflow/agent-start',
+  'tool-workflow/run-end',
+  'tool-workflow/run-start',
+  'tool/call',
+  'tool/ptc-dispatch',
+  'tool/ptc-dispatch-start',
+  'tool/result',
+  'user/message',
+  'web/deepseek-search-llm-request',
+  'workspace/changes',
+])
+
+/**
+ * The class of one event type, before its payload is inspected.
+ * @param type - a session event type.
+ * @returns `unknown` for a type this build has not classified.
+ */
+export function sessionEventClass(type: string): ChildEventClass {
+  if (MESSAGE_EVENT_TYPES.has(type)) return 'message'
+  if (type === 'agent/inbox/spliced') return 'splice'
+  if (type.startsWith('plugin:')) return 'plugin'
+  if (SETUP_EVENT_TYPES.has(type)) return 'setup'
+  return 'unknown'
+}
+
+function keysWithin(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every(key => allowed.includes(key))
+}
+
+function sameRecord(value: unknown, expected: Record<string, string>): boolean {
+  if (!isRecord(value)) return false
+  const keys = Object.keys(expected)
+  if (Object.keys(value).length !== keys.length) return false
+  return keys.every(key => value[key] === expected[key])
+}
+
+/** A JSON string literal as `JSON.stringify` emits it, starting at `index`. */
+function readJsonString(text: string, index: number): { value: string; end: number } | undefined {
+  if (text.charCodeAt(index) !== 0x22) return undefined
+  let cursor = index + 1
+  while (cursor < text.length) {
+    const code = text.charCodeAt(cursor)
+    if (code === 0x5c) {
+      if (cursor + 1 >= text.length) return undefined
+      cursor += 2
+      continue
+    }
+    if (code === 0x22) {
+      const literal = text.slice(index, cursor + 1)
+      try {
+        const parsed: unknown = JSON.parse(literal)
+        if (typeof parsed !== 'string' || JSON.stringify(parsed) !== literal) return undefined
+        return { value: parsed, end: cursor + 1 }
+      } catch {
+        return undefined
+      }
+    }
+    cursor += 1
+  }
+  return undefined
 }
 
 /**
- * Whether one event is bookkeeping a fresh child writes itself.
- * Non-records and unknown types are not: task-only fails closed on them.
+ * The two notices `working-directory` writes. Both paths are `JSON.stringify`
+ * output, and the service returns before writing when the path did not change.
  */
-function isChildOwnEvent(event: unknown): boolean {
-  if (!isRecord(event)) return false
+function isWorkingDirectoryNoticeText(text: string): boolean {
+  const changed = 'The working directory changed from '
+  const unavailable = 'The working directory '
+  if (text.startsWith(changed)) return readDirectoryPair(text.slice(changed.length), ' to ', '.')
+  if (text.startsWith(unavailable)) {
+    return readDirectoryPair(text.slice(unavailable.length), ' is unavailable. The working directory is now ', '.')
+  }
+  return false
+}
+
+function readDirectoryPair(text: string, middle: string, end: string): boolean {
+  const previous = readJsonString(text, 0)
+  if (previous === undefined || !text.startsWith(middle, previous.end)) return false
+  const directory = readJsonString(text, previous.end + middle.length)
+  if (directory === undefined || text.slice(directory.end) !== end) return false
+  return previous.value !== directory.value
+}
+
+function isTextBlock(value: unknown): boolean {
+  if (!isRecord(value) || !keysWithin(value, ['type', 'text'])) return false
+  return value.type === 'text' && typeof value.text === 'string'
+}
+
+/** The user message `working-directory` injects: one matching text block and that source alone. */
+function isWorkingDirectoryMessage(message: unknown): boolean {
+  if (!isRecord(message) || !keysWithin(message, ['role', 'content', 'source', 'id'])) return false
+  if (message.role !== 'user' || !Array.isArray(message.content) || message.content.length !== 1) return false
+  if ('id' in message && typeof message.id !== 'string') return false
+  if (!sameRecord(message.source, { kind: 'working-directory' })) return false
+  const block = message.content[0]
+  return (
+    isTextBlock(block) && isRecord(block) && typeof block.text === 'string' && isWorkingDirectoryNoticeText(block.text)
+  )
+}
+
+/**
+ * The one task `startLocal` queues. Delivery to the parent appends a second
+ * text block of return guidance; both blocks stay inside this one message.
+ * `source` is exactly `{ kind: 'user' }`.
+ */
+function isDelegationTaskMessage(message: unknown): boolean {
+  if (!isRecord(message) || !keysWithin(message, ['role', 'content', 'source', 'id'])) return false
+  if (message.role !== 'user' || !Array.isArray(message.content) || message.content.length === 0) return false
+  if ('id' in message && typeof message.id !== 'string') return false
+  if (!sameRecord(message.source, { kind: 'user' })) return false
+  return message.content.every(block => isTextBlock(block))
+}
+
+type SpliceVerdict = 'own' | 'delegation-task' | 'parent'
+
+function classifySplice(event: Record<string, unknown>): SpliceVerdict {
+  const data = event.data
+  if (!isRecord(data) || !keysWithin(data, ['target', 'start', 'removedCount', 'inserted', 'outcome'])) return 'parent'
+  if (data.target !== 'next-turn' && data.target !== 'next-step') return 'parent'
+  if (typeof data.start !== 'number' || !Number.isInteger(data.start) || data.start < 0) return 'parent'
+  if ('removedCount' in data) {
+    const removed = data.removedCount
+    if (typeof removed !== 'number' || !Number.isInteger(removed) || removed < 0) return 'parent'
+  }
+  if ('outcome' in data && data.outcome !== 'canceled') return 'parent'
+  if (!Array.isArray(data.inserted)) return 'parent'
+  if (data.inserted.length === 0) return 'own'
+  const removedCount = data.removedCount
+  if (removedCount !== undefined && removedCount !== 0) return 'parent'
+  if ('outcome' in data) return 'parent'
+  if (data.inserted.every(message => isWorkingDirectoryMessage(message))) return 'own'
+  if (data.target === 'next-turn' && data.inserted.length === 1 && isDelegationTaskMessage(data.inserted[0])) {
+    return 'delegation-task'
+  }
+  return 'parent'
+}
+
+function isConversationMessage(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.role !== 'string' || !CONVERSATION_ROLES.has(value.role)) return false
+  return 'content' in value || 'text' in value
+}
+
+function containsConversationMessage(value: unknown, depth: number): boolean {
+  if (depth > PAYLOAD_SCAN_LIMIT) return true
+  if (isConversationMessage(value)) return true
+  if (Array.isArray(value)) return value.some(item => containsConversationMessage(item, depth + 1))
+  if (!isRecord(value)) return false
+  return Object.values(value).some(child => containsConversationMessage(child, depth + 1))
+}
+
+function hasField(value: unknown, names: ReadonlySet<string>, depth: number): boolean {
+  if (depth > PAYLOAD_SCAN_LIMIT) return true
+  if (Array.isArray(value)) return value.some(item => hasField(item, names, depth + 1))
+  if (!isRecord(value)) return false
+  for (const [key, child] of Object.entries(value)) {
+    if (names.has(key) || hasField(child, names, depth + 1)) return true
+  }
+  return false
+}
+
+function isContentFreeSetup(event: Record<string, unknown>, type: string): boolean {
+  if (containsConversationMessage(event.data, 0)) return false
+  if (type === 'schedule/change' && hasField(event.data, new Set(['prompt']), 0)) return false
+  return true
+}
+
+function isOwnPluginRecord(event: Record<string, unknown>, type: string): boolean {
+  if (!type.startsWith(PLUGIN_RECORD_PREFIX)) return false
+  if (typeof event.data === 'string' || Array.isArray(event.data)) return false
+  if (hasField(event.data, TRANSCRIPT_FIELDS, 0)) return false
+  return !containsConversationMessage(event.data, 0)
+}
+
+type EventVerdict = 'own' | 'delegation-task' | 'parent'
+
+function classifyChildEvent(event: unknown): EventVerdict {
+  if (!isRecord(event) || typeof event.type !== 'string') return 'parent'
   const type = event.type
-  if (typeof type !== 'string') return false
-  if (type.startsWith('plugin:')) return true
-  if (CHILD_OWN_EVENT_TYPES.has(type)) return true
-  return type === 'agent/inbox/spliced' && isWorkingDirectoryNotice(event)
+  if (MESSAGE_EVENT_TYPES.has(type)) return 'parent'
+  if (type === 'agent/inbox/spliced') return classifySplice(event)
+  if (type.startsWith('plugin:')) return isOwnPluginRecord(event, type) ? 'own' : 'parent'
+  if (SETUP_EVENT_TYPES.has(type) && isContentFreeSetup(event, type)) return 'own'
+  return 'parent'
 }
 
 /**
  * Whether a seed or session log already contains parent history.
- * A fresh child's own setup events do not count. Parent content, and any
- * type this build does not recognize, does.
+ * Content-free setup does not count. One delegation-task splice does not
+ * count; a second one does, because the host queues the task once. Parent
+ * content, another plugin's records, and any unrecognized type do count.
  * @param events - a session log or a provider seed.
- * @returns true when an event is not one a fresh child writes itself.
+ * @returns true when an event is parent history.
  */
 export function eventsHaveParentTurns(events: readonly unknown[]): boolean {
-  return events.some(event => !isChildOwnEvent(event))
+  let delegationTasks = 0
+  for (const event of events) {
+    const verdict = classifyChildEvent(event)
+    if (verdict === 'parent') return true
+    if (verdict !== 'delegation-task') continue
+    delegationTasks += 1
+    if (delegationTasks > 1) return true
+  }
+  return false
 }
 
 /**

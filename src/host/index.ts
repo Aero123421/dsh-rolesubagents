@@ -145,9 +145,10 @@ const DESTINATION_KEYS = new Set([
 ])
 
 /**
- * Message text and trace fields. A parent id or a trace id written here is
- * not consulted. `metadata` is not in this set: a nested agent id there is
- * still a known id and has to be read-only.
+ * Message text and trace fields. A string under one of these keys is not
+ * consulted. An object or an array is still scanned, so a destination nested
+ * inside `message` is not hidden. `metadata` is not in this set: a nested
+ * agent id there is still a known id and has to be read-only.
  */
 const BODY_KEYS = new Set([
   'message',
@@ -174,14 +175,24 @@ const BODY_KEYS = new Set([
 ])
 
 interface ScannedArguments {
-  /** Every string outside {@link BODY_KEYS}. Known ids among these must be read-only. */
+  /** Every string outside a string-valued {@link BODY_KEYS} field. Known ids among these must be read-only. */
   readonly values: string[]
   /** Strings under {@link DESTINATION_KEYS}. Unknown ids here fail closed. */
   readonly destinations: string[]
+  /** True when a value sat deeper than eight levels and was not scanned. */
+  overflow: boolean
 }
 
+/**
+ * Walk argument values. The root is depth 0. A string inside eight object or
+ * array wrappers is still scanned. Anything deeper is not read, and the call
+ * is refused.
+ */
 function collectArguments(value: unknown, into: ScannedArguments, depth: number, asDestination: boolean): void {
-  if (depth > 8) return
+  if (depth > 8) {
+    into.overflow = true
+    return
+  }
   if (typeof value === 'string') {
     if (value === '') return
     into.values.push(value)
@@ -194,7 +205,7 @@ function collectArguments(value: unknown, into: ScannedArguments, depth: number,
   }
   if (typeof value === 'object' && value !== null) {
     for (const [key, child] of Object.entries(value)) {
-      if (BODY_KEYS.has(key)) continue
+      if (BODY_KEYS.has(key) && typeof child === 'string') continue
       collectArguments(child, into, depth + 1, asDestination || DESTINATION_KEYS.has(key))
     }
   }
@@ -347,14 +358,16 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   }
 
   /**
-   * Every known id outside message text and trace fields has to be read-only,
-   * including one nested under `metadata` or carried by `id`, `agents`, or
+   * Every known id outside a string message or trace field has to be read-only,
+   * including one nested under `metadata`, `message`, `id`, `agents`, or
    * `subagent_id`. An unknown id fails closed only in a destination field.
-   * A known id includes a session the sessions service still lists.
+   * A value nested more than eight levels refuses the call. A known id
+   * includes a session the sessions service still lists.
    */
   const destinationsAreReadOnly = (args: unknown): boolean => {
-    const scanned: ScannedArguments = { values: [], destinations: [] }
+    const scanned: ScannedArguments = { values: [], destinations: [], overflow: false }
     collectArguments(args, scanned, 0, false)
+    if (scanned.overflow) return false
     if (scanned.destinations.length === 0) return false
     const sessionsById = knownSessions()
     const referenced = new Set<SessionPort>()

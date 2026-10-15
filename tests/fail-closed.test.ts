@@ -6,7 +6,7 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/host/index.ts'
-import { pinFailed } from '../src/host/readonly.ts'
+import { eventsHaveParentTurns, pinFailed } from '../src/host/readonly.ts'
 import { readRole, writeRole } from '../src/host/records.ts'
 import {
   builtinRole,
@@ -34,6 +34,94 @@ const EXPLORER = role('explorer', { description: 'Reads.', instructions: 'Look.'
 const REVIEWER = role('reviewer', { description: 'Judges.', instructions: 'Judge.', readOnly: true })
 const ROLES = [GENERAL, FORK, WORKER, EXPLORER, REVIEWER]
 const ARGS = { description: 'check things', prompt: 'please check the things' }
+
+/** `levels` wrappers. The hidden value is visited at depth `levels`; the outermost wrapper carries `agentId`. */
+function bury(levels: number, hidden: unknown, agentId: string): Record<string, unknown> {
+  let value: unknown = hidden
+  for (let level = 1; level <= levels; level++) {
+    value = level === levels ? { agent_id: agentId, nest: value } : { nest: value }
+  }
+  return value as Record<string, unknown>
+}
+
+function textBlock(text: string): { type: 'text'; text: string } {
+  return { type: 'text', text }
+}
+
+function delegationTask(text: string, extra: { type: 'text'; text: string }[] = []): unknown {
+  return {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-turn',
+      start: 0,
+      inserted: [
+        {
+          role: 'user',
+          id: '11111111-1111-4111-8111-111111111111',
+          content: [textBlock(text), ...extra],
+          source: { kind: 'user' },
+        },
+      ],
+    },
+  }
+}
+
+function claimSplice(): unknown {
+  return {
+    type: 'agent/inbox/spliced',
+    data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] },
+  }
+}
+
+function directoryNoticeText(previous: string, directory: string, recovered: boolean): string {
+  const from = JSON.stringify(previous)
+  const to = JSON.stringify(directory)
+  return recovered
+    ? `The working directory ${from} is unavailable. The working directory is now ${to}.`
+    : `The working directory changed from ${from} to ${to}.`
+}
+
+function workingDirectoryNotice(previous: string, directory: string, recovered = false): unknown {
+  return {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [
+        {
+          role: 'user',
+          id: '22222222-2222-4222-8222-222222222222',
+          content: [textBlock(directoryNoticeText(previous, directory, recovered))],
+          source: { kind: 'working-directory' },
+        },
+      ],
+    },
+  }
+}
+
+function spoofedWorkingDirectoryNotice(text: string): unknown {
+  return {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [
+        {
+          role: 'user',
+          content: [textBlock(text), textBlock('and another block')],
+          source: { kind: 'working-directory', note: 'from the parent' },
+        },
+      ],
+    },
+  }
+}
+
+function pushEvent(session: FakeSession, event: unknown): void {
+  if (typeof event !== 'object' || event === null) throw new Error('event is not a record')
+  const record = event as { type?: unknown; data?: unknown }
+  if (typeof record.type !== 'string') throw new Error('event has no type')
+  session.log.push({ type: record.type, seq: session.log.length, time: 0, data: record.data })
+}
 
 function modes(session: FakeSession): unknown[] {
   return recordsOf(session, 'sandbox/mode')
@@ -289,7 +377,7 @@ describe('task-only does not receive the parent history', () => {
         parentSession: spec.request.parent.session.id,
         delegationDepth: 1,
       })
-      child.session.log.push({ type: 'turn/end', seq: 0, time: 0, data: { reason: 'parent' } })
+      child.session.log.push({ type: 'user/message', seq: 0, time: 0, data: { text: 'from the parent' } })
       world.children.push(child)
       world.emitCreated(child, 'fork')
       return { childId: child.id }
@@ -364,7 +452,7 @@ describe('task-only stops a child that already has parent history', () => {
         parentSession: spec.request.parent.session.id,
         delegationDepth: 1,
       })
-      child.session.log.push({ type: 'turn/end', seq: 0, time: 0, data: { reason: 'parent' } })
+      child.session.log.push({ type: 'user/message', seq: 0, time: 0, data: { text: 'from the parent' } })
       world.children.push(child)
       world.agents = [...world.agents, child]
       return { childId: child.id, dispose: activationDispose }
@@ -392,7 +480,7 @@ describe('task-only stops a child that already has parent history', () => {
         delegationDepth: 1,
       })
       child.dispose.mockRejectedValue(new Error('dispose failed'))
-      child.session.log.push({ type: 'turn/end', seq: 0, time: 0, data: { reason: 'parent' } })
+      child.session.log.push({ type: 'user/message', seq: 0, time: 0, data: { text: 'from the parent' } })
       world.children.push(child)
       world.agents = [...world.agents, child]
       return { childId: child.id, dispose: activationDispose }
@@ -411,7 +499,7 @@ describe('task-only stops a child that already has parent history', () => {
     world.subagents.startActivation.mockImplementation(async spec => {
       const id = spec.childId ?? 'seeded'
       const session = fakeSession(id)
-      session.log.push({ type: 'turn/end', seq: 0, time: 0, data: { reason: 'parent' } })
+      session.log.push({ type: 'user/message', seq: 0, time: 0, data: { text: 'from the parent' } })
       world.sessions.set(id, session)
       return { childId: id, dispose: activationDispose }
     })
@@ -877,10 +965,19 @@ describe('destination checks do not trust agent_id alone', () => {
       { agents: [writable] },
       { subagent_id: writable },
       { metadata: { agent_id: writable } },
+      { message: { agent_id: writable } },
+      { message: [{ agent_id: writable }] },
+      { note: { agent_id: writable } },
     ]
     for (const extra of hidden) {
       expect(call(explorer, 'send_message', { agent_id: readable, ...extra })).toMatch(/destination is not a read-only/)
     }
+    expect(call(explorer, 'send_message', { agent_id: readable, message: `see ${writable}` })).toBeUndefined()
+    expect(call(explorer, 'send_message', bury(8, writable, readable))).toMatch(/destination is not a read-only/)
+    expect(call(explorer, 'send_message', bury(9, writable, readable))).toMatch(/destination is not a read-only/)
+    expect(call(explorer, 'send_message', bury(9, { untouched: true }, readable))).toMatch(
+      /destination is not a read-only/,
+    )
     expect(
       call(explorer, 'send_message', {
         agent_id: readable,
@@ -1001,7 +1098,7 @@ describe('task-only inspects the provider seed', () => {
       'spawn',
       fakeProvider('spawn', {
         inheritsParentContext: false,
-        prepareContinuable: async () => ({ seed: [{ type: 'turn/end' }] }),
+        prepareContinuable: async () => ({ seed: [{ type: 'user/message', data: { text: 'from the parent' } }] }),
       }),
     )
     await expect(delegate('fork')).rejects.toThrow(/provider "spawn" copies it/)
@@ -1029,12 +1126,21 @@ describe('task-only inspects the provider seed', () => {
     const seeds: unknown[] = [
       [{ type: 'user/message', data: { text: 'from the parent' } }],
       [{ type: 'assistant/message' }],
+      [{ type: 'assistant/attempt' }],
       [{ type: 'developer/message' }],
       [{ type: 'system/message' }],
       [{ type: 'tool/call' }],
       [{ type: 'tool/result' }],
       [{ type: 'compaction/summary' }],
-      [{ type: 'turn/end' }],
+      [
+        {
+          type: 'turn/end',
+          data: {
+            turn: 1,
+            reason: { kind: 'error', error: { message: { role: 'user', content: 'from the parent' } } },
+          },
+        },
+      ],
     ]
     for (const seed of seeds) {
       const { world, delegate } = boot([GENERAL, taskFork])
@@ -1060,9 +1166,53 @@ describe('task-only inspects the provider seed', () => {
       [{ type: 'feedback/record', data: { text: 'please review' } }],
       [{ type: 'goal/change', data: { goal: { objective: 'finish the parent task' } } }],
       [{ type: 'command/run', data: { name: 'compact' } }],
-      [{ type: 'session/title', data: { title: 'the parent conversation' } }],
-      [{ type: 'schedule/change', data: { operation: 'create' } }],
-      [{ type: 'request/header', data: { header: { tools: [] } } }],
+      [
+        {
+          type: 'schedule/change',
+          data: { operation: 'create', schedule: { prompt: 'finish the parent task' } },
+        },
+      ],
+      [
+        {
+          type: 'session/title',
+          data: { title: 'label', copied: { role: 'user', content: 'from the parent' } },
+        },
+      ],
+      [
+        {
+          type: 'request/header',
+          data: { header: { messages: [{ role: 'user', content: 'from the parent' }] } },
+        },
+      ],
+      [{ type: 'plugin:evil/transcript', data: { transcript: 'the parent said this' } }],
+      [{ type: 'plugin:evil/transcript', data: 'the parent said this' }],
+      [{ type: 'plugin:dsh-rolesubagents/note', data: { transcript: 'the parent said this' } }],
+      [{ type: 'plugin:dsh-rolesubagents/note', data: 'the parent said this' }],
+      [
+        {
+          type: 'plugin:dsh-rolesubagents/role',
+          data: { version: 1, role: { id: 'fork', message: { role: 'user', content: 'from the parent' } } },
+        },
+      ],
+      [delegationTask('first task'), delegationTask('second task')],
+      [spoofedWorkingDirectoryNotice('from the parent')],
+      [workingDirectoryNotice('/same', '/same')],
+      [
+        {
+          type: 'agent/inbox/spliced',
+          data: {
+            target: 'next-turn',
+            start: 0,
+            inserted: [{ role: 'user', content: 'from the parent', source: { kind: 'user' } }],
+          },
+        },
+      ],
+      [
+        {
+          type: 'agent/inbox/spliced',
+          data: { target: 'next-turn', start: 0, inserted: [], note: 'from the parent' },
+        },
+      ],
       [{ type: 'mystery/blob' }],
       [{ weird: true }],
       [null],
@@ -1091,21 +1241,65 @@ describe('task-only inspects the provider seed', () => {
         inheritsParentContext: false,
         prepareContinuable: async () => ({
           seed: [
-            { type: 'sandbox/mode', data: { mode: 'read-only' } },
-            { type: 'plugin:dsh-rolesubagents/roles', data: {} },
-            { type: 'approval/policy' },
+            { type: 'sandbox/mode', data: { mode: 'read-only', source: 'delegation' } },
+            {
+              type: 'plugin:dsh-rolesubagents/role',
+              data: {
+                version: 1,
+                role: {
+                  id: 'fork',
+                  enabled: true,
+                  description: 'Judges.',
+                  instructions: 'Judge the diff. Do not edit.',
+                  context: 'fork',
+                  forkScope: 'task',
+                  readOnly: true,
+                },
+              },
+            },
+            { type: 'plugin:dsh-rolesubagents/roles', data: { version: 1, settings: { enabled: true, roles: [] } } },
+            { type: 'approval/policy', data: { policy: 'never', source: 'delegation' } },
             { type: 'permission/preset', data: { preset: 'auto' } },
             { type: 'session/end-seed' },
             { type: 'agent-preset/selected', data: { agentPreset: 'default' } },
-            { type: 'subagent/descriptor', data: { provider: 'spawn', mode: 'one-shot' } },
+            { type: 'subagent/descriptor', data: { provider: 'spawn', mode: 'continuable', label: 'check things' } },
             { type: 'subagent/model-selection-policy', data: { allowedModels: [] } },
             { type: 'working-directory/change', data: { cwd: '/workspace' } },
+            workingDirectoryNotice('/old', '/workspace'),
+            workingDirectoryNotice('/missing', '/workspace', true),
+            delegationTask(ARGS.prompt, [
+              textBlock('Your parent agent id is "parent". Before you finish, send your result with send_message.'),
+            ]),
+            { type: 'turn/start', data: { turn: 1 } },
+            claimSplice(),
+            { type: 'model/selection', data: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
             {
-              type: 'agent/inbox/spliced',
+              type: 'session/title',
+              data: { title: 'check things', messageSeqs: [], source: { kind: 'fallback' } },
+            },
+            {
+              type: 'subagent/catalog',
+              data: { version: 1, childId: 'child', childCreatedAt: 0, mode: 'continuable', label: 'check things' },
+            },
+            { type: 'plan/mode', data: { active: false } },
+            {
+              type: 'request/header',
               data: {
-                inserted: [{ role: 'user', content: 'cwd', source: { kind: 'working-directory' } }],
+                header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, tools: [] },
+                reason: 'initial',
               },
             },
+            { type: 'request/context', data: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
+            { type: 'step/start', data: { turn: 1, step: 1 } },
+            { type: 'step/end', data: { turn: 1, step: 1 } },
+            {
+              type: 'turn/end',
+              data: {
+                turn: 1,
+                reason: { kind: 'error', error: { message: 'no API key', code: 'MISSING_CREDENTIAL' } },
+              },
+            },
+            { type: 'schedule/change', data: { version: 1, operation: 'create' } },
           ],
         }),
       }),
@@ -1173,7 +1367,11 @@ describe('task-only inspects the provider seed', () => {
       { type: 'feedback/message-put', data: { item: { note: 'from the parent' } } },
       {
         type: 'agent/inbox/spliced',
-        data: { inserted: [{ role: 'user', content: 'parent prompt', source: { kind: 'user' } }] },
+        data: {
+          target: 'next-turn',
+          start: 0,
+          inserted: [{ role: 'user', content: 'parent prompt', source: { kind: 'user' } }],
+        },
       },
     ]
     for (const leak of leaks) {
@@ -1197,6 +1395,78 @@ describe('task-only inspects the provider seed', () => {
       expect(activationDispose).toHaveBeenCalledTimes(1)
       expect(world.children[0]?.cancel).toHaveBeenCalledWith({ kind: 'user' })
     }
+  })
+
+  it('starts a fresh spawn role when the child log is the host startup sequence', async () => {
+    const { world, parent } = boot()
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const id = spec.childId ?? 'host-child'
+      const child = world.newAgent(id, {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      const setup = [
+        { type: 'subagent/descriptor', data: { provider: 'spawn', mode: 'continuable', label: 'check things' } },
+        { type: 'sandbox/mode', data: { mode: 'workspace-write', source: 'delegation' } },
+        { type: 'approval/policy', data: { policy: 'never', source: 'delegation' } },
+        { type: 'working-directory/change', data: { cwd: '/workspace' } },
+        workingDirectoryNotice('/old', '/workspace'),
+      ]
+      for (const event of setup) pushEvent(child.session, event)
+      world.children.push(child)
+      world.emitCreated(child, 'startup')
+      const later = [
+        delegationTask(ARGS.prompt, [
+          textBlock(`Your parent agent id is ${JSON.stringify(parent.id)}. Before you finish, send your result.`),
+        ]),
+        { type: 'turn/start', data: { turn: 1 } },
+        claimSplice(),
+        { type: 'model/selection', data: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
+        { type: 'session/title', data: { title: 'check things', messageSeqs: [], source: { kind: 'fallback' } } },
+        { type: 'plan/mode', data: { active: false } },
+        {
+          type: 'request/header',
+          data: {
+            header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
+            reason: 'initial',
+          },
+        },
+        { type: 'request/context', data: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
+      ]
+      for (const event of later) pushEvent(child.session, event)
+      world.agents = [...world.agents, child]
+      return { childId: child.id }
+    })
+    const child = await registeredTool(parent).execute({ ...ARGS, role: 'worker' }, execContext(parent))
+    const started = world.children[0]
+    if (started === undefined) throw new Error('no child')
+    expect(readRole(started.session)?.id).toBe('worker')
+    expect(eventsHaveParentTurns(started.session.snapshotEvents())).toBe(false)
+    expect(child).toMatchObject({ kind: 'activation' })
+  })
+
+  it('stops a fresh spawn role when the child log contains a parent message', async () => {
+    const { world, parent } = boot()
+    const activationDispose = vi.fn(async () => {})
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const id = spec.childId ?? 'spawned'
+      const child = world.newAgent(id, {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      world.children.push(child)
+      world.emitCreated(child, 'startup')
+      pushEvent(child.session, { type: 'user/message', data: { text: 'from the parent' } })
+      world.agents = [...world.agents, child]
+      return { childId: child.id, dispose: activationDispose }
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'worker' }, execContext(parent))).rejects.toThrow(
+      /already contains it/,
+    )
+    expect(activationDispose).toHaveBeenCalledTimes(1)
+    expect(world.children[0]?.cancel).toHaveBeenCalledWith({ kind: 'user' })
   })
 
   it('starts when the seed is empty', async () => {
