@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from '../src/host/readonly.ts'
 import type { SessionPort } from '../src/host/ports.ts'
-import { FORK_INHERIT_WARNING, normalizeSettings, type RoleDefinition } from '../src/shared/roles.ts'
+import {
+  FORK_INHERIT_WARNING,
+  forkInheritsHistory,
+  normalizeSettings,
+  type RoleDefinition,
+} from '../src/shared/roles.ts'
 
 const EXPLORER: RoleDefinition = {
   id: 'explorer',
@@ -75,7 +80,8 @@ describe('sandbox mode hold', () => {
 })
 
 describe('read-only tool gate', () => {
-  const deny = (name: string, args: unknown = {}) => readOnlyCallDenial(name, args, ROLES)
+  const deny = (name: string, args: unknown = {}, sandboxMode = 'read-only') =>
+    readOnlyCallDenial(name, args, ROLES, sandboxMode)
 
   it('allows sandbox reads and refuses file mutations and external writes', () => {
     expect(deny('bash')).toBeUndefined()
@@ -87,6 +93,16 @@ describe('read-only tool gate', () => {
     expect(deny('plugin_manager')).toMatch(/refused/)
     expect(deny('todo_write')).toMatch(/refused/)
     expect(deny('stagehand_act')).toMatch(/refused/)
+  })
+
+  it('refuses bash, pwsh, and run_code unless the sandbox is read-only', () => {
+    for (const name of ['bash', 'pwsh', 'run_code']) {
+      expect(deny(name)).toBeUndefined()
+      expect(deny(name, {}, 'workspace-write')).toMatch(/not read-only/)
+      expect(readOnlyCallDenial(name, {}, ROLES, undefined)).toMatch(/not read-only/)
+    }
+    expect(deny('read', {}, 'workspace-write')).toBeUndefined()
+    expect(deny('write', {}, 'read-only')).toMatch(/refused/)
   })
 
   it('stops MCP writes, allows MCP reads, and fails closed when the name is neither', () => {
@@ -128,7 +144,11 @@ describe('fork scope normalization', () => {
       ],
     })
     expect(full.settings.roles.find(role => role.id === 'fork')).toMatchObject({ forkScope: 'task' })
-    expect(full.settings.roles.find(role => role.id === 'wide')).toMatchObject({ forkScope: 'full' })
+    const wide = full.settings.roles.find(role => role.id === 'wide')
+    expect(wide).toMatchObject({ forkScope: 'task' })
+    expect(wide === undefined ? undefined : forkInheritsHistory(wide)).toBe(false)
+    expect(forkInheritsHistory({ ...FORK, forkScope: 'full' })).toBe(true)
+    expect(forkInheritsHistory({ ...FORK, forkScope: undefined })).toBe(true)
     expect(full.settings.roles.find(role => role.id === 'fresh')?.forkScope).toBeUndefined()
     expect(full.problems.map(problem => problem.code)).toEqual(['invalid-fork-scope', 'spawn-fork-scope-ignored'])
     expect(FORK_INHERIT_WARNING).toMatch(/untrusted data/)

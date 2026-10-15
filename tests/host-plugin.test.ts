@@ -1002,7 +1002,7 @@ describe('apply: child agents started by the tool', () => {
     expect(recordsOf(child.session, ROLES_RECORD)).toEqual([{ version: 1, settings: normalized(ROLES) }])
   })
 
-  it('does not apply a reservation unless the agent is created at startup', async () => {
+  it('applies a reservation when the agent is created with a source other than startup', async () => {
     const { world, delegate } = boot()
     world.subagents.startActivation.mockImplementation(async spec => {
       const childId = spec.childId ?? ''
@@ -1019,8 +1019,8 @@ describe('apply: child agents started by the tool', () => {
     const child = world.children[0]
     expect(child).toBeDefined()
     if (child === undefined) return
-    expect(typesOf(child.session)).toEqual([ROLES_RECORD])
-    expect(readRole(child.session)).toBeUndefined()
+    expect(typesOf(child.session)).toEqual(['sandbox/mode', ROLE_RECORD, ROLES_RECORD])
+    expect(readRole(child.session)).toMatchObject({ id: 'reviewer', readOnly: true })
   })
 
   function failingChildBoot(failOn: 'sandbox' | 'record') {

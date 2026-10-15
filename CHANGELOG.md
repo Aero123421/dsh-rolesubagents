@@ -4,7 +4,8 @@
 
 - Read-only roles re-pin `sandbox/mode` to `read-only` when a later change selects a wider mode.
 - Read-only agents refuse write-like MCP and plugin tools by public name. The README lists what that guard cannot see.
-- Fork roles warn that inherited tool results can carry prompt injection, and can pass only the task instead of the parent conversation.
+- Fork roles warn that inherited tool results can carry prompt injection, and can pass only the task instead of the parent conversation. An invalid fork scope is stored as task only. Fresh and task-only roles refuse a provider that copies the parent conversation.
+- Read-only agents refuse `bash`, `pwsh`, and `run_code` unless the latest sandbox mode is `read-only`.
 
 ## 0.1.0
 

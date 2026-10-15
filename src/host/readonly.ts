@@ -8,13 +8,16 @@
  * registered tool, so a hint cannot be consulted.
  */
 
-import type { RoleDefinition } from '../shared/roles.ts'
+import { forkInheritsHistory, type RoleDefinition } from '../shared/roles.ts'
 import type { SessionPort } from './ports.ts'
 
 /** How many times one hold will re-append `read-only` if a nested writer undoes it. */
 const REPIN_LIMIT = 8
 
 const repinDepth = new Map<string, number>()
+
+/** Shells that can change files. Allowed only while the latest sandbox mode is `read-only`. */
+const FILE_SHELLS: ReadonlySet<string> = new Set(['bash', 'pwsh', 'run_code'])
 
 /** Tools a read-only role may call. Shell and file reads stay; the sandbox denies their writes. */
 const ALLOWED_TOOLS: ReadonlySet<string> = new Set([
@@ -252,7 +255,7 @@ function delegateDenial(args: unknown, roles: readonly RoleDefinition[]): string
     )
   }
   if (!role.readOnly) return refuse('delegate', `role "${role.id}" is not read-only`)
-  if (role.context === 'fork' && role.forkScope !== 'task') {
+  if (forkInheritsHistory(role)) {
     return refuse('delegate', `role "${role.id}" would copy the parent conversation into the child`)
   }
   return undefined
@@ -263,10 +266,19 @@ function delegateDenial(args: unknown, roles: readonly RoleDefinition[]): string
  * @param name - the tool's public name.
  * @param args - the call's arguments (`delegate` is judged from them).
  * @param roles - the session's selectable roles, used only for `delegate`.
+ * @param sandboxMode - the session's latest sandbox mode. `bash`, `pwsh`, and `run_code` run only when it is `read-only`.
  * @returns a denial the model should see, or undefined to allow the call.
  */
-export function readOnlyCallDenial(name: string, args: unknown, roles: readonly RoleDefinition[]): string | undefined {
+export function readOnlyCallDenial(
+  name: string,
+  args: unknown,
+  roles: readonly RoleDefinition[],
+  sandboxMode?: string,
+): string | undefined {
   if (name === 'delegate') return delegateDenial(args, roles)
+  if (FILE_SHELLS.has(name) && sandboxMode !== 'read-only') {
+    return refuse(name, 'the file sandbox is not read-only, so this call could change files')
+  }
   if (ALLOWED_TOOLS.has(name)) return undefined
   if (DENIED_TOOLS.has(name) || name.startsWith('stagehand_')) {
     return refuse(name, 'it can change state outside the read-only file sandbox')

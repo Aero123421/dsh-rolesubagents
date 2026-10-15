@@ -22,7 +22,7 @@ import {
   selectableRoles,
 } from '../shared/roles.ts'
 import type { AgentPort, HostContext, SessionPort } from './ports.ts'
-import { holdReadOnly, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
+import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
 import { readRole, readRolesSnapshot, writeRole, writeRolesSnapshot } from './records.ts'
 import { buildTool, type PendingChild, TOOL_NAME } from './tool.ts'
 
@@ -143,7 +143,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     if (role?.readOnly === true) {
       readOnlySessions.add(agent.session)
       prepared.guard = agent.ctx.tools.guard(call =>
-        readOnlyCallDenial(call.name, call.arguments, selectableRoles(snapshot)),
+        readOnlyCallDenial(call.name, call.arguments, selectableRoles(snapshot), lastSandboxMode(agent.session)),
       )
     }
     installed.set(agent, prepared)
@@ -154,11 +154,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     holdReadOnly(agent.session)
   }
 
-  const onCreated = (agent: AgentPort, source: string): void => {
+  const onCreated = (agent: AgentPort): void => {
     const child = pending.get(agent.id)
-    if (child !== undefined && source === 'startup') {
+    if (child !== undefined) {
       // Pin the sandbox first: if it fails, the error escapes `guarded` and
       // aborts the child's creation instead of letting it run writable.
+      // The creation source does not matter; a reserved child is this plugin's.
       if (child.role.readOnly) pinReadOnly(agent)
       writeRole(agent.session, child.role)
       writeRolesSnapshot(agent.session, child.snapshot)
@@ -197,12 +198,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     },
   })
 
-  const guarded = (agent: AgentPort, source: string): void => {
+  const guarded = (agent: AgentPort, _source: string): void => {
     try {
-      onCreated(agent, source)
+      onCreated(agent)
     } catch (error) {
       // A read-only child must not start writable: abort its creation.
-      if (pending.get(agent.id)?.role.readOnly === true && source === 'startup') throw error
+      if (pending.get(agent.id)?.role.readOnly === true) throw error
       // Anything else only costs this Agent the tool; a throw would abort its creation.
       ctx.logger.warn(
         `rolesubagents: could not prepare agent ${agent.id}: ${error instanceof Error ? error.message : String(error)}`,

@@ -7,6 +7,7 @@ import {
   builtinRole,
   execContext,
   fakeAgent,
+  fakeProvider,
   fakeWorld,
   recordsOf,
   registeredTool,
@@ -97,6 +98,13 @@ describe('read-only sandbox stays pinned', () => {
     expect(world.logger.warn).toHaveBeenCalledWith(
       expect.stringContaining(`could not re-pin read-only on session ${child.session.id}`),
     )
+    const guard = child.guards[0]
+    if (guard === undefined) throw new Error('read-only child has no guard')
+    expect(guard({ name: 'bash', arguments: {} })).toMatch(/not read-only/)
+    expect(guard({ name: 'pwsh', arguments: {} })).toMatch(/not read-only/)
+    expect(guard({ name: 'run_code', arguments: {} })).toMatch(/not read-only/)
+    expect(guard({ name: 'write', arguments: {} })).toMatch(/refused/)
+    expect(guard({ name: 'read', arguments: {} })).toBeUndefined()
   })
 
   it('stops watching after the plugin is unloaded', async () => {
@@ -154,6 +162,61 @@ describe('fork inheritance warning and task scope', () => {
     ])
     expect(recordsOf(child.session, ROLE_RECORD)).toEqual([expect.objectContaining({ version: 1 })])
     expect(recordsOf(child.session, ROLES_RECORD).length).toBe(1)
+  })
+
+  it('applies a read-only role when creation is announced with a source other than startup', async () => {
+    const { world, parent } = boot()
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const childId = spec.childId ?? 'missing-child'
+      const child = world.newAgent(childId, {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: (spec.request.parent.session.header.delegationDepth ?? 0) + 1,
+      })
+      world.children.push(child)
+      world.emitCreated(child, 'compact')
+      return { childId }
+    })
+    const tool = registeredTool(parent)
+    await tool.execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+    const child = world.children.at(-1)
+    if (child === undefined) throw new Error('no child')
+    expect(modes(child.session).at(-1)).toEqual({ mode: 'read-only' })
+    expect(child.guards).toHaveLength(1)
+    expect(child.guards[0]?.({ name: 'write', arguments: {} })).toMatch(/refused/)
+  })
+
+  it('does not start a fresh role when its provider copies the parent conversation', async () => {
+    const { world, parent } = boot()
+    world.providers.set('spawn', fakeProvider('spawn', { inheritsParentContext: true }))
+    await expect(registeredTool(parent).execute(ARGS, execContext(parent))).rejects.toThrow(
+      /must not inherit the parent conversation/,
+    )
+    expect(world.subagents.startActivation).not.toHaveBeenCalled()
+  })
+
+  it('stores an invalid fork scope as task only and starts it on the fresh provider', async () => {
+    const world = fakeWorld()
+    apply(world.ctx, {
+      roles: [
+        ...ROLES,
+        {
+          id: 'wide',
+          enabled: true,
+          description: 'Wide.',
+          instructions: '',
+          context: 'fork',
+          forkScope: 'sideways',
+          readOnly: false,
+        },
+      ],
+    })
+    const parent = world.newAgent('parent')
+    world.emitCreated(parent)
+    await registeredTool(parent).execute({ ...ARGS, role: 'wide' }, execContext(parent))
+    expect(world.subagents.startActivation.mock.calls.at(-1)?.[0].provider).toBe('spawn')
+    expect(world.logger.warn).toHaveBeenCalledWith(expect.stringContaining('does not inherit the parent conversation'))
+    expect(world.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('prompt injection'))
   })
 
   it('starts a task-scoped fork without the parent log and without the injection warning', async () => {

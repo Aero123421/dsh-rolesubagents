@@ -175,6 +175,11 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       ) {
         throw new Error(`role "${role.id}": provider "${providerName}" cannot mount agent preset "${role.agentPreset}"`)
       }
+      if (!inheritsHistory && provider.inheritsParentContext === true) {
+        throw new Error(
+          `role "${role.id}" must not inherit the parent conversation, but provider "${providerName}" copies it`,
+        )
+      }
       const maxDepth = deps.ctx.subagents.resolveMaxDepth(undefined)
       const childId = randomUUID()
       deps.pending.set(childId, { role, snapshot })

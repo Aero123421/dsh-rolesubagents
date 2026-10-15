@@ -268,9 +268,9 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
           index,
           id,
           code: 'invalid-fork-scope',
-          message: `fork role "${id}" must inherit "full" or "task"; it inherits the full history`,
+          message: `fork role "${id}" must inherit "full" or "task"; it does not inherit the parent conversation`,
         })
-        role.forkScope = 'full'
+        role.forkScope = 'task'
       }
     } else if (raw.forkScope !== undefined && raw.forkScope !== null && raw.forkScope !== '') {
       problems.push({
@@ -403,11 +403,12 @@ export const FORK_RESULT_WARNING =
 
 /**
  * Whether a fork role copies the parent's completed turns.
+ * Omitted means `full`. Any other value, including an invalid one, does not.
  * @param role - the role to judge.
- * @returns true for a fork whose scope is not `task`.
+ * @returns true only for a fork whose scope is `full` or omitted.
  */
 export function forkInheritsHistory(role: RoleDefinition): boolean {
-  return role.context === 'fork' && role.forkScope !== 'task'
+  return role.context === 'fork' && (role.forkScope === 'full' || role.forkScope === undefined)
 }
 
 /** Note appended to a full-history fork role's line in the parent's tool description. */
