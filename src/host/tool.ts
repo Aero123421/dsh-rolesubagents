@@ -16,14 +16,7 @@ import {
   selectableRoles,
 } from '../shared/roles.ts'
 import type { AgentPort, ChildAgentOptions, HostContext } from './ports.ts'
-import {
-  eventsHaveParentTurns,
-  type FreshChildTask,
-  lastSandboxMode,
-  pinFailed,
-  readOnlyCallDenial,
-  sessionHasParentTurns,
-} from './readonly.ts'
+import { readOnlyCallDenial } from './readonly.ts'
 import { readRole } from './records.ts'
 
 export const TOOL_NAME = 'delegate'
@@ -32,36 +25,6 @@ export const TOOL_NAME = 'delegate'
 export interface PendingChild {
   readonly role: RoleDefinition
   readonly snapshot: RoleSettings
-  /** Parent session the reservation belongs to. Dispose of that parent drops it. */
-  readonly parentSessionId: string
-  /** Prompt this call submitted. A non-inheriting child must echo it and nothing else. */
-  readonly task: FreshChildTask
-}
-
-/**
- * Drop one reservation, whichever id it is filed under.
- * @param pending - the table shared with `agent/created`.
- * @param child - the reservation object.
- */
-export function discardReservation(pending: Map<string, PendingChild>, child: PendingChild): void {
-  for (const [id, entry] of pending) {
-    if (entry === child) pending.delete(id)
-  }
-}
-
-/** Drop every reservation. Used when the plugin unloads. */
-export function discardPending(pending: Map<string, PendingChild>): void {
-  for (const child of new Set(pending.values())) discardReservation(pending, child)
-}
-
-/** Drop reservations owned by a disposed parent or child. */
-export function discardReservationsFor(pending: Map<string, PendingChild>, agent: AgentPort): void {
-  const ids = new Set([agent.id, agent.session.id])
-  const drop: PendingChild[] = []
-  for (const [id, child] of pending) {
-    if (ids.has(id) || ids.has(child.parentSessionId)) drop.push(child)
-  }
-  for (const child of new Set(drop)) discardReservation(pending, child)
 }
 
 export interface ToolDeps {
@@ -70,56 +33,6 @@ export interface ToolDeps {
   readonly forkProvider: string
   /** Children started by this tool and not yet created, by reserved child id. */
   readonly pending: Map<string, PendingChild>
-  /**
-   * Apply a reservation the provider already published under `id`.
-   * Throws when that child must not keep running.
-   */
-  claimStarted?(id: string): void
-  /**
-   * Track one activation so a child announced under an unexpected id can be
-   * held shut until the call returns, then bound or stopped.
-   */
-  activation?: {
-    begin(flight: { parent: AgentPort; reservedId: string; role: RoleDefinition; snapshot: RoleSettings }): void
-    finish(reservedId: string, returnedId: string | undefined): Promise<void>
-  }
-}
-
-function findAgent(ctx: HostContext, id: string): AgentPort | undefined {
-  return ctx.agents.list().find(candidate => candidate.id === id || candidate.session.id === id)
-}
-
-/** Stop a child that must not keep running. Failures are logged; the caller still throws its own error. */
-export async function stopRunningChild(
-  ctx: HostContext,
-  started: { childId: string; dispose?: () => Promise<void> | void },
-  agent: AgentPort | undefined,
-): Promise<void> {
-  const warn = (action: string, error: unknown): void => {
-    const detail = error instanceof Error ? error.message : String(error)
-    ctx.logger.warn(`rolesubagents: could not ${action} child ${started.childId}: ${detail}`)
-  }
-  if (agent?.cancel !== undefined) {
-    try {
-      agent.cancel({ kind: 'user' })
-    } catch (error) {
-      warn('cancel', error)
-    }
-  }
-  if (agent?.dispose !== undefined) {
-    try {
-      await agent.dispose()
-    } catch (error) {
-      warn('dispose', error)
-    }
-  }
-  if (started.dispose !== undefined) {
-    try {
-      await started.dispose()
-    } catch (error) {
-      warn('stop', error)
-    }
-  }
 }
 
 /**
@@ -133,7 +46,7 @@ export function toolDescription(roles: readonly RoleDefinition[]): string {
     'Delegate a task to a subagent: a separate agent that works in its own context and returns its result, not its intermediate steps. Pick the role that fits the task:',
     ...roles.map(roleListLine),
     general ? 'Omit `role` to use `general`.' : 'A `role` is required.',
-    'The subagent starts in the background and this tool immediately returns its id; the runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes. A read-only agent may call `send_message` or `interrupt_agent` only when every destination id names a read-only agent whose sandbox is still read-only, so it cannot ask a writable agent to make a change. Start independent delegations together in one assistant message and keep working while they run. When only waiting remains, end your turn instead of sleeping or polling; the next result starts a new turn.',
+    'The subagent starts in the background and this tool immediately returns its id; the runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes. Start independent delegations together in one assistant message and keep working while they run. When only waiting remains, end your turn instead of sleeping or polling; the next result starts a new turn.',
   ].join('\n')
 }
 
@@ -229,13 +142,8 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const parent = (exec as { agent?: AgentPort }).agent
       if (parent === undefined) throw new Error('subagent tool requires a calling agent')
       const role = resolveRole(roles, args.role)
-      if (readRole(parent.session)?.readOnly === true || pinFailed(parent.session)) {
-        const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles, {
-          mode: lastSandboxMode(parent.session),
-          pinFailed: pinFailed(parent.session),
-          // `delegate` is judged from the role list; its own registration is this plugin's.
-          origin: 'inherited',
-        })
+      if (readRole(parent.session)?.readOnly === true) {
+        const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles)
         if (denial !== undefined) throw new Error(denial)
       }
       const inheritsHistory = forkInheritsHistory(role)
@@ -247,11 +155,6 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const providerName = inheritsHistory ? deps.forkProvider : deps.spawnProvider
       const provider = deps.ctx.subagents.getProvider(providerName)
       if (provider === undefined) throw new Error(`subagent provider "${providerName}" is not available`)
-      const copiesParent = () =>
-        new Error(
-          `role "${role.id}" must not inherit the parent conversation, but provider "${providerName}" copies it`,
-        )
-      if (!inheritsHistory && provider.inheritsParentContext !== false) throw copiesParent()
       const agentOptions: ChildAgentOptions | undefined =
         role.model === undefined
           ? undefined
@@ -274,33 +177,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       }
       const maxDepth = deps.ctx.subagents.resolveMaxDepth(undefined)
       const childId = randomUUID()
-      const task: FreshChildTask = {
-        prompt: [{ type: 'text', text: typeof args.prompt === 'string' ? args.prompt : '' }],
-        parentId: parent.id,
-        delivery: 'parent',
-        description: typeof args.description === 'string' ? args.description : '',
-      }
-      if (!inheritsHistory && provider.prepareContinuable !== undefined) {
-        let prepared: { seed?: readonly unknown[] } | undefined
-        try {
-          prepared = await provider.prepareContinuable({ parent, sessionId: childId, signal: exec.signal })
-        } catch {
-          throw copiesParent()
-        }
-        const seed = prepared?.seed
-        if ((seed !== undefined && !Array.isArray(seed)) || eventsHaveParentTurns(seed ?? [], task))
-          throw copiesParent()
-      }
-      let activeId: string = childId
-      let returnedId: string | undefined
-      let settled = false
-      deps.pending.set(childId, { role, snapshot, parentSessionId: parent.session.id, task })
-      const settle = async (): Promise<void> => {
-        if (settled) return
-        settled = true
-        await deps.activation?.finish(childId, returnedId)
-      }
-      deps.activation?.begin({ parent, reservedId: childId, role, snapshot })
+      deps.pending.set(childId, { role, snapshot })
       try {
         const started = await deps.ctx.subagents.startActivation({
           provider: providerName,
@@ -317,68 +194,9 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           signal: exec.signal,
           delivery: 'parent',
         })
-        // A provider may publish the child under a different id than the one reserved.
-        // Rebind before claiming, so `agent/created` that already fired still gets the role.
-        if (started.childId !== childId && deps.pending.has(childId)) {
-          const kept = deps.pending.get(childId)
-          deps.pending.delete(childId)
-          if (kept !== undefined) {
-            deps.pending.set(started.childId, kept)
-            activeId = started.childId
-          }
-        }
-        returnedId = started.childId
-        // Settle while the activation is still open, so a child announced
-        // during that wait is still attached to it. Claiming afterwards
-        // covers an id that was not visible yet.
-        const pendingBeforeFinish = deps.pending.has(activeId)
-        try {
-          await settle()
-        } catch (error) {
-          await stopRunningChild(deps.ctx, started, findAgent(deps.ctx, activeId) ?? findAgent(deps.ctx, childId))
-          throw error
-        }
-        let bound = pendingBeforeFinish && !deps.pending.has(activeId)
-        try {
-          if (deps.pending.has(activeId)) {
-            deps.claimStarted?.(activeId)
-            bound = !deps.pending.has(activeId)
-          }
-        } catch (error) {
-          await stopRunningChild(deps.ctx, started, findAgent(deps.ctx, activeId) ?? findAgent(deps.ctx, childId))
-          throw error
-        }
-        const agent = findAgent(deps.ctx, returnedId) ?? findAgent(deps.ctx, childId)
-        const sessions = deps.ctx.get('sessions')
-        const session = agent?.session ?? sessions?.get(returnedId) ?? sessions?.get(childId)
-        // Bound means this call's reservation was applied to the id activation returned.
-        // A different id that is still unbound, with no agent and no session, fails closed.
-        if (!bound && returnedId !== childId && agent === undefined && session === undefined) {
-          await stopRunningChild(deps.ctx, started, undefined)
-          throw new Error(`role "${role.id}" could not be matched to the started child "${returnedId}"`)
-        }
-        if (!inheritsHistory) {
-          let leaked = false
-          if (session !== undefined) {
-            try {
-              leaked = sessionHasParentTurns(session, task)
-            } catch {
-              leaked = true
-            }
-          }
-          if (leaked) {
-            await stopRunningChild(deps.ctx, started, agent)
-            throw new Error(
-              `role "${role.id}" must not inherit the parent conversation, but the child session already contains it`,
-            )
-          }
-        }
-        return { kind: 'activation' as const, subagentId: returnedId }
-      } catch (error) {
-        await settle()
-        const child = deps.pending.get(childId) ?? deps.pending.get(activeId)
-        if (child !== undefined) discardReservation(deps.pending, child)
-        throw error
+        return { kind: 'activation' as const, subagentId: started.childId }
+      } finally {
+        deps.pending.delete(childId)
       }
     },
   }) as ToolDefinition

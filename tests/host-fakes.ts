@@ -7,7 +7,6 @@
 
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { type Mock, vi } from 'vitest'
-import { ALLOWED_TOOLS, COORDINATION_TOOLS } from '../src/host/readonly.ts'
 import type {
   AgentPort,
   HostContext,
@@ -151,25 +150,6 @@ export async function toolsModule() {
 // ---------------------------------------------------------------------------------------------------------------
 // Agents
 
-/**
- * Definitions shared by the host registry and every agent that has not shadowed them.
- * An allowlisted name resolves to one of these objects unless a test replaces it.
- */
-export const inheritedTools = new Map<string, ToolDefinition>()
-
-for (const name of [...ALLOWED_TOOLS, ...COORDINATION_TOOLS]) {
-  inheritedTools.set(name, { name } as ToolDefinition)
-}
-
-/** Publish one definition as the inherited host tool of `name`. */
-export function shareInheritedTool(
-  name: string,
-  definition: ToolDefinition = { name } as ToolDefinition,
-): ToolDefinition {
-  inheritedTools.set(name, definition)
-  return definition
-}
-
 /** An Agent whose scoped tool registry records what is registered and hands out spy disposers. */
 export interface FakeAgent extends AgentPort {
   readonly session: FakeSession
@@ -179,10 +159,6 @@ export interface FakeAgent extends AgentPort {
   /** Guards registered in this Agent's scope, in registration order. */
   readonly guards: ((call: ToolGuardCall) => string | undefined)[]
   readonly guardDisposers: Mock<() => void>[]
-  /** Tools this agent registered over the inherited host tools. */
-  readonly shadows: Map<string, ToolDefinition>
-  readonly cancel: Mock<(cause: { readonly kind: 'user' }) => void>
-  readonly dispose: Mock<() => Promise<void>>
 }
 
 export function fakeAgent(id: string, session: FakeSession = fakeSession(`session-${id}`)): FakeAgent {
@@ -190,6 +166,12 @@ export function fakeAgent(id: string, session: FakeSession = fakeSession(`sessio
   const disposers: Mock<() => void>[] = []
   const guards: ((call: ToolGuardCall) => string | undefined)[] = []
   const guardDisposers: Mock<() => void>[] = []
+  const register = vi.fn((definition: ToolDefinition) => {
+    registered.push(definition)
+    const dispose = vi.fn<() => void>()
+    disposers.push(dispose)
+    return dispose
+  })
   const guard = vi.fn((check: (call: ToolGuardCall) => string | undefined) => {
     guards.push(check)
     const dispose = vi.fn<() => void>(() => {
@@ -199,31 +181,7 @@ export function fakeAgent(id: string, session: FakeSession = fakeSession(`sessio
     guardDisposers.push(dispose)
     return dispose
   })
-  const shadows = new Map<string, ToolDefinition>()
-  const registeredByName = new Map<string, ToolDefinition>()
-  const register = vi.fn((definition: ToolDefinition) => {
-    registered.push(definition)
-    registeredByName.set(definition.name, definition)
-    const dispose = vi.fn<() => void>()
-    disposers.push(dispose)
-    return dispose
-  })
-  const get = (name: string) => shadows.get(name) ?? registeredByName.get(name) ?? inheritedTools.get(name)
-  const cancel = vi.fn<(cause: { readonly kind: 'user' }) => void>()
-  const dispose = vi.fn<() => Promise<void>>(async () => {})
-  return {
-    id,
-    session,
-    registered,
-    disposers,
-    register,
-    guards,
-    guardDisposers,
-    shadows,
-    cancel,
-    dispose,
-    ctx: { tools: { register, guard, get } },
-  }
+  return { id, session, registered, disposers, register, guards, guardDisposers, ctx: { tools: { register, guard } } }
 }
 
 /** The tool an Agent had registered; fails the test when it has none. */
@@ -257,7 +215,7 @@ type RuntimeContext = Parameters<SystemPromptPort['context']>[0]
 type CreatedPayload = { agent: AgentPort; source: string }
 type DisposedPayload = { agent: AgentPort }
 type SessionListener = (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void
-type SessionsService = { get(id: string): SessionPort | undefined; list(): readonly SessionPort[] }
+type SessionsService = { get(id: string): SessionPort | undefined }
 
 export interface FakeWorld {
   readonly ctx: HostContext
@@ -285,8 +243,6 @@ export interface FakeWorld {
   emitDisposed(agent: AgentPort): void
   /** Append a sandbox mode and publish it on `session/event`, as a live Session does. */
   emitSandbox(session: FakeSession, mode: string): void
-  /** Append one event and publish it on `session/event`, as a live Session does. */
-  emitSession(session: FakeSession, type: string, data: unknown): void
   /** The text the plugin's runtime-context provider contributes for an Agent (or for none). */
   runtimeContext(agent?: AgentPort): string
   /** Run the plugin's `ctx.effect` cleanups, as the Host does when the plugin is unloaded. */
@@ -313,7 +269,7 @@ export function fakeWorld(): FakeWorld {
   const logger = { info: vi.fn<LoggerPort['info']>(), warn: vi.fn<LoggerPort['warn']>() }
   const services: FakeWorld['services'] = {
     llm: { resolveCallConfig: vi.fn<LlmPort['resolveCallConfig']>(async () => ({})) },
-    sessions: { get: id => sessions.get(id), list: () => [...sessions.values()] },
+    sessions: { get: id => sessions.get(id) },
   }
   const contexts: RuntimeContext[] = []
 
@@ -354,12 +310,8 @@ export function fakeWorld(): FakeWorld {
     },
     emitSandbox(session, mode) {
       session.append('sandbox/mode', { mode })
-      for (const listener of sessionEvents) listener(session, { type: 'sandbox/mode', data: { mode } })
-    },
-    emitSession(session, type, data) {
-      const stored: unknown = JSON.parse(JSON.stringify(data))
-      session.log.push({ type, seq: session.log.length, time: 0, data: stored })
-      for (const listener of sessionEvents) listener(session, { type, data: stored })
+      const event = { type: 'sandbox/mode', data: { mode } }
+      for (const listener of sessionEvents) listener(session, event)
     },
     runtimeContext(agent) {
       const context = contexts.find(entry => entry.name === 'rolesubagents:role')
@@ -398,7 +350,6 @@ export function fakeWorld(): FakeWorld {
   }
 
   const ctx: HostContext = {
-    tools: { get: name => inheritedTools.get(name) },
     subagents: world.subagents,
     systemPrompt: {
       context(context) {

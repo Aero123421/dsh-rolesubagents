@@ -55,10 +55,10 @@ describe('read-only sandbox stays pinned', () => {
     expect(modes(child.session)).toEqual([{ mode: 'read-only' }])
     world.emitSandbox(child.session, 'workspace-write')
     world.emitSandbox(child.session, 'danger-full-access')
-    await Promise.resolve()
     expect(modes(child.session)).toEqual([
       { mode: 'read-only' },
       { mode: 'workspace-write' },
+      { mode: 'read-only' },
       { mode: 'danger-full-access' },
       { mode: 'read-only' },
     ])
@@ -69,7 +69,6 @@ describe('read-only sandbox stays pinned', () => {
     const child = await delegate('worker')
     world.emitSandbox(child.session, 'workspace-write')
     world.emitSandbox(parent.session, 'danger-full-access')
-    await Promise.resolve()
     expect(modes(child.session)).toEqual([{ mode: 'workspace-write' }])
     expect(modes(parent.session)).toEqual([{ mode: 'danger-full-access' }])
   })
@@ -95,7 +94,6 @@ describe('read-only sandbox stays pinned', () => {
       return original(type, data)
     }
     world.emitSandbox(child.session, 'workspace-write')
-    await Promise.resolve()
     expect(world.logger.warn).toHaveBeenCalledWith(
       expect.stringContaining(`could not re-pin read-only on session ${child.session.id}`),
     )
@@ -104,24 +102,21 @@ describe('read-only sandbox stays pinned', () => {
   it('stops watching after the plugin is unloaded', async () => {
     const { world, delegate } = boot()
     const child = await delegate('reviewer')
-    world.emitSandbox(child.session, 'workspace-write')
     world.teardown()
-    await Promise.resolve()
+    world.emitSandbox(child.session, 'workspace-write')
     expect(modes(child.session).at(-1)).toEqual({ mode: 'workspace-write' })
   })
 })
 
 describe('read-only tool guard', () => {
-  it('refuses MCP and plugin tools that are not allowlisted, and still allows known reads', async () => {
+  it('refuses MCP and plugin writes and still allows reads and a read-only child', async () => {
     const { delegate } = boot()
     const child = await delegate('reviewer')
     const guard = child.guards[0]
     if (guard === undefined) throw new Error('read-only child has no guard')
     expect(guard({ name: 'mcp__fs__write_file', arguments: {} })).toMatch(/refused/)
-    expect(guard({ name: 'mcp__fs__read_file', arguments: {} })).toMatch(/refused/)
+    expect(guard({ name: 'mcp__fs__read_file', arguments: {} })).toBeUndefined()
     expect(guard({ name: 'plugin_manager', arguments: {} })).toMatch(/refused/)
-    expect(guard({ name: 'read', arguments: {} })).toBeUndefined()
-    expect(guard({ name: 'web_fetch', arguments: {} })).toBeUndefined()
     expect(guard({ name: 'bash', arguments: {} })).toBeUndefined()
     expect(guard({ name: 'delegate', arguments: { role: 'worker' } })).toMatch(/not read-only/)
     expect(guard({ name: 'delegate', arguments: { role: 'explorer' } })).toBeUndefined()
@@ -131,14 +126,10 @@ describe('read-only tool guard', () => {
     expect(child.guardDisposers[0]).not.toHaveBeenCalled()
   })
 
-  it('guards a writable child only against parent history', async () => {
+  it('does not install a guard on a writable child', async () => {
     const { parent, delegate } = boot()
     const child = await delegate('worker')
-    expect(child.guards).toHaveLength(1)
-    const guard = child.guards[0]
-    if (guard === undefined) throw new Error('writable child has no history guard')
-    expect(guard({ name: 'bash', arguments: {} })).toBeUndefined()
-    expect(guard({ name: 'write', arguments: {} })).toBeUndefined()
+    expect(child.guards).toEqual([])
     expect(parent.guards).toEqual([])
   })
 

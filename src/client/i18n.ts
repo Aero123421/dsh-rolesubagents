@@ -125,8 +125,7 @@ const en = {
   'issue.forkModel': 'Fork role "{id}" always uses the parent\'s model.',
   'issue.preset': 'The agent preset of "{id}" is not a valid ID.',
   'issue.forkPreset': 'Fork role "{id}" cannot use an agent preset.',
-  'issue.forkScope':
-    'Fork role "{id}" must inherit either all completed turns or the task only. It is switched off and does not inherit history.',
+  'issue.forkScope': 'Fork role "{id}" must inherit either all completed turns or the task only.',
   'issue.spawnForkScope': 'Role "{id}" is not a fork, so its inherited-context option is removed.',
   'issue.builtin': 'The built-in roles general and fork must stay in the list, once each, with their fixed context.',
 } as const
@@ -248,8 +247,7 @@ const ja: Record<Key, string> = {
   'issue.forkModel': 'フォークのロール「{id}」は常に親のモデルを使います。',
   'issue.preset': '「{id}」のエージェントプリセットIDが正しくありません。',
   'issue.forkPreset': 'フォークのロール「{id}」ではエージェントプリセットを使えません。',
-  'issue.forkScope':
-    'フォークのロール「{id}」が引き継げるのは、完了済みのやり取り全部か、タスクだけか、どちらかです。このロールはオフになり、履歴は引き継ぎません。',
+  'issue.forkScope': 'フォークのロール「{id}」が引き継げるのは、完了済みのやり取り全部か、タスクだけか、どちらかです。',
   'issue.spawnForkScope': 'ロール「{id}」はフォークではないので、引き継ぐ文脈の指定は外します。',
   'issue.builtin': '組み込みロール general と fork は、固定のコンテキストで1つずつ残す必要があります。',
 }
