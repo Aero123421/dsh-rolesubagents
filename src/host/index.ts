@@ -13,6 +13,7 @@
  * the child's system prompt and tools stay identical to its parent's.
  */
 
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import {
   DEFAULT_ROLES,
@@ -30,12 +31,13 @@ import {
   markPinFailed,
   pinFailed,
   readOnlyCallDenial,
+  releasePinFailure,
   sandboxModeOf,
   sessionHasParentTurns,
   toolOrigin,
 } from './readonly.ts'
 import { readRole, readRolesSnapshot, writeRole, writeRolesSnapshot } from './records.ts'
-import { buildTool, type PendingChild, TOOL_NAME } from './tool.ts'
+import { buildTool, discardPending, discardReservation, type PendingChild, TOOL_NAME } from './tool.ts'
 
 export const name = 'dsh-rolesubagents'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'agents']
@@ -83,6 +85,50 @@ interface SessionState {
 interface Prepared {
   tool?: () => void
   guard?: () => void
+  /** The `delegate` definition this plugin registered, when the role list has one. */
+  delegate?: ToolDefinition
+}
+
+/** Argument names that choose an agent. Message text is not one of them. */
+const DESTINATION_KEYS: ReadonlySet<string> = new Set([
+  'agent_id',
+  'agentId',
+  'session_id',
+  'sessionId',
+  'target',
+  'target_id',
+  'targetId',
+  'target_agent_id',
+  'targetAgentId',
+  'to',
+  'recipient',
+  'parent_id',
+  'parentId',
+])
+
+function collectDestinationIds(value: unknown, into: string[], depth: number): void {
+  if (depth > 6 || value === null || typeof value !== 'object') return
+  if (Array.isArray(value)) {
+    for (const item of value) collectDestinationIds(item, into, depth + 1)
+    return
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (DESTINATION_KEYS.has(key)) pushDestination(child, into, depth)
+    else if (typeof child === 'object' && child !== null) collectDestinationIds(child, into, depth + 1)
+  }
+}
+
+function pushDestination(value: unknown, into: string[], depth: number): void {
+  if (typeof value === 'string') {
+    if (value !== '') into.push(value)
+    return
+  }
+  if (depth > 6) return
+  if (Array.isArray(value)) {
+    for (const item of value) pushDestination(item, into, depth + 1)
+    return
+  }
+  if (typeof value === 'object' && value !== null) collectDestinationIds(value, into, depth + 1)
 }
 
 export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
@@ -91,6 +137,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   const pending = new Map<string, PendingChild>()
   const installed = new Map<AgentPort, Prepared>()
   const sessions = new Map<string, SessionState>()
+  /** Agents already announced, so a reservation can be bound to an id that was not the one reserved. */
+  const seenAgents = new Map<string, AgentPort>()
+  let claimStarted: (id: string) => void = () => {}
   /** Sessions whose live role is read-only, including the moment before the role record is written. */
   const readOnlySessions = new WeakSet<SessionPort>()
   let lastProblems = ''
@@ -100,12 +149,6 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   let alive = true
   /** Session ids whose re-pin is already queued. DSH rejects an append from inside `session/event`. */
   const repinScheduled = new Set<string>()
-
-  const agentIdOf = (args: unknown): string => {
-    if (typeof args !== 'object' || args === null || !('agent_id' in args)) return ''
-    const id = args.agent_id
-    return typeof id === 'string' ? id : ''
-  }
 
   const currentSettings = (): RoleSettings => {
     const { settings, problems } = normalizeSettings({
@@ -182,37 +225,76 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     return undefined
   }
 
-  const destinationReadOnly = (agentId: string): boolean => {
-    const listed = ctx.agents.list().find(candidate => candidate.id === agentId || candidate.session.id === agentId)
-    const session = ctx.get('sessions')?.get(agentId) ?? listed?.session
-    if (session === undefined) return false
-    if (readOnlySessions.has(session)) return true
-    return readRole(session)?.readOnly === true
+  const sessionOf = (agentId: string): SessionPort | undefined => {
+    const listed =
+      ctx.agents.list().find(candidate => candidate.id === agentId || candidate.session.id === agentId) ??
+      seenAgents.get(agentId)
+    return ctx.get('sessions')?.get(agentId) ?? listed?.session
+  }
+
+  /**
+   * A destination is read-only only when its live mode is `read-only`, the pin
+   * has not failed, and the role mark agrees. A broken log is not read-only.
+   */
+  const sessionIsReadOnly = (session: SessionPort): boolean => {
+    try {
+      if (pinFailed(session)) return false
+      if (lastSandboxMode(session) !== 'read-only') return false
+      if (readOnlySessions.has(session)) return true
+      return readRole(session)?.readOnly === true
+    } catch {
+      return false
+    }
+  }
+
+  const destinationsAreReadOnly = (args: unknown): boolean => {
+    const ids: string[] = []
+    collectDestinationIds(args, ids, 0)
+    if (ids.length === 0) return false
+    return ids.every(id => {
+      const session = sessionOf(id)
+      return session !== undefined && sessionIsReadOnly(session)
+    })
   }
 
   const install = (agent: AgentPort, snapshot: RoleSettings, forceGuard = false): void => {
-    if (installed.has(agent)) return
-    const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending })
-    const prepared: Prepared = {}
-    if (definition !== undefined) {
-      prepared.tool = agent.ctx.tools.register(definition)
-      stateOf(agent.session.id).toolInstalled = true
+    let prepared = installed.get(agent)
+    if (prepared === undefined) {
+      const definition = buildTool(snapshot, {
+        ctx,
+        spawnProvider,
+        forkProvider,
+        pending,
+        claimStarted: id => claimStarted(id),
+      })
+      prepared = { delegate: definition }
+      if (definition !== undefined) {
+        prepared.tool = agent.ctx.tools.register(definition)
+        stateOf(agent.session.id).toolInstalled = true
+      }
+      installed.set(agent, prepared)
     }
     const role = roleOf(agent)
-    if (forceGuard || role?.readOnly === true) {
+    if ((forceGuard || role?.readOnly === true) && prepared.guard === undefined) {
       readOnlySessions.add(agent.session)
       const roles = selectableRoles(snapshot)
+      const delegateDefinition = prepared.delegate
       prepared.guard = agent.ctx.tools.guard(call => {
         const visible = lookup(agent.ctx.tools, call.name, agent)
+        const origin =
+          call.name === TOOL_NAME
+            ? visible !== undefined && delegateDefinition !== undefined && visible === delegateDefinition
+              ? 'inherited'
+              : 'shadow'
+            : toolOrigin(call.name, visible, inheritedTool(agent, call.name))
         return readOnlyCallDenial(call.name, call.arguments, roles, {
           mode: lastSandboxMode(agent.session),
           pinFailed: pinFailed(agent.session),
-          origin: toolOrigin(call.name, visible, inheritedTool(agent, call.name)),
-          destinationReadOnly: destinationReadOnly(agentIdOf(call.arguments)),
+          origin,
+          destinationReadOnly: destinationsAreReadOnly(call.arguments),
         })
       })
     }
-    installed.set(agent, prepared)
   }
 
   const pinReadOnly = (agent: AgentPort): void => {
@@ -251,20 +333,27 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     writeRolesSnapshot(agent.session, child.snapshot)
   }
 
+  claimStarted = (id: string): void => {
+    const child = pending.get(id)
+    if (child === undefined) return
+    const listed = ctx.agents.list().find(candidate => candidate.id === id || candidate.session.id === id)
+    const agent = listed ?? seenAgents.get(id)
+    if (agent === undefined) return
+    discardReservation(pending, child)
+    applyChild(agent, child)
+  }
+
   const onCreated = (agent: AgentPort, _source: string): void => {
-    const child = pending.get(agent.id)
+    seenAgents.set(agent.id, agent)
+    seenAgents.set(agent.session.id, agent)
+    const child = pending.get(agent.id) ?? pending.get(agent.session.id)
     if (child !== undefined) {
-      pending.delete(agent.id)
+      discardReservation(pending, child)
       applyChild(agent, child)
       return
     }
-    // A delegated child with no reservation and no role record is not a known writable role.
-    if (isDelegatedChild(agent) && readRole(agent.session) === undefined && roleOf(agent) === undefined) {
-      readOnlySessions.add(agent.session)
-      install(agent, snapshotFor(agent), true)
-      pinReadOnly(agent)
-      return
-    }
+    // No reservation and no role record: this child was not started here.
+    // Official subagents, teams, and other plugins keep their own sandbox.
     const snapshot = snapshotFor(agent)
     install(agent, snapshot)
     if (roleOf(agent)?.readOnly === true) pinReadOnly(agent)
@@ -321,9 +410,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
 
   const stopCreated = ctx.on('agent/created', ({ agent, source }) => guarded(agent, source))
   const stopDisposed = ctx.on('agent/disposed', ({ agent }) => {
+    releasePinFailure(agent.session)
     disposePrepared(installed.get(agent))
     installed.delete(agent)
     sessions.delete(agent.session.id)
+    seenAgents.delete(agent.id)
+    seenAgents.delete(agent.session.id)
   })
   const stopSession = ctx.on('session/event', (session, event) => {
     if (event.type !== 'sandbox/mode' || sandboxModeOf(event.data) === 'read-only') return
@@ -360,10 +452,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       unsubscribe(stopCreated)
       unsubscribe(stopDisposed)
       unsubscribe(stopSession)
+      for (const agent of installed.keys()) releasePinFailure(agent.session)
       for (const prepared of installed.values()) disposePrepared(prepared)
       installed.clear()
       sessions.clear()
-      pending.clear()
+      seenAgents.clear()
+      discardPending(pending)
     },
     'rolesubagents: scoped tools',
   )

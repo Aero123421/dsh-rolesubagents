@@ -4,8 +4,10 @@
 
 - Read-only roles re-pin `sandbox/mode` to `read-only` when a later change selects a wider mode. A failed re-pin refuses every tool, and a failed pin on startup or resume aborts that startup.
 - Read-only agents allow only a fixed list of inherited host tools, and only while the live mode is `read-only`. `query` or `fetch` in a name is not enough. `send_message` and `interrupt_agent` reach only a read-only destination. The README lists what that guard cannot see.
-- A child started by `delegate` receives its role whichever `agent/created` source arrives. A delegated child with no role is pinned read-only.
-- Fork roles warn that inherited tool results can carry prompt injection. Task only refuses a provider that copies the parent conversation. An invalid fork scope switches that role off.
+- A child started by `delegate` receives its role whichever `agent/created` source arrives. Official subagents, teams, and other plugins' children are not pinned. A returned id is bound to the reservation, or the child is stopped when it cannot be matched. Reservations expire after 30 seconds. A failed pin is cleared when the agent is disposed or the plugin unloads.
+- `send_message` and `interrupt_agent` require every destination id, not only `agent_id`, to name a live read-only agent. `delegate` must be the registration this plugin installed.
+- Fork roles warn that inherited tool results can carry prompt injection. Task only refuses a provider that copies the parent conversation, including a `prepareContinuable` seed that already contains a turn, and stops the child when parent history is found after start. An invalid fork scope switches that role off.
+- `bash`, `pwsh`, `run_code`, `web_fetch`, and `terminal_read` stay allowlisted only while the sandbox mode is `read-only`.
 
 ## 0.1.0
 

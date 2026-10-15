@@ -181,6 +181,8 @@ export interface FakeAgent extends AgentPort {
   readonly guardDisposers: Mock<() => void>[]
   /** Tools this agent registered over the inherited host tools. */
   readonly shadows: Map<string, ToolDefinition>
+  readonly cancel: Mock<(cause: { readonly kind: 'user' }) => void>
+  readonly dispose: Mock<() => Promise<void>>
 }
 
 export function fakeAgent(id: string, session: FakeSession = fakeSession(`session-${id}`)): FakeAgent {
@@ -188,12 +190,6 @@ export function fakeAgent(id: string, session: FakeSession = fakeSession(`sessio
   const disposers: Mock<() => void>[] = []
   const guards: ((call: ToolGuardCall) => string | undefined)[] = []
   const guardDisposers: Mock<() => void>[] = []
-  const register = vi.fn((definition: ToolDefinition) => {
-    registered.push(definition)
-    const dispose = vi.fn<() => void>()
-    disposers.push(dispose)
-    return dispose
-  })
   const guard = vi.fn((check: (call: ToolGuardCall) => string | undefined) => {
     guards.push(check)
     const dispose = vi.fn<() => void>(() => {
@@ -204,7 +200,17 @@ export function fakeAgent(id: string, session: FakeSession = fakeSession(`sessio
     return dispose
   })
   const shadows = new Map<string, ToolDefinition>()
-  const get = (name: string) => shadows.get(name) ?? inheritedTools.get(name)
+  const registeredByName = new Map<string, ToolDefinition>()
+  const register = vi.fn((definition: ToolDefinition) => {
+    registered.push(definition)
+    registeredByName.set(definition.name, definition)
+    const dispose = vi.fn<() => void>()
+    disposers.push(dispose)
+    return dispose
+  })
+  const get = (name: string) => shadows.get(name) ?? registeredByName.get(name) ?? inheritedTools.get(name)
+  const cancel = vi.fn<(cause: { readonly kind: 'user' }) => void>()
+  const dispose = vi.fn<() => Promise<void>>(async () => {})
   return {
     id,
     session,
@@ -214,6 +220,8 @@ export function fakeAgent(id: string, session: FakeSession = fakeSession(`sessio
     guards,
     guardDisposers,
     shadows,
+    cancel,
+    dispose,
     ctx: { tools: { register, guard, get } },
   }
 }

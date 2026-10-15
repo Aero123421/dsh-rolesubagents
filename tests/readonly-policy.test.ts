@@ -8,6 +8,8 @@ import {
   pinFailed,
   type ReadOnlyGate,
   readOnlyCallDenial,
+  releasePinFailure,
+  SANDBOX_ASSUMED_TOOLS,
   sandboxModeOf,
   toolOrigin,
 } from '../src/host/readonly.ts'
@@ -164,13 +166,35 @@ describe('read-only tool gate', () => {
     expect(deny('delegate', { role: 'missing' })).toMatch(/unknown role/)
   })
 
-  it('remembers a failed pin on a later session object with the same id', () => {
+  it('refuses delegate when its registration is not this plugin', () => {
+    expect(deny('delegate', { role: 'explorer' }, { origin: 'shadow' })).toMatch(
+      /registration is not the inherited host tool/,
+    )
+    expect(deny('delegate', { role: 'explorer' }, { origin: 'unknown' })).toMatch(
+      /registration is not the inherited host tool/,
+    )
+    expect(deny('delegate', { role: 'explorer' })).toBeUndefined()
+  })
+
+  it('allows sandbox-assumed tools only while the live mode is read-only', () => {
+    for (const name of SANDBOX_ASSUMED_TOOLS) {
+      const origin = name === 'run_code' ? 'reserved' : 'inherited'
+      expect(deny(name, {}, { origin, mode: 'read-only' })).toBeUndefined()
+      expect(deny(name, {}, { origin, mode: 'workspace-write' })).toMatch(/sandbox mode is not read-only/)
+      expect(deny(name, {}, { origin, mode: undefined })).toMatch(/sandbox mode is not read-only/)
+    }
+  })
+
+  it('denies the same session id until the failure is released', () => {
     const first = logSession('pin-stuck')
     const later = logSession('pin-stuck')
     expect(pinFailed(later)).toBe(false)
     markPinFailed(first)
     expect(pinFailed(later)).toBe(true)
     expect(deny('bash', {}, { pinFailed: pinFailed(later) })).toMatch(/could not be restored/)
+    releasePinFailure(first)
+    expect(pinFailed(later)).toBe(false)
+    expect(pinFailed(logSession('pin-stuck'))).toBe(false)
   })
 })
 

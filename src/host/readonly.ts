@@ -19,8 +19,9 @@ const repinDepth = new Map<string, number>()
 
 /**
  * Sessions whose re-pin failed. Every later tool call is refused.
- * The id is remembered as well as the object: a resume can hand back a new
- * session object for the same id, and that session stays closed.
+ * The id is remembered as well as the object, so a new session object for the
+ * same live id stays closed. {@link releasePinFailure} drops both when the
+ * agent is disposed or the plugin unloads, so a later session is not stuck.
  */
 const failedPins = new WeakSet<SessionPort>()
 const failedPinIds = new Set<string>()
@@ -65,6 +66,25 @@ export const ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   // Nested calls re-enter this guard. The program itself is not name-classified.
   'run_code',
 ])
+
+/**
+ * Allowlisted names that can change files or reach the network when the sandbox
+ * backend does not enforce `read-only`. {@link readOnlyCallDenial} allows them
+ * only after it has required the live mode to be `read-only`.
+ */
+export const SANDBOX_ASSUMED_TOOLS: ReadonlySet<string> = new Set([
+  'bash',
+  'pwsh',
+  'run_code',
+  'web_fetch',
+  'terminal_read',
+])
+
+for (const name of SANDBOX_ASSUMED_TOOLS) {
+  if (!ALLOWED_TOOLS.has(name)) {
+    throw new Error(`sandbox-assumed tool "${name}" is missing from the read-only allowlist`)
+  }
+}
 
 /** Coordination tools allowed only when the destination agent is read-only. */
 export const COORDINATION_TOOLS: ReadonlySet<string> = new Set(['send_message', 'interrupt_agent'])
@@ -156,6 +176,16 @@ export function pinFailed(session: SessionPort): boolean {
 }
 
 /**
+ * Forget a failed pin. Called when the agent is disposed or the plugin unloads,
+ * so the id does not keep refusing a later session.
+ * @param session - the session whose failure should be dropped.
+ */
+export function releasePinFailure(session: SessionPort): void {
+  failedPins.delete(session)
+  failedPinIds.delete(session.id)
+}
+
+/**
  * The mode carried by one `sandbox/mode` payload, if it is a string.
  * @param data - the event's `data`.
  * @returns the mode, or undefined when the payload has none.
@@ -186,11 +216,26 @@ export function lastSandboxMode(session: SessionPort): string | undefined {
  * @param session - the child session.
  * @returns true when a `turn/start` or `turn/end` event is present.
  */
-export function sessionHasParentTurns(session: SessionPort): boolean {
-  return session.snapshotEvents().some(event => {
+/**
+ * Whether a list of events already contains a completed or open turn.
+ * @param events - a session log or a provider seed.
+ * @returns true when a `turn/start` or `turn/end` event is present.
+ */
+export function eventsHaveParentTurns(events: readonly unknown[]): boolean {
+  return events.some(event => {
     if (!isRecord(event)) return false
     return event.type === 'turn/start' || event.type === 'turn/end'
   })
+}
+
+/**
+ * Whether the log already contains a completed or open parent turn.
+ * A fresh child does not; a forked seed does.
+ * @param session - the child session.
+ * @returns true when a `turn/start` or `turn/end` event is present.
+ */
+export function sessionHasParentTurns(session: SessionPort): boolean {
+  return eventsHaveParentTurns(session.snapshotEvents())
 }
 
 /**
@@ -277,10 +322,12 @@ export function readOnlyCallDenial(
 ): string | undefined {
   if (gate.pinFailed) return refuse(name, 'the read-only sandbox could not be restored')
   if (gate.mode !== 'read-only') return refuse(name, 'the sandbox mode is not read-only')
-  if (name === 'delegate') return delegateDenial(args, roles)
+  // `delegate` is this plugin's own registration, not a host tool, but a shadow
+  // of that name still has to fail this check before the role is considered.
   if (gate.origin !== 'inherited' && gate.origin !== 'reserved') {
     return refuse(name, 'its registration is not the inherited host tool')
   }
+  if (name === 'delegate') return delegateDenial(args, roles)
   if (COORDINATION_TOOLS.has(name)) return destinationDenial(name, gate)
   if (ALLOWED_TOOLS.has(name)) return undefined
   if (tokensOf(name).some(token => WRITE_TOKENS.has(token)) || name.startsWith('stagehand_')) {

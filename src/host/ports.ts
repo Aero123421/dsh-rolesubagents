@@ -34,6 +34,10 @@ export interface ToolLookup {
 export interface AgentPort {
   readonly id: string
   readonly session: SessionPort
+  /** Abort the active turn. Present on a real Agent; optional so fakes can omit it. */
+  cancel?(cause: { readonly kind: 'user' }): void
+  /** Stop the agent loop. Present on a real Agent handle; optional so fakes can omit it. */
+  dispose?(): Promise<void> | void
   /** The Agent's own scoped context: registrations here are visible to this Agent only. */
   readonly ctx: {
     readonly tools: ToolLookup & {
@@ -41,6 +45,11 @@ export interface AgentPort {
       guard(guard: (call: ToolGuardCall) => string | undefined): () => void
     }
   }
+}
+
+/** Seed a provider may copy into a new child. Only the event `type` is inspected. */
+export interface ContinuableSeed {
+  readonly seed?: readonly unknown[]
 }
 
 /** The subset of a registered subagent provider read before starting a child. */
@@ -52,6 +61,15 @@ export interface SubagentProviderPort {
     readonly agentPreset?: boolean
     readonly depthLimit?: boolean
   }
+  /**
+   * When present, a task-only start inspects the seed. A declaration that the
+   * provider copies nothing is not enough on its own.
+   */
+  prepareContinuable?(request: {
+    parent: AgentPort
+    sessionId: string
+    signal?: AbortSignal
+  }): Promise<ContinuableSeed | undefined>
 }
 
 /** Child LLM options passed through `request.agentOptions`. */
@@ -79,7 +97,7 @@ export interface SubagentsPort {
     }
     signal: AbortSignal
     delivery: 'parent' | 'caller'
-  }): Promise<{ childId: string }>
+  }): Promise<{ childId: string; dispose?: () => Promise<void> | void }>
 }
 
 /** `ctx.systemPrompt` — only runtime-context registration is used. */

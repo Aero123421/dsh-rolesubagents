@@ -324,8 +324,9 @@ describe('delegate: execute', () => {
     expect(first).not.toBe(second)
   })
 
-  it('returns the id the service reports', async () => {
+  it('returns the id the service reports when that session can be checked', async () => {
     const { run, world } = delegation()
+    world.sessions.set('from-the-service', fakeSession('from-the-service'))
     world.subagents.startActivation.mockResolvedValue({ childId: 'from-the-service' })
     expect(await run()).toEqual({ kind: 'activation', subagentId: 'from-the-service' })
   })

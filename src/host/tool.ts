@@ -16,7 +16,13 @@ import {
   selectableRoles,
 } from '../shared/roles.ts'
 import type { AgentPort, ChildAgentOptions, HostContext } from './ports.ts'
-import { lastSandboxMode, pinFailed, readOnlyCallDenial, sessionHasParentTurns } from './readonly.ts'
+import {
+  eventsHaveParentTurns,
+  lastSandboxMode,
+  pinFailed,
+  readOnlyCallDenial,
+  sessionHasParentTurns,
+} from './readonly.ts'
 import { readRole } from './records.ts'
 
 export const TOOL_NAME = 'delegate'
@@ -27,12 +33,97 @@ export interface PendingChild {
   readonly snapshot: RoleSettings
 }
 
+/** How long a reservation stays when `agent/created` never arrives. */
+export const RESERVATION_TTL_MS = 30_000
+
+const reservationTimers = new WeakMap<PendingChild, ReturnType<typeof setTimeout>>()
+
+/**
+ * Drop one reservation and its cleanup timer, whichever id it is filed under.
+ * @param pending - the table shared with `agent/created`.
+ * @param child - the reservation object.
+ */
+export function discardReservation(pending: Map<string, PendingChild>, child: PendingChild): void {
+  const timer = reservationTimers.get(child)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    reservationTimers.delete(child)
+  }
+  for (const [id, entry] of pending) {
+    if (entry === child) pending.delete(id)
+  }
+}
+
+/** Drop every reservation. Used when the plugin unloads. */
+export function discardPending(pending: Map<string, PendingChild>): void {
+  for (const child of new Set(pending.values())) discardReservation(pending, child)
+}
+
+function retainReservation(pending: Map<string, PendingChild>, id: string): void {
+  const child = pending.get(id)
+  if (child === undefined) return
+  const existing = reservationTimers.get(child)
+  if (existing !== undefined) clearTimeout(existing)
+  const timer = setTimeout(() => {
+    reservationTimers.delete(child)
+    for (const [key, entry] of pending) {
+      if (entry === child) pending.delete(key)
+    }
+  }, RESERVATION_TTL_MS)
+  if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
+    timer.unref()
+  }
+  reservationTimers.set(child, timer)
+}
+
 export interface ToolDeps {
   readonly ctx: HostContext
   readonly spawnProvider: string
   readonly forkProvider: string
   /** Children started by this tool and not yet created, by reserved child id. */
   readonly pending: Map<string, PendingChild>
+  /**
+   * Apply a reservation the provider already published under `id`.
+   * Throws when that child must not keep running.
+   */
+  claimStarted?(id: string): void
+}
+
+function findAgent(ctx: HostContext, id: string): AgentPort | undefined {
+  return ctx.agents.list().find(candidate => candidate.id === id || candidate.session.id === id)
+}
+
+/** Stop a child that must not keep a copied parent conversation. Failures are logged; the original error still propagates. */
+async function stopChild(
+  ctx: HostContext,
+  started: { childId: string; dispose?: () => Promise<void> | void },
+  agent: AgentPort | undefined,
+): Promise<void> {
+  const warn = (action: string, error: unknown): void => {
+    const detail = error instanceof Error ? error.message : String(error)
+    ctx.logger.warn(`rolesubagents: could not ${action} child ${started.childId}: ${detail}`)
+  }
+  if (agent?.cancel !== undefined) {
+    try {
+      agent.cancel({ kind: 'user' })
+    } catch (error) {
+      warn('cancel', error)
+    }
+  }
+  if (agent?.dispose !== undefined) {
+    try {
+      await agent.dispose()
+    } catch (error) {
+      warn('dispose', error)
+    }
+  }
+  if (started.dispose !== undefined) {
+    try {
+      await started.dispose()
+    } catch (error) {
+      warn('stop', error)
+    }
+  }
 }
 
 /**
@@ -46,7 +137,7 @@ export function toolDescription(roles: readonly RoleDefinition[]): string {
     'Delegate a task to a subagent: a separate agent that works in its own context and returns its result, not its intermediate steps. Pick the role that fits the task:',
     ...roles.map(roleListLine),
     general ? 'Omit `role` to use `general`.' : 'A `role` is required.',
-    'The subagent starts in the background and this tool immediately returns its id; the runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes. A read-only agent may call `send_message` or `interrupt_agent` only on a read-only agent, so it cannot ask a writable agent to make a change. Start independent delegations together in one assistant message and keep working while they run. When only waiting remains, end your turn instead of sleeping or polling; the next result starts a new turn.',
+    'The subagent starts in the background and this tool immediately returns its id; the runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes. A read-only agent may call `send_message` or `interrupt_agent` only when every destination id names a read-only agent whose sandbox is still read-only, so it cannot ask a writable agent to make a change. Start independent delegations together in one assistant message and keep working while they run. When only waiting remains, end your turn instead of sleeping or polling; the next result starts a new turn.',
   ].join('\n')
 }
 
@@ -160,11 +251,11 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const providerName = inheritsHistory ? deps.forkProvider : deps.spawnProvider
       const provider = deps.ctx.subagents.getProvider(providerName)
       if (provider === undefined) throw new Error(`subagent provider "${providerName}" is not available`)
-      if (!inheritsHistory && provider.inheritsParentContext !== false) {
-        throw new Error(
+      const copiesParent = () =>
+        new Error(
           `role "${role.id}" must not inherit the parent conversation, but provider "${providerName}" copies it`,
         )
-      }
+      if (!inheritsHistory && provider.inheritsParentContext !== false) throw copiesParent()
       const agentOptions: ChildAgentOptions | undefined =
         role.model === undefined
           ? undefined
@@ -187,6 +278,16 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       }
       const maxDepth = deps.ctx.subagents.resolveMaxDepth(undefined)
       const childId = randomUUID()
+      if (!inheritsHistory && provider.prepareContinuable !== undefined) {
+        let prepared: { seed?: readonly unknown[] } | undefined
+        try {
+          prepared = await provider.prepareContinuable({ parent, sessionId: childId, signal: exec.signal })
+        } catch {
+          throw copiesParent()
+        }
+        const seed = prepared?.seed
+        if ((seed !== undefined && !Array.isArray(seed)) || eventsHaveParentTurns(seed ?? [])) throw copiesParent()
+      }
       let activeId: string = childId
       deps.pending.set(childId, { role, snapshot })
       try {
@@ -205,8 +306,8 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           signal: exec.signal,
           delivery: 'parent',
         })
-        // Keep the reservation until `agent/created` consumes it. A provider may
-        // publish the child after this call returns, or under a different id.
+        // A provider may publish the child under a different id than the one reserved.
+        // Rebind before claiming, so `agent/created` that already fired still gets the role.
         if (started.childId !== childId && deps.pending.has(childId)) {
           const kept = deps.pending.get(childId)
           deps.pending.delete(childId)
@@ -215,18 +316,47 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
             activeId = started.childId
           }
         }
-        const startedAgent = deps.ctx.agents
-          .list()
-          .find(candidate => candidate.id === started.childId || candidate.session.id === started.childId)
-        if (!inheritsHistory && startedAgent !== undefined && sessionHasParentTurns(startedAgent.session)) {
-          throw new Error(
-            `role "${role.id}" must not inherit the parent conversation, but the child session already contains it`,
-          )
+        const returnedId = started.childId
+        let bound = false
+        try {
+          if (deps.pending.has(activeId)) {
+            deps.claimStarted?.(activeId)
+            bound = !deps.pending.has(activeId)
+          }
+        } catch (error) {
+          await stopChild(deps.ctx, started, findAgent(deps.ctx, activeId) ?? findAgent(deps.ctx, childId))
+          throw error
         }
-        return { kind: 'activation' as const, subagentId: started.childId }
+        const agent = findAgent(deps.ctx, returnedId) ?? findAgent(deps.ctx, childId)
+        const sessions = deps.ctx.get('sessions')
+        const session = agent?.session ?? sessions?.get(returnedId) ?? sessions?.get(childId)
+        // Bound means this call's reservation was applied to the id activation returned.
+        // A different id that is still unbound, with no agent and no session, fails closed.
+        if (!bound && returnedId !== childId && agent === undefined && session === undefined) {
+          await stopChild(deps.ctx, started, undefined)
+          throw new Error(`role "${role.id}" could not be matched to the started child "${returnedId}"`)
+        }
+        if (!inheritsHistory) {
+          let leaked = false
+          if (session !== undefined) {
+            try {
+              leaked = sessionHasParentTurns(session)
+            } catch {
+              leaked = true
+            }
+          }
+          if (leaked) {
+            await stopChild(deps.ctx, started, agent)
+            throw new Error(
+              `role "${role.id}" must not inherit the parent conversation, but the child session already contains it`,
+            )
+          }
+        }
+        if (deps.pending.has(activeId)) retainReservation(deps.pending, activeId)
+        return { kind: 'activation' as const, subagentId: returnedId }
       } catch (error) {
-        deps.pending.delete(childId)
-        deps.pending.delete(activeId)
+        const child = deps.pending.get(childId) ?? deps.pending.get(activeId)
+        if (child !== undefined) discardReservation(deps.pending, child)
         throw error
       }
     },

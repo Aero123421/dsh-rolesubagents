@@ -8,11 +8,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/host/index.ts'
 import { pinFailed } from '../src/host/readonly.ts'
 import { readRole } from '../src/host/records.ts'
+import { RESERVATION_TTL_MS } from '../src/host/tool.ts'
 import {
   builtinRole,
   execContext,
   fakeAgent,
   fakeProvider,
+  fakeSession,
   fakeWorld,
   inheritedTools,
   recordsOf,
@@ -204,7 +206,7 @@ describe('child role does not depend on the creation source', () => {
     expect(call(late, 'bash')).toBeUndefined()
   })
 
-  it('pins an unclassified delegated child read-only and does not invent a role', async () => {
+  it('does not pin an official child that this plugin did not start', async () => {
     const { world, parent } = boot()
     const child = world.newAgent('official', {
       origin: 'subagent',
@@ -213,9 +215,8 @@ describe('child role does not depend on the creation source', () => {
     })
     world.emitCreated(child, 'fork')
     expect(readRole(child.session)).toBeUndefined()
-    expect(modes(child.session)).toEqual([{ mode: 'read-only' }])
-    expect(call(child, 'write')).toMatch(/refused/)
-    expect(call(child, 'bash')).toBeUndefined()
+    expect(modes(child.session)).toEqual([])
+    expect(child.guards).toHaveLength(0)
     expect(world.runtimeContext(child)).not.toContain('Your role:')
   })
 })
@@ -342,5 +343,347 @@ describe('a same-named registration does not inherit the allowlist', () => {
     } finally {
       if (runCode !== undefined) inheritedTools.set('run_code', runCode)
     }
+  })
+
+  it('refuses a shadowed delegate and still allows the one this plugin registered', async () => {
+    const { delegate } = boot()
+    const child = await delegate('reviewer')
+    expect(call(child, 'delegate', { role: 'explorer' })).toBeUndefined()
+    child.shadows.set('delegate', { name: 'delegate' } as ToolDefinition)
+    expect(call(child, 'delegate', { role: 'explorer' })).toMatch(/registration is not the inherited host tool/)
+  })
+})
+
+describe('task-only stops a child that already has parent history', () => {
+  it('cancels and disposes a visible child instead of only throwing', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, parent } = boot([GENERAL, taskFork])
+    const activationDispose = vi.fn(async () => {})
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const child = world.newAgent(spec.childId ?? 'seeded', {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      child.session.log.push({ type: 'turn/end', seq: 0, time: 0, data: { reason: 'parent' } })
+      world.children.push(child)
+      world.agents = [...world.agents, child]
+      return { childId: child.id, dispose: activationDispose }
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))).rejects.toThrow(
+      /already contains it/,
+    )
+    const child = world.children[0]
+    expect(child).toBeDefined()
+    expect(child?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(child?.dispose).toHaveBeenCalledTimes(1)
+    expect(activationDispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('still reports the history leak when stopping the child fails', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, parent } = boot([GENERAL, taskFork])
+    const activationDispose = vi.fn(async () => {
+      throw new Error('stop failed')
+    })
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const child = world.newAgent(spec.childId ?? 'seeded', {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      child.dispose.mockRejectedValue(new Error('dispose failed'))
+      child.session.log.push({ type: 'turn/end', seq: 0, time: 0, data: { reason: 'parent' } })
+      world.children.push(child)
+      world.agents = [...world.agents, child]
+      return { childId: child.id, dispose: activationDispose }
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))).rejects.toThrow(
+      /already contains it/,
+    )
+    expect(world.logger.warn).toHaveBeenCalledWith(expect.stringContaining('could not dispose child'))
+    expect(world.logger.warn).toHaveBeenCalledWith(expect.stringContaining('could not stop child'))
+  })
+
+  it('disposes an activation whose session already contains a parent turn', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, parent } = boot([GENERAL, taskFork])
+    const activationDispose = vi.fn(async () => {})
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const id = spec.childId ?? 'seeded'
+      const session = fakeSession(id)
+      session.log.push({ type: 'turn/end', seq: 0, time: 0, data: { reason: 'parent' } })
+      world.sessions.set(id, session)
+      return { childId: id, dispose: activationDispose }
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))).rejects.toThrow(
+      /already contains it/,
+    )
+    expect(activationDispose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('a returned child id still receives the reservation', () => {
+  it('applies the role when agent/created names the id the provider returns', async () => {
+    const { world, parent } = boot()
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const child = world.newAgent('other-id', {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      world.children.push(child)
+      world.emitCreated(child, 'startup')
+      return { childId: child.id }
+    })
+    await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+    const child = world.children[0]
+    expect(child).toBeDefined()
+    if (child === undefined) return
+    expect(readRole(child.session)).toMatchObject({ id: 'reviewer', readOnly: true })
+    expect(modes(child.session).at(-1)).toEqual({ mode: 'read-only' })
+    expect(call(child, 'write')).toMatch(/refused/)
+  })
+
+  it('fails closed when created consumed the reserved id but activation returns another', async () => {
+    const { world, parent } = boot()
+    const dispose = vi.fn(async () => {})
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const reserved = world.newAgent(spec.childId ?? 'reserved', {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      world.children.push(reserved)
+      world.emitCreated(reserved, 'startup')
+      return { childId: 'other-unseen', dispose }
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))).rejects.toThrow(
+      /could not be matched/,
+    )
+    expect(dispose).toHaveBeenCalledTimes(1)
+    const reserved = world.children[0]
+    expect(reserved).toBeDefined()
+    if (reserved === undefined) return
+    expect(readRole(reserved.session)?.id).toBe('reviewer')
+  })
+
+  it('stops a history-inheriting fork when the returned id cannot be matched', async () => {
+    const { world, parent } = boot()
+    const dispose = vi.fn(async () => {})
+    world.subagents.startActivation.mockResolvedValue({ childId: 'missing-fork', dispose })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))).rejects.toThrow(
+      /could not be matched/,
+    )
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops the child when the returned id matches neither an agent nor a session', async () => {
+    const { world, parent } = boot()
+    const dispose = vi.fn(async () => {})
+    world.subagents.startActivation.mockResolvedValue({ childId: 'missing-child', dispose })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))).rejects.toThrow(
+      /could not be matched/,
+    )
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('reservations are cleaned up', () => {
+  it('drops a reservation when agent/created never arrives', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const { world, parent } = boot()
+      let late: FakeAgent | undefined
+      world.subagents.startActivation.mockImplementation(async spec => {
+        late = world.newAgent(spec.childId ?? 'late', {
+          origin: 'subagent',
+          parentSession: spec.request.parent.session.id,
+          delegationDepth: 1,
+        })
+        world.children.push(late)
+        return { childId: late.id }
+      })
+      await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+      expect(late).toBeDefined()
+      await vi.advanceTimersByTimeAsync(RESERVATION_TTL_MS)
+      if (late === undefined) return
+      world.emitCreated(late, 'startup')
+      expect(readRole(late.session)).toBeUndefined()
+      expect(late.guards).toHaveLength(0)
+      expect(modes(late.session)).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the reservation until the cleanup delay when created is only late', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const { world, parent } = boot()
+      let late: FakeAgent | undefined
+      world.subagents.startActivation.mockImplementation(async spec => {
+        late = world.newAgent(spec.childId ?? 'late', {
+          origin: 'subagent',
+          parentSession: spec.request.parent.session.id,
+          delegationDepth: 1,
+        })
+        world.children.push(late)
+        return { childId: late.id }
+      })
+      await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+      await vi.advanceTimersByTimeAsync(RESERVATION_TTL_MS - 1)
+      if (late === undefined) return
+      world.emitCreated(late, 'fork')
+      expect(readRole(late.session)).toMatchObject({ id: 'reviewer', readOnly: true })
+      expect(modes(late.session).at(-1)).toEqual({ mode: 'read-only' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('destination checks do not trust agent_id alone', () => {
+  it('requires every destination id to be a live read-only agent', async () => {
+    const { world, parent, delegate } = boot()
+    const reviewer = await delegate('reviewer')
+    const explorer = await delegate('explorer')
+    world.agents = [parent, reviewer, explorer]
+
+    expect(call(explorer, 'send_message', { agentId: reviewer.session.id })).toBeUndefined()
+    expect(call(explorer, 'send_message', { agent_id: reviewer.id, session_id: parent.session.id })).toMatch(
+      /destination is not a read-only/,
+    )
+    expect(call(explorer, 'interrupt_agent', { target: { agent_id: parent.id } })).toMatch(
+      /destination is not a read-only/,
+    )
+    expect(
+      call(explorer, 'send_message', { agent_id: reviewer.session.id, message: parent.session.id }),
+    ).toBeUndefined()
+  })
+
+  it('refuses a destination whose log cannot be read', async () => {
+    const { world, delegate } = boot()
+    const reviewer = await delegate('reviewer')
+    const explorer = await delegate('explorer')
+    world.agents = [reviewer, explorer]
+    reviewer.session.snapshotEvents = () => {
+      throw new Error('log closed')
+    }
+    expect(() => call(explorer, 'send_message', { agent_id: reviewer.session.id })).not.toThrow()
+    expect(call(explorer, 'send_message', { agent_id: reviewer.session.id })).toMatch(/destination is not a read-only/)
+  })
+
+  it('refuses a destination whose live mode is not read-only or whose pin failed', async () => {
+    const { world, delegate } = boot()
+    const reviewer = await delegate('reviewer')
+    const explorer = await delegate('explorer')
+    world.agents = [reviewer, explorer]
+    world.emitSandbox(reviewer.session, 'workspace-write')
+    expect(call(explorer, 'send_message', { agent_id: reviewer.session.id })).toMatch(/destination is not a read-only/)
+    await Promise.resolve()
+    expect(call(explorer, 'send_message', { agent_id: reviewer.session.id })).toBeUndefined()
+
+    reviewer.session.append = () => {
+      reviewer.session.log.push({
+        type: 'sandbox/mode',
+        seq: reviewer.session.log.length,
+        time: 0,
+        data: { mode: 'danger-full-access' },
+      })
+      return undefined
+    }
+    world.emitSandbox(reviewer.session, 'workspace-write')
+    await Promise.resolve()
+    reviewer.session.log.push({
+      type: 'sandbox/mode',
+      seq: reviewer.session.log.length,
+      time: 0,
+      data: { mode: 'read-only' },
+    })
+    expect(call(explorer, 'send_message', { agent_id: reviewer.id })).toMatch(/destination is not a read-only/)
+  })
+})
+
+describe('a failed pin does not stick after the session is gone', () => {
+  async function failPin(world: ReturnType<typeof boot>['world'], child: FakeAgent): Promise<void> {
+    child.session.append = () => {
+      child.session.log.push({
+        type: 'sandbox/mode',
+        seq: child.session.log.length,
+        time: 0,
+        data: { mode: 'danger-full-access' },
+      })
+      return undefined
+    }
+    world.emitSandbox(child.session, 'workspace-write')
+    await Promise.resolve()
+    expect(pinFailed(child.session)).toBe(true)
+  }
+
+  it('releases the id when the agent is disposed', async () => {
+    const { world, delegate } = boot()
+    const child = await delegate('reviewer')
+    await failPin(world, child)
+    const id = child.session.id
+    world.emitDisposed(child)
+    expect(pinFailed(child.session)).toBe(false)
+    expect(pinFailed(fakeSession(id))).toBe(false)
+  })
+
+  it('releases the id when the plugin unloads', async () => {
+    const { world, delegate } = boot()
+    const child = await delegate('reviewer')
+    await failPin(world, child)
+    const id = child.session.id
+    world.teardown()
+    expect(pinFailed(fakeSession(id))).toBe(false)
+  })
+})
+
+describe('task-only inspects the provider seed', () => {
+  it('refuses a seed that contains a parent turn even when the provider says it copies nothing', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, delegate } = boot([GENERAL, taskFork])
+    world.providers.set(
+      'spawn',
+      fakeProvider('spawn', {
+        inheritsParentContext: false,
+        prepareContinuable: async () => ({ seed: [{ type: 'turn/end' }] }),
+      }),
+    )
+    await expect(delegate('fork')).rejects.toThrow(/provider "spawn" copies it/)
+    expect(world.subagents.startActivation).not.toHaveBeenCalled()
+  })
+
+  it('refuses when prepareContinuable throws, before the child is started', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task' })
+    const { world, delegate } = boot([GENERAL, taskFork])
+    world.providers.set(
+      'spawn',
+      fakeProvider('spawn', {
+        inheritsParentContext: false,
+        prepareContinuable: async () => {
+          throw new Error('seed failed')
+        },
+      }),
+    )
+    await expect(delegate('fork')).rejects.toThrow(/provider "spawn" copies it/)
+    expect(world.subagents.startActivation).not.toHaveBeenCalled()
+  })
+
+  it('starts when the seed is empty', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, delegate } = boot([GENERAL, taskFork])
+    world.providers.set(
+      'spawn',
+      fakeProvider('spawn', {
+        inheritsParentContext: false,
+        prepareContinuable: async () => ({}),
+      }),
+    )
+    const child = await delegate('fork')
+    expect(readRole(child.session)?.id).toBe('fork')
+    expect(world.subagents.startActivation).toHaveBeenCalledTimes(1)
   })
 })
