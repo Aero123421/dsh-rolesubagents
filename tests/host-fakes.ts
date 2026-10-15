@@ -13,6 +13,7 @@ import type {
   LlmPort,
   LoggerPort,
   SessionPort,
+  StorageDomainPort,
   SubagentProviderPort,
   SubagentsPort,
   SystemPromptPort,
@@ -106,34 +107,86 @@ export function recordsOf(session: FakeSession, type: string): unknown[] {
 const RECORD_TYPE = /^plugin:[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/
 
 /**
- * Replacement for `@deepseek-ai/dsh-session` over a {@link FakeSession}: the two functions src/host/records.ts
- * uses, with the real grammar check, JSON snapshotting and deep freezing. Use as
- * `vi.mock('@deepseek-ai/dsh-session', () => import('./host-fakes.ts').then(m => m.sessionModule()))`.
+ * Append a legacy Session-log plugin record (grammar-checked, JSON-snapshotted, `ignorable: true`), as the
+ * pre-storage version of this plugin wrote them. Used to seed logs that the current legacy fallback reads.
  */
-export function sessionModule() {
-  return {
-    appendPluginRecord(session: FakeSession, type: string, data: unknown): number {
-      if (!RECORD_TYPE.test(type)) throw new Error(`plugin record type "${type}" is outside the plugin record grammar`)
-      const event: FakeEvent = {
-        type,
-        seq: session.log.length,
-        time: Date.now(),
-        data: snapshot(data),
-        ignorable: true,
-      }
-      session.log.push(event)
-      return event.seq
-    },
-    pluginRecordOf(event: FakeEvent) {
-      if (event.ignorable !== true || !RECORD_TYPE.test(event.type)) return undefined
-      return { type: event.type, seq: event.seq, time: event.time, data: event.data }
-    },
+export function appendRecord(session: FakeSession, type: string, data: unknown): void {
+  if (!RECORD_TYPE.test(type)) throw new Error(`plugin record type "${type}" is outside the plugin record grammar`)
+  const event: FakeEvent = {
+    type,
+    seq: session.log.length,
+    time: Date.now(),
+    data: snapshot(data),
+    ignorable: true,
   }
+  session.log.push(event)
 }
 
-/** Append a plugin record with any payload (malformed ones included) through the path the plugin itself uses. */
-export function appendRecord(session: FakeSession, type: string, data: unknown): void {
-  sessionModule().appendPluginRecord(session, type, data)
+// ---------------------------------------------------------------------------------------------------------------
+// Storage domain
+
+/** In-memory `storageDomain` facility: opened domains are table maps the test can inspect directly. */
+export interface FakeStorage {
+  readonly facility: StorageDomainPort
+  /** Domain name → table name → key → stored record. */
+  readonly data: Map<string, Map<string, Map<string, unknown>>>
+}
+
+export function fakeStorage(): FakeStorage {
+  const data = new Map<string, Map<string, Map<string, unknown>>>()
+  const facility: StorageDomainPort = {
+    async open(spec: unknown) {
+      const name = (spec as { name: string }).name
+      let domain = data.get(name)
+      if (domain === undefined) {
+        domain = new Map()
+        data.set(name, domain)
+      }
+      const tables = domain
+      return {
+        table(table: string) {
+          let rows = tables.get(table)
+          if (rows === undefined) {
+            rows = new Map()
+            tables.set(table, rows)
+          }
+          const map = rows
+          return {
+            get: (key: string) => map.get(key),
+            put: async (key: string, value: unknown) => {
+              map.set(key, snapshot(value))
+            },
+            entries: () => [...map.entries()] as [string, unknown][],
+          }
+        },
+        close: async () => {},
+      }
+    },
+  }
+  return { facility, data }
+}
+
+/** The stored snapshot record for one Session, or undefined. */
+export function storedSnapshot(storage: FakeStorage, sessionId: string): unknown {
+  return storage.data.get('rolesubagents')?.get('snapshots')?.get(sessionId)
+}
+
+/** The stored child-role record for one Session, or undefined. */
+export function storedRole(storage: FakeStorage, sessionId: string): unknown {
+  return storage.data.get('rolesubagents')?.get('roles')?.get(sessionId)
+}
+
+/**
+ * `@deepseek-ai/dsh-storage-domain` reduced to its declaration helpers: `defineDomain` and `domainTable` are
+ * identity wrappers here (the facility itself is faked per world, see {@link fakeStorage}); the real package
+ * also pulls in `@deepseek-ai/dsh-storage`, which tests do not install. Use as
+ * `vi.mock('@deepseek-ai/dsh-storage-domain', () => import('./host-fakes.ts').then(m => m.storageDomainModule()))`.
+ */
+export function storageDomainModule() {
+  return {
+    defineDomain: (spec: unknown) => spec,
+    domainTable: (valueSchema: unknown) => ({ valueSchema }),
+  }
 }
 
 /**
@@ -228,7 +281,19 @@ export interface FakeWorld {
     startActivation: Mock<SubagentsPort['startActivation']>
   }
   /** Optional Host services; delete a key to emulate the service being absent. */
-  readonly services: { llm?: { resolveCallConfig: Mock<LlmPort['resolveCallConfig']> }; sessions?: SessionsService }
+  readonly services: {
+    llm?: { resolveCallConfig: Mock<LlmPort['resolveCallConfig']> }
+    sessions?: SessionsService
+    storageDomain?: StorageDomainPort
+  }
+  /** The fake storage-domain backend every state instance in this world shares. */
+  readonly storage: FakeStorage
+  /** The stored snapshot record for a Session (as the storage domain holds it), or undefined. */
+  storedSnapshot(sessionId: string): unknown
+  /** The stored child-role record for a Session (as the storage domain holds it), or undefined. */
+  storedRole(sessionId: string): unknown
+  /** Flush microtasks so a state write has reached the fake storage domain. */
+  settle(): Promise<void>
   /** Sessions the `sessions` service can find, by id. */
   readonly sessions: Map<string, FakeSession>
   /** What `ctx.agents.list()` returns when the plugin is applied. */
@@ -253,7 +318,7 @@ export interface FakeWorld {
  * A fake Host context. By default `startActivation` behaves like the real service: it creates a child Agent
  * (depth one deeper than the parent) and fires `agent/created` with source `startup` before it resolves.
  */
-export function fakeWorld(): FakeWorld {
+export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
   const created: ((payload: CreatedPayload) => void)[] = []
   const disposed: ((payload: DisposedPayload) => void)[] = []
   const sessionEvents: SessionListener[] = []
@@ -267,9 +332,11 @@ export function fakeWorld(): FakeWorld {
   ])
   const sessions = new Map<string, FakeSession>()
   const logger = { info: vi.fn<LoggerPort['info']>(), warn: vi.fn<LoggerPort['warn']>() }
+  const storage = sharedStorage ?? fakeStorage()
   const services: FakeWorld['services'] = {
     llm: { resolveCallConfig: vi.fn<LlmPort['resolveCallConfig']>(async () => ({})) },
     sessions: { get: id => sessions.get(id) },
+    storageDomain: storage.facility,
   }
   const contexts: RuntimeContext[] = []
 
@@ -277,6 +344,12 @@ export function fakeWorld(): FakeWorld {
     logger,
     providers,
     services,
+    storage,
+    storedSnapshot: (sessionId: string) => storedSnapshot(storage, sessionId),
+    storedRole: (sessionId: string) => storedRole(storage, sessionId),
+    settle: async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    },
     sessions,
     agents: [],
     children: [],
@@ -325,10 +398,12 @@ export function fakeWorld(): FakeWorld {
 
   function get(name: 'llm'): LlmPort | undefined
   function get(name: 'sessions'): SessionsService | undefined
+  function get(name: 'storageDomain'): StorageDomainPort | undefined
   function get(name: string): unknown
   function get(name: string): unknown {
     if (name === 'llm') return services.llm
     if (name === 'sessions') return services.sessions
+    if (name === 'storageDomain') return services.storageDomain
     return undefined
   }
 

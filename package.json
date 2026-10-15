@@ -1,6 +1,6 @@
 {
   "name": "dsh-rolesubagents",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, and let the parent pick one per delegation.",
   "keywords": [
     "dsh",
@@ -63,14 +63,14 @@
     "check:lib": "node scripts/check-lib.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-session": ">=0.2.1-alpha.3 <0.3.0-0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.2.1-alpha.3 <0.3.0-0",
     "@deepseek-ai/dsh-tools": ">=0.2.1-alpha.3 <0.3.0-0",
     "@deepseek-ai/schemastery": ">=3.18.5-alpha.2 <4.0.0-0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@deepseek-ai/cordis": "4.0.5-alpha.2",
-    "@deepseek-ai/dsh-session": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-storage-domain": "0.2.1-alpha.3",
     "@deepseek-ai/dsh-tools": "0.2.1-alpha.3",
     "@deepseek-ai/schemastery": "3.18.5-alpha.2",
     "@types/node": "22.20.5",
@@ -81,7 +81,9 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "zod": "4.4.3",
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.3"
   },
   "packageManager": "pnpm@10.28.0",
   "pnpm": {

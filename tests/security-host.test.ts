@@ -1,7 +1,6 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/host/index.ts'
-import { ROLE_RECORD, ROLES_RECORD } from '../src/host/records.ts'
 import { FORK_INHERIT_WARNING, FORK_RESULT_WARNING, FORK_TASK_CONTEXT } from '../src/shared/roles.ts'
 import {
   builtinRole,
@@ -15,8 +14,8 @@ import {
   type FakeSession,
 } from './host-fakes.ts'
 
-vi.mock('@deepseek-ai/dsh-session', () => import('./host-fakes.ts').then(module => module.sessionModule()))
 vi.mock('@deepseek-ai/dsh-tools', () => import('./host-fakes.ts').then(module => module.toolsModule()))
+vi.mock('@deepseek-ai/dsh-storage-domain', () => import('./host-fakes.ts').then(m => m.storageDomainModule()))
 
 const GENERAL = builtinRole('general')
 const FORK = builtinRole('fork')
@@ -75,11 +74,12 @@ describe('read-only sandbox stays pinned', () => {
   })
 
   it('re-pins on resume when the stored mode is no longer read-only', async () => {
-    const { delegate } = boot()
+    const { world, delegate } = boot()
     const child = await delegate('reviewer')
     child.session.append('sandbox/mode', { mode: 'workspace-write' })
-    const fresh = fakeWorld()
+    const fresh = fakeWorld(world.storage)
     apply(fresh.ctx, { roles: ROLES })
+    await fresh.settle()
     const resumed = fakeAgent('resumed', child.session)
     fresh.emitCreated(resumed, 'resume')
     expect(modes(child.session).at(-1)).toEqual({ mode: 'read-only' })
@@ -160,8 +160,8 @@ describe('fork inheritance warning and task scope', () => {
     expect(tool.output.render({ ...ARGS, role: 'fork' }, { kind: 'activation', subagentId: 'abc' })).toEqual([
       { type: 'text', text: `started subagent abc\n${FORK_RESULT_WARNING}` },
     ])
-    expect(recordsOf(child.session, ROLE_RECORD)).toEqual([expect.objectContaining({ version: 1 })])
-    expect(recordsOf(child.session, ROLES_RECORD).length).toBe(1)
+    expect(world.storedRole(child.session.id)).toEqual(expect.objectContaining({ version: 1 }))
+    expect(world.storedSnapshot(child.session.id)).toEqual(expect.objectContaining({ version: 1 }))
   })
 
   it('applies a read-only role when creation is announced with a source other than startup', async () => {

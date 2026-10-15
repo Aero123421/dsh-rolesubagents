@@ -1,14 +1,8 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { apply, Config, inject, name } from '../src/host/index.ts'
-import {
-  ROLE_RECORD,
-  ROLES_RECORD,
-  readRole,
-  readRolesSnapshot,
-  writeRole,
-  writeRolesSnapshot,
-} from '../src/host/records.ts'
+import type { HostContext } from '../src/host/ports.ts'
+import { createRoleState, ROLE_RECORD, ROLES_RECORD } from '../src/host/state.ts'
 import {
   buildTool,
   type PendingChild,
@@ -33,22 +27,25 @@ import {
   builtinRole,
   execContext,
   type FakeAgent,
+  type FakeSession,
   type FakeWorld,
   fakeAgent,
   fakeProvider,
+  fakeStorage,
   fakeSession,
   fakeWorld,
-  recordsOf,
   registeredTool,
+  storedRole,
+  storedSnapshot,
   role,
   settingsOf,
   typesOf,
 } from './host-fakes.ts'
 
-// `dsh-session` and the `dsh-tools` entry point load services that are not installed here, so both are replaced
-// (see host-fakes.ts): records go to an in-memory log, and defineTool is the real one from the package's schema module.
-vi.mock('@deepseek-ai/dsh-session', () => import('./host-fakes.ts').then(module => module.sessionModule()))
+// The `dsh-tools` entry point loads services that are not installed here, so it is replaced (see host-fakes.ts):
+// defineTool is the real one from the package's schema module.
 vi.mock('@deepseek-ai/dsh-tools', () => import('./host-fakes.ts').then(module => module.toolsModule()))
+vi.mock('@deepseek-ai/dsh-storage-domain', () => import('./host-fakes.ts').then(m => m.storageDomainModule()))
 
 const GENERAL = builtinRole('general')
 const FORK = builtinRole('fork')
@@ -76,7 +73,40 @@ const paramsOf = (tool: ToolDefinition) => tool.parameters as unknown as ParamsV
 const roleEnum = (tool: ToolDefinition) => paramsOf(tool).properties.role?.enum
 
 function depsFor(world: FakeWorld, patch: Partial<ToolDeps> = {}): ToolDeps {
-  return { ctx: world.ctx, spawnProvider: 'spawn', forkProvider: 'fork', pending: new Map(), ...patch }
+  return {
+    ctx: world.ctx,
+    spawnProvider: 'spawn',
+    forkProvider: 'fork',
+    pending: new Map(),
+    state: createRoleState(world.ctx),
+    ...patch,
+  }
+}
+
+/** Stored snapshot records for a Session, as a list like the old log records. */
+function snapshotRecords(world: FakeWorld, session: FakeSession): unknown[] {
+  const value = world.storedSnapshot(session.id)
+  return value === undefined ? [] : [value]
+}
+
+/** Stored child-role records for a Session, as a list like the old log records. */
+function roleRecords(world: FakeWorld, session: FakeSession): unknown[] {
+  const value = world.storedRole(session.id)
+  return value === undefined ? [] : [value]
+}
+
+/** The snapshot the plugin's state holds for a Session, read back and normalized. */
+function snapshotOf(world: FakeWorld, session: FakeSession): RoleSettings | undefined {
+  const raw = world.storedSnapshot(session.id) as { version?: unknown; settings?: unknown } | undefined
+  return raw?.version === 1 ? normalizeSettings(raw.settings).settings : undefined
+}
+
+/** The child role the plugin's state holds for a Session, read back and normalized. */
+function roleOf(world: FakeWorld, session: FakeSession): RoleDefinition | undefined {
+  const raw = world.storedRole(session.id) as { version?: unknown; role?: unknown } | undefined
+  if (raw?.version !== 1 || typeof raw.role !== 'object' || raw.role === null) return undefined
+  const id = (raw.role as { id?: unknown }).id
+  return normalizeSettings({ enabled: true, roles: [raw.role] }).settings.roles.find(entry => entry.id === id)
 }
 
 function mustBuild(settings: RoleSettings, deps: ToolDeps): ToolDefinition {
@@ -105,7 +135,7 @@ function delegation(settings: RoleSettings = settingsOf(ROLES), patch: Partial<T
 describe('module exports', () => {
   it('names the plugin and injects the services it uses', () => {
     expect(name).toBe('dsh-rolesubagents')
-    expect(inject).toEqual(['tools', 'subagents', 'systemPrompt', 'agents'])
+    expect(inject).toEqual(['tools', 'subagents', 'systemPrompt', 'agents', 'storageDomain'])
     expect(TOOL_NAME).toBe('delegate')
   })
 
@@ -606,40 +636,54 @@ describe('delegate: execute', () => {
   })
 })
 
-describe('session records', () => {
+describe('role state', () => {
   const stored = (settings: unknown) => ({ version: 1, settings })
 
-  it('keeps the persisted record names stable, since existing Session logs carry them', () => {
+  function stateOver(storage = fakeStorage()) {
+    const ctx = {
+      get: (name: string) => (name === 'storageDomain' ? storage.facility : undefined),
+      logger: { info: () => {}, warn: () => {} },
+    } as unknown as HostContext
+    return { state: createRoleState(ctx), storage }
+  }
+
+  it('keeps the legacy log record names stable, since existing Session logs carry them', () => {
     expect(ROLES_RECORD).toBe('plugin:dsh-rolesubagents/roles')
     expect(ROLE_RECORD).toBe('plugin:dsh-rolesubagents/role')
   })
 
   describe('the roles snapshot', () => {
     it('is absent from a Session that has none', () => {
-      expect(readRolesSnapshot(fakeSession('s'))).toBeUndefined()
+      const { state } = stateOver()
+      expect(state.readSnapshot(fakeSession('s'))).toBeUndefined()
     })
 
-    it('round-trips through the log as a plugin record', () => {
+    it('round-trips through the storage domain', async () => {
+      const { state, storage } = stateOver()
       const session = fakeSession('s')
       const settings = normalizeSettings({ enabled: false, roles: ROLES }).settings
-      writeRolesSnapshot(session, settings)
-      expect(typesOf(session)).toEqual([ROLES_RECORD])
-      expect(session.log[0]?.ignorable).toBe(true)
-      expect(recordsOf(session, ROLES_RECORD)).toEqual([{ version: 1, settings }])
-      expect(readRolesSnapshot(session)).toEqual(settings)
+      state.writeSnapshot(session, settings)
+      await state.flush()
+      expect(storedSnapshot(storage, session.id)).toEqual({ version: 1, settings })
+      expect(state.readSnapshot(session)).toEqual(settings)
+      const reopened = stateOver(storage).state
+      await reopened.ready
+      expect(reopened.readSnapshot(session)).toEqual(settings)
     })
 
-    it('reads the newest record', () => {
+    it('reads the newest write', () => {
+      const { state } = stateOver()
       const session = fakeSession('s')
-      writeRolesSnapshot(session, settingsOf([GENERAL, FORK, role('old')]))
-      writeRolesSnapshot(session, settingsOf([GENERAL, FORK, role('new')]))
-      expect(readRolesSnapshot(session)?.roles.map(entry => entry.id)).toEqual(['general', 'fork', 'new'])
+      state.writeSnapshot(session, settingsOf([GENERAL, FORK, role('old')]))
+      state.writeSnapshot(session, settingsOf([GENERAL, FORK, role('new')]))
+      expect(state.readSnapshot(session)?.roles.map(entry => entry.id)).toEqual(['general', 'fork', 'new'])
     })
 
-    it('normalizes what it reads, so a hand-edited log cannot yield a role the tool would mishandle', () => {
+    it('normalizes what it reads from a legacy log record, so a hand-edited log cannot yield a role the tool would mishandle', () => {
+      const { state } = stateOver()
       const session = fakeSession('s')
       appendRecord(session, ROLES_RECORD, stored({ enabled: true, roles: [{ id: 'Bad id' }, { id: 'ok' }, null] }))
-      const snapshot = readRolesSnapshot(session)
+      const snapshot = state.readSnapshot(session)
       expect(snapshot?.roles.map(entry => [entry.id, entry.enabled])).toEqual([
         ['general', false],
         ['fork', false],
@@ -653,60 +697,68 @@ describe('session records', () => {
       ['null', null],
       ['a string', 'roles'],
       ['a number', 3],
-    ])('ignores a record with %s', (_label, data) => {
+    ])('ignores a legacy record with %s', (_label, data) => {
+      const { state } = stateOver()
       const session = fakeSession('s')
       appendRecord(session, ROLES_RECORD, data)
-      expect(readRolesSnapshot(session)).toBeUndefined()
+      expect(state.readSnapshot(session)).toBeUndefined()
     })
 
-    it('ignores other records, other events and look-alike events that are not ignorable records', () => {
+    it('ignores other records and other events in the log', () => {
+      const { state } = stateOver()
       const session = fakeSession('s')
       appendRecord(session, 'plugin:other-plugin/roles', stored(DEFAULT_SETTINGS))
       appendRecord(session, ROLE_RECORD, { version: 1, role: WORKER })
       session.append('sandbox/mode', { mode: 'read-only' })
-      session.log.push({ type: ROLES_RECORD, seq: session.log.length, time: 0, data: stored(DEFAULT_SETTINGS) })
-      expect(readRolesSnapshot(session)).toBeUndefined()
+      expect(state.readSnapshot(session)).toBeUndefined()
     })
   })
 
   describe('the child role', () => {
     it('is absent from a Session without one', () => {
-      expect(readRole(fakeSession('s'))).toBeUndefined()
+      const { state } = stateOver()
+      expect(state.readRole(fakeSession('s'))).toBeUndefined()
     })
 
-    it('round-trips through the log as a plugin record', () => {
+    it('round-trips through the storage domain', async () => {
+      const { state, storage } = stateOver()
       const session = fakeSession('s')
       const reviewer = normalizeSettings({ enabled: true, roles: ROLES }).settings.roles.find(
         entry => entry.id === 'reviewer',
       )
       if (reviewer === undefined) throw new Error('no reviewer')
-      writeRole(session, reviewer)
-      expect(typesOf(session)).toEqual([ROLE_RECORD])
-      expect(session.log[0]?.ignorable).toBe(true)
-      expect(recordsOf(session, ROLE_RECORD)).toEqual([{ version: 1, role: reviewer }])
-      expect(readRole(session)).toEqual(reviewer)
+      state.writeRole(session, reviewer)
+      await state.flush()
+      expect(storedRole(storage, session.id)).toEqual({ version: 1, role: reviewer })
+      expect(state.readRole(session)).toEqual(reviewer)
+      const reopened = stateOver(storage).state
+      await reopened.ready
+      expect(reopened.readRole(session)).toEqual(reviewer)
     })
 
     it('reads a built-in role as the built-in', () => {
+      const { state } = stateOver()
       const session = fakeSession('s')
-      writeRole(session, FORK)
-      expect(readRole(session)).toEqual(FORK)
+      state.writeRole(session, FORK)
+      expect(state.readRole(session)).toEqual(FORK)
     })
 
-    it('reads the newest record', () => {
+    it('reads the newest write', () => {
+      const { state } = stateOver()
       const session = fakeSession('s')
-      writeRole(session, WORKER)
-      writeRole(session, REVIEWER)
-      expect(readRole(session)?.id).toBe('reviewer')
+      state.writeRole(session, WORKER)
+      state.writeRole(session, REVIEWER)
+      expect(state.readRole(session)?.id).toBe('reviewer')
     })
 
-    it('normalizes what it reads (a bad model is dropped, an over-long description is cut)', () => {
+    it('normalizes what it reads from a legacy log record (a bad model is dropped, an over-long description is cut)', () => {
+      const { state } = stateOver()
       const session = fakeSession('s')
       appendRecord(session, ROLE_RECORD, {
         version: 1,
         role: { ...WORKER, model: { provider: 'only-provider' }, description: 'd'.repeat(1500) },
       })
-      const read = readRole(session)
+      const read = state.readRole(session)
       expect(read?.id).toBe('worker')
       expect(read).not.toHaveProperty('model')
       expect(read?.description).toHaveLength(1000)
@@ -721,16 +773,33 @@ describe('session records', () => {
       ['a role without an id', { version: 1, role: { description: 'nameless' } }],
       ['a role with an invalid id', { version: 1, role: { ...WORKER, id: 'Not Valid' } }],
       ['null', null],
-    ])('ignores a record with %s', (_label, data) => {
+    ])('ignores a legacy record with %s', (_label, data) => {
+      const { state } = stateOver()
       const session = fakeSession('s')
       appendRecord(session, ROLE_RECORD, data)
-      expect(readRole(session)).toBeUndefined()
+      expect(state.readRole(session)).toBeUndefined()
     })
 
-    it('ignores the roles snapshot record', () => {
+    it('ignores the roles snapshot', () => {
+      const { state } = stateOver()
       const session = fakeSession('s')
-      writeRolesSnapshot(session, settingsOf(ROLES))
-      expect(readRole(session)).toBeUndefined()
+      state.writeSnapshot(session, settingsOf(ROLES))
+      expect(state.readRole(session)).toBeUndefined()
+    })
+  })
+
+  describe('without a storage domain', () => {
+    it('degrades to memory only and still round-trips', async () => {
+      const ctx = {
+        get: () => undefined,
+        logger: { info: () => {}, warn: () => {} },
+      } as unknown as HostContext
+      const state = createRoleState(ctx)
+      await state.ready
+      expect(state.degraded).toBe(true)
+      const session = fakeSession('s')
+      state.writeRole(session, WORKER)
+      expect(state.readRole(session)).toEqual(WORKER)
     })
   })
 })
@@ -742,26 +811,28 @@ describe('apply: top-level agents', () => {
     return world
   }
 
-  it('records a roles snapshot when the Session has none and registers the tool in the agent scope', () => {
+  it('records a roles snapshot when the Session has none and registers the tool in the agent scope', async () => {
     const world = boot()
     const agent = world.newAgent('main')
     world.emitCreated(agent)
-    expect(recordsOf(agent.session, ROLES_RECORD)).toEqual([{ version: 1, settings: DEFAULT_SETTINGS }])
-    expect(typesOf(agent.session)).toEqual([ROLES_RECORD])
+    await world.settle()
+    expect(snapshotRecords(world, agent.session)).toEqual([{ version: 1, settings: DEFAULT_SETTINGS }])
+    expect(typesOf(agent.session)).toEqual([])
     expect(agent.register).toHaveBeenCalledTimes(1)
     expect(registeredTool(agent).name).toBe('delegate')
     expect(roleEnum(registeredTool(agent))).toEqual(['general', 'fork', 'worker', 'explorer', 'reviewer'])
-    expect(readRolesSnapshot(agent.session)).toEqual(DEFAULT_SETTINGS)
-    expect(readRole(agent.session)).toBeUndefined()
+    expect(snapshotOf(world, agent.session)).toEqual(DEFAULT_SETTINGS)
+    expect(roleOf(world, agent.session)).toBeUndefined()
   })
 
-  it('snapshots the normalized configured roles, not the raw config', () => {
+  it('snapshots the normalized configured roles, not the raw config', async () => {
     const world = boot({
       roles: [GENERAL, FORK, { ...WORKER, description: ' '.repeat(2) + 'd'.repeat(2000) }, { id: 'Bad id' }],
     })
     const agent = world.newAgent('main')
     world.emitCreated(agent)
-    const snapshot = readRolesSnapshot(agent.session)
+    await world.settle()
+    const snapshot = snapshotOf(world, agent.session)
     expect(snapshot?.roles.map(entry => entry.id)).toEqual(['general', 'fork', 'worker'])
     expect(snapshot?.roles[2]?.description).toHaveLength(1000)
   })
@@ -776,16 +847,17 @@ describe('apply: top-level agents', () => {
     expect(lastSpec(world).provider).toBe('my-fork')
   })
 
-  it('registers the tool once per agent, however often agent/created repeats', () => {
+  it('registers the tool once per agent, however often agent/created repeats', async () => {
     const world = boot()
     const agent = world.newAgent('main')
     world.emitCreated(agent)
     world.emitCreated(agent, 'resume')
     expect(agent.register).toHaveBeenCalledTimes(1)
-    expect(recordsOf(agent.session, ROLES_RECORD)).toHaveLength(1)
+    await world.settle()
+    expect(snapshotRecords(world, agent.session)).toHaveLength(1)
   })
 
-  it('keeps the recorded roles of a Session even when the config changed (the next-session rule)', () => {
+  it('keeps the recorded roles of a Session even when the config changed (the next-session rule)', async () => {
     const live = { enabled: true, roles: ROLES as unknown[] }
     const world = boot({ enabled: { get: () => live.enabled }, roles: { get: () => live.roles } })
     const first = world.newAgent('first')
@@ -800,13 +872,14 @@ describe('apply: top-level agents', () => {
     world.emitCreated(resumed, 'resume')
     expect(roleEnum(registeredTool(resumed))).toEqual(['general', 'fork', 'worker', 'reviewer'])
     expect(registeredTool(resumed).description).toBe(registeredTool(first).description)
-    expect(recordsOf(first.session, ROLES_RECORD)).toHaveLength(1)
+    await world.settle()
+    expect(snapshotRecords(world, first.session)).toHaveLength(1)
 
     // A Session created after the change gets the new settings: the master switch is off, so no tool at all.
     const later = world.newAgent('later')
     world.emitCreated(later)
     expect(later.register).not.toHaveBeenCalled()
-    expect(recordsOf(later.session, ROLES_RECORD)).toEqual([
+    expect(snapshotRecords(world, later.session)).toEqual([
       { version: 1, settings: expect.objectContaining({ enabled: false }) },
     ])
   })
@@ -823,12 +896,13 @@ describe('apply: top-level agents', () => {
     expect(roleEnum(registeredTool(second))).toEqual(['general', 'fork', 'only-new'])
   })
 
-  it('registers no tool when the master switch is off, but still records the snapshot', () => {
+  it('registers no tool when the master switch is off, but still records the snapshot', async () => {
     const world = boot({ enabled: false })
     const agent = world.newAgent('main')
     world.emitCreated(agent)
     expect(agent.register).not.toHaveBeenCalled()
-    expect(recordsOf(agent.session, ROLES_RECORD)).toEqual([
+    await world.settle()
+    expect(snapshotRecords(world, agent.session)).toEqual([
       { version: 1, settings: expect.objectContaining({ enabled: false }) },
     ])
   })
@@ -852,20 +926,21 @@ describe('apply: top-level agents', () => {
     const agent = world.newAgent('main')
     const first = fakeAgent('seed', agent.session)
     world.emitCreated(first)
-    const recorded = recordsOf(agent.session, ROLES_RECORD)
+    const recorded = snapshotRecords(world, agent.session)
     const second = fakeAgent('second', agent.session)
     world.emitCreated(second)
-    expect(recordsOf(agent.session, ROLES_RECORD)).toEqual(recorded)
+    expect(snapshotRecords(world, agent.session)).toEqual(recorded)
     expect(roleEnum(registeredTool(second))).toEqual(['general', 'fork', 'from-config'])
   })
 
-  it('installs the tool for agents that already exist when the plugin is applied', () => {
+  it('installs the tool for agents that already exist when the plugin is applied', async () => {
     const world = fakeWorld()
     const existing = world.newAgent('existing')
     world.agents = [existing]
     apply(world.ctx)
+    await world.settle()
     expect(existing.register).toHaveBeenCalledTimes(1)
-    expect(recordsOf(existing.session, ROLES_RECORD)).toHaveLength(1)
+    expect(snapshotRecords(world, existing.session)).toHaveLength(1)
   })
 
   it('registers the role runtime context before the first agent exists', () => {
@@ -951,29 +1026,29 @@ describe('apply: child agents started by the tool', () => {
   }
 
   it('pins the read-only sandbox first, then writes the role record and the roles snapshot', async () => {
-    const { delegate, lastChild } = boot()
+    const { world, delegate, lastChild } = boot()
     const result = await delegate('reviewer')
     const child = lastChild()
     expect(result).toEqual({ kind: 'activation', subagentId: child.id })
-    expect(typesOf(child.session)).toEqual([SANDBOX_RECORD, ROLE_RECORD, ROLES_RECORD])
-    expect(recordsOf(child.session, ROLE_RECORD)).toEqual([{ version: 1, role: roleOfSettings('reviewer') }])
-    expect(recordsOf(child.session, ROLES_RECORD)).toEqual([{ version: 1, settings: normalized(ROLES) }])
+    expect(typesOf(child.session)).toEqual([SANDBOX_RECORD])
+    expect(roleRecords(world, child.session)).toEqual([{ version: 1, role: roleOfSettings('reviewer') }])
+    expect(snapshotRecords(world, child.session)).toEqual([{ version: 1, settings: normalized(ROLES) }])
     expect(child.session.log[0]?.data).toEqual({ mode: 'read-only' })
-    expect(readRole(child.session)).toEqual(roleOfSettings('reviewer'))
+    expect(roleOf(world, child.session)).toEqual(roleOfSettings('reviewer'))
   })
 
   it('does not touch the sandbox for roles that are not read-only', async () => {
     const { delegate, lastChild } = boot()
     for (const roleId of ['worker', 'general', 'fork']) {
       await delegate(roleId)
-      expect(typesOf(lastChild().session)).toEqual([ROLE_RECORD, ROLES_RECORD])
+      expect(typesOf(lastChild().session)).toEqual([])
     }
   })
 
   it('treats an omitted role as the built-in general role', async () => {
-    const { delegate, lastChild } = boot()
+    const { world, delegate, lastChild } = boot()
     await delegate(undefined)
-    expect(readRole(lastChild().session)).toMatchObject({ id: 'general', builtin: 'general' })
+    expect(roleOf(world, lastChild().session)).toMatchObject({ id: 'general', builtin: 'general' })
   })
 
   it('registers the same tool in the child scope as in the parent scope', async () => {
@@ -999,7 +1074,7 @@ describe('apply: child agents started by the tool', () => {
     expect(child).toBeDefined()
     if (child === undefined) return
     expect(roleEnum(registeredTool(child))).toEqual(['general', 'fork', 'worker', 'reviewer'])
-    expect(recordsOf(child.session, ROLES_RECORD)).toEqual([{ version: 1, settings: normalized(ROLES) }])
+    expect(snapshotRecords(world, child.session)).toEqual([{ version: 1, settings: normalized(ROLES) }])
   })
 
   it('applies a reservation when the agent is created with a source other than startup', async () => {
@@ -1019,8 +1094,8 @@ describe('apply: child agents started by the tool', () => {
     const child = world.children[0]
     expect(child).toBeDefined()
     if (child === undefined) return
-    expect(typesOf(child.session)).toEqual(['sandbox/mode', ROLE_RECORD, ROLES_RECORD])
-    expect(readRole(child.session)).toMatchObject({ id: 'reviewer', readOnly: true })
+    expect(typesOf(child.session)).toEqual(['sandbox/mode'])
+    expect(roleOf(world, child.session)).toMatchObject({ id: 'reviewer', readOnly: true })
   })
 
   function failingChildBoot(failOn: 'sandbox' | 'record') {
@@ -1079,8 +1154,8 @@ describe('apply: children not started by the tool', () => {
     })
     world.emitCreated(child, 'startup')
     expect(roleEnum(registeredTool(child))).toEqual(['general', 'fork', 'worker', 'reviewer'])
-    expect(recordsOf(child.session, ROLES_RECORD)).toEqual(recordsOf(parent.session, ROLES_RECORD))
-    expect(recordsOf(child.session, ROLE_RECORD)).toEqual([])
+    expect(snapshotRecords(world, child.session)).toEqual(snapshotRecords(world, parent.session))
+    expect(roleRecords(world, child.session)).toEqual([])
   })
 
   it('falls back to the current config when the parent Session is unknown or has no snapshot', () => {
@@ -1162,13 +1237,14 @@ describe('apply: runtime context', () => {
     expect(world.runtimeContext(first)).not.toContain('reviewer')
   })
 
-  it('reads a child role back from its log when the Agent is created again (resume), without writing again', async () => {
-    const { child } = boot()
+  it('reads a child role back from storage when the Agent is created again (resume), without writing again', async () => {
+    const { world, child } = boot()
     const original = await child('reviewer')
     const length = original.session.log.length
 
-    const fresh = fakeWorld()
+    const fresh = fakeWorld(world.storage)
     apply(fresh.ctx, { roles: [GENERAL, FORK] })
+    await fresh.settle()
     const resumed = fakeAgent('resumed-child', original.session)
     fresh.emitCreated(resumed, 'resume')
     expect(fresh.runtimeContext(resumed)).toBe(roleContextText(REVIEWER))
@@ -1332,7 +1408,7 @@ describe('apply: failures while an agent is prepared', () => {
     expect(healthy.register).toHaveBeenCalledTimes(1)
   })
 
-  it('does not let one failing existing agent stop the plugin from being applied', () => {
+  it('does not let one failing existing agent stop the plugin from being applied', async () => {
     const world = fakeWorld()
     const broken = world.newAgent('broken')
     broken.register.mockImplementation(() => {
@@ -1341,6 +1417,7 @@ describe('apply: failures while an agent is prepared', () => {
     const fine = world.newAgent('fine')
     world.agents = [broken, fine]
     expect(() => apply(world.ctx)).not.toThrow()
+    await world.settle()
     expect(world.logger.warn).toHaveBeenCalledWith('rolesubagents: could not prepare agent broken: cannot register')
     expect(fine.register).toHaveBeenCalledTimes(1)
   })

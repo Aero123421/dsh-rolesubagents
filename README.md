@@ -15,7 +15,7 @@ Role-based subagents for DeepSeek Harness (DSH). Define roles such as worker, re
 
 ## Requirements
 
-- DSH `>=0.2.1-alpha.3 <0.3.0-0` (child Agent Preset selection and plugin records)
+- DSH `>=0.2.1-alpha.3 <0.3.0-0` (child Agent Preset selection and the storage-domain service)
 - The settings page appears on the DSH Web (`dsh web`) Plugins page.
 
 ## Install
@@ -96,10 +96,10 @@ Keep the official `send_message`, `list_agents`, and `interrupt_agent` tools on.
 
 ## How it works
 
-- On `agent/created`, the plugin records the session's role list as a `plugin:dsh-rolesubagents/roles` record and registers `delegate` in that Agent's own scope.
-- For each child it starts, it reserves the child id, writes a `plugin:dsh-rolesubagents/role` record into the child's log, and, for read-only roles, appends `sandbox/mode: read-only` before the child's first request. If that first pin fails, the child is not started. Afterwards, `session/event` re-appends `read-only` whenever the mode changes, including after resume when the stored mode is no longer `read-only`. The read-only agent also receives a `tools.guard` that refuses write-like calls.
+- On `agent/created`, the plugin records the session's role list in its `rolesubagents` storage domain and registers `delegate` in that Agent's own scope.
+- For each child it starts, it reserves the child id, records the child's role in the storage domain, and, for read-only roles, appends `sandbox/mode: read-only` before the child's first request. If that first pin fails, the child is not started. Afterwards, `session/event` re-appends `read-only` whenever the mode changes, including after resume when the stored mode is no longer `read-only`. The read-only agent also receives a `tools.guard` that refuses write-like calls.
 - A fork role set to task only is started on the spawn provider. A fork that inherits history is started on the fork provider, and the host logs that inherited tool results can carry prompt injection.
-- One global runtime-context provider reads the role from the Agent's Session records, so the instructions survive compaction and resume. A full-history fork also receives a warning to treat that history as untrusted.
+- One global runtime-context provider reads the role from the storage domain, so the instructions survive compaction and resume. Role state used to be written as Session-log plugin records; those are still read back, but new state is only written to the storage domain (an exported Session moved without its storage keeps its log, not its role). A full-history fork also receives a warning to treat that history as untrusted.
 
 ## Development
 

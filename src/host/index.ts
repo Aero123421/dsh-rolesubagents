@@ -4,8 +4,9 @@
  * Mounted by the bundle patch as the `rolesubagents` row. For every Agent it
  * fixes the Session's role list (first meeting records the current settings),
  * registers the role-aware `delegate` tool in that Agent's own scope, and, for
- * each child the tool starts, writes the child's role into the child's log and
- * pins the read-only sandbox before the child's first request and, while that
+ * each child the tool starts, records the child's role in the `rolesubagents`
+ * storage domain and pins the read-only sandbox before the child's first
+ * request and, while that
  * role is read-only, appends `read-only` again whenever a later `sandbox/mode`
  * selects anything else. A guard on that agent refuses write-like MCP and
  * plugin tools. The role's instructions reach the child as runtime context, so
@@ -23,11 +24,11 @@ import {
 } from '../shared/roles.ts'
 import type { AgentPort, HostContext, SessionPort } from './ports.ts'
 import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
-import { readRole, readRolesSnapshot, writeRole, writeRolesSnapshot } from './records.ts'
+import { createRoleState } from './state.ts'
 import { buildTool, type PendingChild, TOOL_NAME } from './tool.ts'
 
 export const name = 'dsh-rolesubagents'
-export const inject = ['tools', 'subagents', 'systemPrompt', 'agents']
+export const inject = ['tools', 'subagents', 'systemPrompt', 'agents', 'storageDomain']
 
 /** Runtime-context position: right after the official subagent delegation statement (120). */
 const ROLE_CONTEXT_ORDER = 121
@@ -77,6 +78,14 @@ interface Prepared {
 export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   const spawnProvider = config.spawnProvider ?? 'spawn'
   const forkProvider = config.forkProvider ?? 'fork'
+  const state = createRoleState(ctx)
+  void state.ready.then(() => {
+    if (state.degraded) {
+      ctx.logger.warn(
+        `rolesubagents: role state is kept in memory only: ${state.degradedReason ?? 'storage unavailable'}`,
+      )
+    }
+  })
   const pending = new Map<string, PendingChild>()
   const installed = new Map<AgentPort, Prepared>()
   const sessions = new Map<string, SessionState>()
@@ -105,25 +114,25 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   }
 
   const roleOf = (agent: AgentPort): RoleDefinition | undefined => {
-    const state = stateOf(agent.session.id)
-    if (state.role === undefined) state.role = readRole(agent.session) ?? null
-    return state.role ?? undefined
+    const sessionState = stateOf(agent.session.id)
+    if (sessionState.role === undefined) sessionState.role = state.readRole(agent.session) ?? null
+    return sessionState.role ?? undefined
   }
 
   /** The role list an Agent's Session runs with, recording one when the Session has none yet. */
   const snapshotFor = (agent: AgentPort): RoleSettings => {
-    const recorded = readRolesSnapshot(agent.session)
+    const recorded = state.readSnapshot(agent.session)
     if (recorded !== undefined) return recorded
     const parentId = agent.session.header.parentSession
     const parentSession = parentId === undefined ? undefined : ctx.get('sessions')?.get(parentId)
-    const snapshot = (parentSession === undefined ? undefined : readRolesSnapshot(parentSession)) ?? currentSettings()
-    writeRolesSnapshot(agent.session, snapshot)
+    const snapshot = (parentSession === undefined ? undefined : state.readSnapshot(parentSession)) ?? currentSettings()
+    state.writeSnapshot(agent.session, snapshot)
     return snapshot
   }
 
   const isReadOnlySession = (session: SessionPort): boolean => {
     if (readOnlySessions.has(session)) return true
-    return readRole(session)?.readOnly === true
+    return state.readRole(session)?.readOnly === true
   }
 
   const disposePrepared = (prepared: Prepared | undefined): void => {
@@ -133,7 +142,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
 
   const install = (agent: AgentPort, snapshot: RoleSettings): void => {
     if (installed.has(agent)) return
-    const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending })
+    const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending, state })
     const prepared: Prepared = {}
     if (definition !== undefined) {
       prepared.tool = agent.ctx.tools.register(definition)
@@ -161,8 +170,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       // aborts the child's creation instead of letting it run writable.
       // The creation source does not matter; a reserved child is this plugin's.
       if (child.role.readOnly) pinReadOnly(agent)
-      writeRole(agent.session, child.role)
-      writeRolesSnapshot(agent.session, child.snapshot)
+      state.writeRole(agent.session, child.role)
+      state.writeSnapshot(agent.session, child.snapshot)
       stateOf(agent.session.id).role = child.role
       install(agent, child.snapshot)
       return
@@ -228,7 +237,10 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       )
     }
   })
-  for (const agent of ctx.agents.list()) guarded(agent, 'resume')
+  // Agents that already exist are prepared once the stored state is readable.
+  void state.ready.then(() => {
+    for (const agent of ctx.agents.list()) guarded(agent, 'resume')
+  })
 
   const unsubscribe = (stop: unknown): void => {
     if (typeof stop === 'function') stop()
@@ -243,6 +255,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       installed.clear()
       sessions.clear()
       pending.clear()
+      void state.close()
     },
     'rolesubagents: scoped tools',
   )

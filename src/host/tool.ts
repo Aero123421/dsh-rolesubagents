@@ -17,7 +17,7 @@ import {
 } from '../shared/roles.ts'
 import type { AgentPort, ChildAgentOptions, HostContext } from './ports.ts'
 import { readOnlyCallDenial } from './readonly.ts'
-import { readRole } from './records.ts'
+import type { RoleState } from './state.ts'
 
 export const TOOL_NAME = 'delegate'
 
@@ -33,6 +33,8 @@ export interface ToolDeps {
   readonly forkProvider: string
   /** Children started by this tool and not yet created, by reserved child id. */
   readonly pending: Map<string, PendingChild>
+  /** Per-Session role state (child roles and role-list snapshots). */
+  readonly state: RoleState
 }
 
 /**
@@ -142,7 +144,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const parent = (exec as { agent?: AgentPort }).agent
       if (parent === undefined) throw new Error('subagent tool requires a calling agent')
       const role = resolveRole(roles, args.role)
-      if (readRole(parent.session)?.readOnly === true) {
+      if (deps.state.readRole(parent.session)?.readOnly === true) {
         const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles)
         if (denial !== undefined) throw new Error(denial)
       }

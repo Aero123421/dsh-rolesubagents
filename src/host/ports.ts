@@ -101,6 +101,24 @@ export interface LoggerPort {
   warn(message: string): void
 }
 
+/** One KV table of an opened storage domain: synchronous reads; a write settles when it is durable. */
+export interface DomainTablePort {
+  get(key: string): unknown
+  put(key: string, value: unknown): Promise<void>
+  entries(): Iterable<readonly [string, unknown]>
+}
+
+/** An opened storage domain. */
+export interface DomainPort {
+  table(name: string): DomainTablePort
+  close(): Promise<void>
+}
+
+/** `ctx.storageDomain` — the schema-validated KV domain facility (`@deepseek-ai/dsh-storage-domain`). */
+export interface StorageDomainPort {
+  open(spec: unknown): Promise<DomainPort>
+}
+
 /** The plugin's Host context. */
 export interface HostContext {
   readonly subagents: SubagentsPort
@@ -109,6 +127,7 @@ export interface HostContext {
   readonly logger: LoggerPort
   get(name: 'llm'): LlmPort | undefined
   get(name: 'sessions'): { get(id: string): SessionPort | undefined } | undefined
+  get(name: 'storageDomain'): StorageDomainPort | undefined
   get(name: string): unknown
   on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown

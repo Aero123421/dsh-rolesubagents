@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Fix: the Host plugin never took effect in a real DSH profile. Per-Session role state was written with `appendPluginRecord` from `@deepseek-ai/dsh-session`, whose private brand check rejects Host Sessions when the plugin resolves that package to its own installed copy (`Receiver must be an instance of class Session`), so `delegate` was never registered. Role snapshots and child roles now live in the `rolesubagents` storage domain; records already written to Session logs are still read back.
+
 ## 0.1.1
 
 - Read-only roles re-pin `sandbox/mode` to `read-only` when a later change selects a wider mode.
