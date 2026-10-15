@@ -447,7 +447,7 @@ describe('delegate: execute', () => {
     })
 
     it.each([
-      ['reports no agentOptions capability', { name: 'spawn', capabilities: {} }],
+      ['reports no agentOptions capability', { name: 'spawn', inheritsParentContext: false, capabilities: {} }],
       ['reports agentOptions as false', fakeProvider('spawn', { capabilities: { agentOptions: false } })],
     ])('rejects a model role when the provider %s', async (_label, provider) => {
       const { run, world, deps } = withModels()
@@ -462,7 +462,7 @@ describe('delegate: execute', () => {
 
     it('does not need the capability for roles without a model', async () => {
       const { run, world } = withModels()
-      world.providers.set('spawn', { name: 'spawn', capabilities: {} })
+      world.providers.set('spawn', { name: 'spawn', inheritsParentContext: false, capabilities: {} })
       await run({ role: 'general' })
       expect(world.subagents.startActivation).toHaveBeenCalledTimes(1)
     })
@@ -488,15 +488,25 @@ describe('delegate: execute', () => {
     })
 
     it.each([
-      ['reports no agentPreset capability', { name: 'spawn', capabilities: {} }],
-      ['reports agentPreset as false', fakeProvider('spawn', { capabilities: { agentPreset: false } })],
-      ['inherits the parent context', fakeProvider('spawn', { inheritsParentContext: true })],
-    ])('rejects a preset role when the provider %s', async (_label, provider) => {
+      [
+        'reports no agentPreset capability',
+        { name: 'spawn', inheritsParentContext: false, capabilities: {} },
+        /cannot mount agent preset/,
+      ],
+      [
+        'reports agentPreset as false',
+        fakeProvider('spawn', { capabilities: { agentPreset: false } }),
+        /cannot mount agent preset/,
+      ],
+      [
+        'inherits the parent context',
+        fakeProvider('spawn', { inheritsParentContext: true }),
+        /must not inherit the parent conversation/,
+      ],
+    ] as const)('rejects a preset role when the provider %s', async (_label, provider, message) => {
       const { run, world, deps } = withPreset()
       world.providers.set('spawn', provider)
-      await expect(run({ role: 'coder' })).rejects.toThrow(
-        'role "coder": provider "spawn" cannot mount agent preset "coder-preset"',
-      )
+      await expect(run({ role: 'coder' })).rejects.toThrow(message)
       expect(world.subagents.startActivation).not.toHaveBeenCalled()
       expect(deps.pending.size).toBe(0)
     })
@@ -537,7 +547,7 @@ describe('delegate: execute', () => {
   })
 
   describe('pending children', () => {
-    it('reserves the child id with its role and the role list while startActivation runs, then releases it', async () => {
+    it('reserves the child id with its role and keeps it after startActivation returns', async () => {
       const { run, world, deps, settings } = delegation()
       let seen: PendingChild | undefined
       let during = -1
@@ -551,7 +561,9 @@ describe('delegate: execute', () => {
       expect(during).toBe(1)
       expect(seen?.role).toBe(REVIEWER)
       expect(seen?.snapshot).toBe(settings)
-      expect(deps.pending.size).toBe(0)
+      // `agent/created` is what consumes the reservation, including when it arrives late.
+      expect(deps.pending.size).toBe(1)
+      expect(deps.pending.get(lastSpec(world).childId ?? '')?.role).toBe(REVIEWER)
     })
 
     it('reserves the same id it passes to startActivation', async () => {
@@ -581,7 +593,7 @@ describe('delegate: execute', () => {
       expect(deps.pending.size).toBe(0)
     })
 
-    it('keeps parallel delegations apart: each has its own id and releases only its own', async () => {
+    it('keeps parallel delegations apart: finishing one does not drop the other reservation', async () => {
       const { run, world, deps } = delegation()
       const gates: (() => void)[] = []
       world.subagents.startActivation.mockImplementation(
@@ -597,11 +609,11 @@ describe('delegate: execute', () => {
       expect([...deps.pending.values()].map(child => child.role.id).sort()).toEqual(['reviewer', 'worker'])
       gates[0]?.()
       await first
-      expect(deps.pending.size).toBe(1)
-      expect([...deps.pending.values()].map(child => child.role.id)).toEqual(['reviewer'])
+      expect([...deps.pending.values()].map(child => child.role.id).sort()).toEqual(['reviewer', 'worker'])
       gates[1]?.()
       await second
-      expect(deps.pending.size).toBe(0)
+      expect(deps.pending.size).toBe(2)
+      expect(new Set(deps.pending.keys()).size).toBe(2)
     })
   })
 })
@@ -1002,7 +1014,7 @@ describe('apply: child agents started by the tool', () => {
     expect(recordsOf(child.session, ROLES_RECORD)).toEqual([{ version: 1, settings: normalized(ROLES) }])
   })
 
-  it('does not apply a reservation unless the agent is created at startup', async () => {
+  it('applies a reservation for any creation source, including fork', async () => {
     const { world, delegate } = boot()
     world.subagents.startActivation.mockImplementation(async spec => {
       const childId = spec.childId ?? ''
@@ -1012,15 +1024,15 @@ describe('apply: child agents started by the tool', () => {
         delegationDepth: 1,
       })
       world.children.push(child)
-      world.emitCreated(child, 'resume')
+      world.emitCreated(child, 'fork')
       return { childId }
     })
     await delegate('reviewer')
     const child = world.children[0]
     expect(child).toBeDefined()
     if (child === undefined) return
-    expect(typesOf(child.session)).toEqual([ROLES_RECORD])
-    expect(readRole(child.session)).toBeUndefined()
+    expect(typesOf(child.session)).toEqual([SANDBOX_RECORD, ROLE_RECORD, ROLES_RECORD])
+    expect(readRole(child.session)).toMatchObject({ id: 'reviewer', readOnly: true })
   })
 
   function failingChildBoot(failOn: 'sandbox' | 'record') {
@@ -1305,6 +1317,16 @@ describe('apply: failures while an agent is prepared', () => {
     expect(() => world.emitCreated(agent)).not.toThrow()
     expect(world.logger.warn).toHaveBeenCalledTimes(1)
     expect(world.logger.warn).toHaveBeenCalledWith('rolesubagents: could not prepare agent main: registry closed')
+  })
+
+  it('aborts a delegated child whose log cannot be read', () => {
+    const world = fakeWorld()
+    apply(world.ctx, { roles: ROLES })
+    const child = world.newAgent('child', { origin: 'subagent', delegationDepth: 1 })
+    child.session.snapshotEvents = () => {
+      throw new Error('unreadable log')
+    }
+    expect(() => world.emitCreated(child, 'fork')).toThrow(/unreadable log/)
   })
 
   it('logs a thrown non-Error value as text', () => {

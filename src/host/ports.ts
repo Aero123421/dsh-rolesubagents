@@ -25,13 +25,18 @@ export interface ToolGuardCall {
   readonly arguments: unknown
 }
 
+/** A tool lookup. `scope` is the agent whose view is wanted; omitted means the host view. */
+export interface ToolLookup {
+  get(name: string, scope?: AgentPort): ToolDefinition | undefined
+}
+
 /** One live Agent as `agent/created` and tool execution supply it. */
 export interface AgentPort {
   readonly id: string
   readonly session: SessionPort
   /** The Agent's own scoped context: registrations here are visible to this Agent only. */
   readonly ctx: {
-    readonly tools: {
+    readonly tools: ToolLookup & {
       register(definition: ToolDefinition): () => void
       guard(guard: (call: ToolGuardCall) => string | undefined): () => void
     }
@@ -105,6 +110,8 @@ export interface LoggerPort {
 export interface HostContext {
   readonly subagents: SubagentsPort
   readonly systemPrompt: SystemPromptPort
+  /** Host tool registry, when the plugin was injected with `tools`. Used to tell an inherited tool from a shadow. */
+  readonly tools?: ToolLookup
   readonly agents: { list(): readonly AgentPort[] }
   readonly logger: LoggerPort
   get(name: 'llm'): LlmPort | undefined

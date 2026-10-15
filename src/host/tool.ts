@@ -16,7 +16,7 @@ import {
   selectableRoles,
 } from '../shared/roles.ts'
 import type { AgentPort, ChildAgentOptions, HostContext } from './ports.ts'
-import { readOnlyCallDenial } from './readonly.ts'
+import { lastSandboxMode, pinFailed, readOnlyCallDenial, sessionHasParentTurns } from './readonly.ts'
 import { readRole } from './records.ts'
 
 export const TOOL_NAME = 'delegate'
@@ -46,7 +46,7 @@ export function toolDescription(roles: readonly RoleDefinition[]): string {
     'Delegate a task to a subagent: a separate agent that works in its own context and returns its result, not its intermediate steps. Pick the role that fits the task:',
     ...roles.map(roleListLine),
     general ? 'Omit `role` to use `general`.' : 'A `role` is required.',
-    'The subagent starts in the background and this tool immediately returns its id; the runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes. Start independent delegations together in one assistant message and keep working while they run. When only waiting remains, end your turn instead of sleeping or polling; the next result starts a new turn.',
+    'The subagent starts in the background and this tool immediately returns its id; the runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes. A read-only agent may call `send_message` or `interrupt_agent` only on a read-only agent, so it cannot ask a writable agent to make a change. Start independent delegations together in one assistant message and keep working while they run. When only waiting remains, end your turn instead of sleeping or polling; the next result starts a new turn.',
   ].join('\n')
 }
 
@@ -142,8 +142,13 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const parent = (exec as { agent?: AgentPort }).agent
       if (parent === undefined) throw new Error('subagent tool requires a calling agent')
       const role = resolveRole(roles, args.role)
-      if (readRole(parent.session)?.readOnly === true) {
-        const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles)
+      if (readRole(parent.session)?.readOnly === true || pinFailed(parent.session)) {
+        const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles, {
+          mode: lastSandboxMode(parent.session),
+          pinFailed: pinFailed(parent.session),
+          // `delegate` is judged from the role list; its own registration is this plugin's.
+          origin: 'inherited',
+        })
         if (denial !== undefined) throw new Error(denial)
       }
       const inheritsHistory = forkInheritsHistory(role)
@@ -155,6 +160,11 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const providerName = inheritsHistory ? deps.forkProvider : deps.spawnProvider
       const provider = deps.ctx.subagents.getProvider(providerName)
       if (provider === undefined) throw new Error(`subagent provider "${providerName}" is not available`)
+      if (!inheritsHistory && provider.inheritsParentContext !== false) {
+        throw new Error(
+          `role "${role.id}" must not inherit the parent conversation, but provider "${providerName}" copies it`,
+        )
+      }
       const agentOptions: ChildAgentOptions | undefined =
         role.model === undefined
           ? undefined
@@ -177,6 +187,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       }
       const maxDepth = deps.ctx.subagents.resolveMaxDepth(undefined)
       const childId = randomUUID()
+      let activeId: string = childId
       deps.pending.set(childId, { role, snapshot })
       try {
         const started = await deps.ctx.subagents.startActivation({
@@ -194,9 +205,29 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           signal: exec.signal,
           delivery: 'parent',
         })
+        // Keep the reservation until `agent/created` consumes it. A provider may
+        // publish the child after this call returns, or under a different id.
+        if (started.childId !== childId && deps.pending.has(childId)) {
+          const kept = deps.pending.get(childId)
+          deps.pending.delete(childId)
+          if (kept !== undefined) {
+            deps.pending.set(started.childId, kept)
+            activeId = started.childId
+          }
+        }
+        const startedAgent = deps.ctx.agents
+          .list()
+          .find(candidate => candidate.id === started.childId || candidate.session.id === started.childId)
+        if (!inheritsHistory && startedAgent !== undefined && sessionHasParentTurns(startedAgent.session)) {
+          throw new Error(
+            `role "${role.id}" must not inherit the parent conversation, but the child session already contains it`,
+          )
+        }
         return { kind: 'activation' as const, subagentId: started.childId }
-      } finally {
+      } catch (error) {
         deps.pending.delete(childId)
+        deps.pending.delete(activeId)
+        throw error
       }
     },
   }) as ToolDefinition

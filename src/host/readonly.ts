@@ -1,13 +1,14 @@
 /**
  * Read-only enforcement beyond the one-shot sandbox append.
  *
- * A read-only role keeps `sandbox/mode` at `read-only` for the life of the
- * session, and a per-agent tool guard refuses write-like tools the file
- * sandbox does not govern (MCP tools and other plugins). The guard classifies
- * by public name: DSH's MCP client does not copy `readOnlyHint` onto the
- * registered tool, so a hint cannot be consulted.
+ * A read-only role keeps `sandbox/mode` at `read-only`. The per-agent guard
+ * allows only known tool names, and only while the latest mode is `read-only`
+ * and every re-pin has succeeded. A same-named tool registered closer than the
+ * inherited host tool is refused. MCP hints are not consulted: DSH does not
+ * copy `readOnlyHint` onto the registered tool.
  */
 
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { RoleDefinition } from '../shared/roles.ts'
 import type { SessionPort } from './ports.ts'
 
@@ -16,8 +17,19 @@ const REPIN_LIMIT = 8
 
 const repinDepth = new Map<string, number>()
 
-/** Tools a read-only role may call. Shell and file reads stay; the sandbox denies their writes. */
-const ALLOWED_TOOLS: ReadonlySet<string> = new Set([
+/**
+ * Sessions whose re-pin failed. Every later tool call is refused.
+ * The id is remembered as well as the object: a resume can hand back a new
+ * session object for the same id, and that session stays closed.
+ */
+const failedPins = new WeakSet<SessionPort>()
+const failedPinIds = new Set<string>()
+
+/**
+ * Tools a read-only role may call while the sandbox is actually `read-only`.
+ * Matching is exact. `query` and `fetch` are not permission to invent a name.
+ */
+export const ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'bash',
   'pwsh',
   'read',
@@ -41,8 +53,6 @@ const ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'session_trace',
   'list_subagent_models',
   'list_agents',
-  'send_message',
-  'interrupt_agent',
   'job_list',
   'job_output',
   'ask_user_question',
@@ -56,37 +66,10 @@ const ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'run_code',
 ])
 
-/** Tools refused even when their name does not look like a write. */
-const DENIED_TOOLS: ReadonlySet<string> = new Set([
-  'write',
-  'edit',
-  'str_replace_editor',
-  'plugin_manager',
-  'present',
-  'todo_write',
-  'working_directory',
-  'create_worktree',
-  'create_goal',
-  'update_goal',
-  'schedule_create',
-  'schedule_delete',
-  'schedule_update',
-  'exit_plan_mode',
-  'ralph',
-  'workflow',
-  'subagent',
-  'subagent_fork',
-  'spawn_teammate',
-  'team_task_create',
-  'team_task_update',
-  'job_kill',
-  'load_workspace_dependencies',
-  'terminal_open',
-  'terminal_send',
-  'terminal_close',
-  'terminal_signal',
-])
+/** Coordination tools allowed only when the destination agent is read-only. */
+export const COORDINATION_TOOLS: ReadonlySet<string> = new Set(['send_message', 'interrupt_agent'])
 
+/** Tokens that mark a name as a write even when a read-like token sits beside them. */
 const WRITE_TOKENS: ReadonlySet<string> = new Set([
   'write',
   'edit',
@@ -134,40 +117,8 @@ const WRITE_TOKENS: ReadonlySet<string> = new Set([
   'navigate',
   'replace',
   'add',
-])
-
-const READ_TOKENS: ReadonlySet<string> = new Set([
-  'read',
-  'get',
-  'list',
-  'search',
-  'find',
-  'query',
-  'describe',
-  'show',
-  'fetch',
-  'status',
-  'ping',
-  'health',
-  'count',
-  'head',
-  'stat',
-  'info',
-  'view',
-  'lookup',
-  'check',
-  'inspect',
-  'explain',
-  'summarize',
-  'grep',
-  'glob',
-  'cat',
-  'ls',
-  'log',
-  'logs',
-  'history',
-  'blame',
-  'whoami',
+  'merge',
+  'destroy',
 ])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -184,6 +135,24 @@ function tokensOf(name: string): string[] {
 
 function refuse(name: string, why: string): string {
   return `read-only role: \`${name}\` was refused (${why}). Do not retry it; report what should change instead.`
+}
+
+/**
+ * Remember that this session could not be held at `read-only`.
+ * @param session - the session whose re-pin failed.
+ */
+export function markPinFailed(session: SessionPort): void {
+  failedPins.add(session)
+  failedPinIds.add(session.id)
+}
+
+/**
+ * Whether a re-pin has already failed for this session.
+ * @param session - the session to test.
+ * @returns true after {@link markPinFailed}.
+ */
+export function pinFailed(session: SessionPort): boolean {
+  return failedPins.has(session) || failedPinIds.has(session.id)
 }
 
 /**
@@ -212,6 +181,19 @@ export function lastSandboxMode(session: SessionPort): string | undefined {
 }
 
 /**
+ * Whether the log already contains a completed or open parent turn.
+ * A fresh child does not; a forked seed does.
+ * @param session - the child session.
+ * @returns true when a `turn/start` or `turn/end` event is present.
+ */
+export function sessionHasParentTurns(session: SessionPort): boolean {
+  return session.snapshotEvents().some(event => {
+    if (!isRecord(event)) return false
+    return event.type === 'turn/start' || event.type === 'turn/end'
+  })
+}
+
+/**
  * Append `sandbox/mode: read-only` until it is the last mode, or the attempt
  * limit is reached. Re-entering for the same session (a nested `session/event`)
  * returns immediately so the caller that is already looping can append again.
@@ -236,6 +218,21 @@ export function holdReadOnly(session: SessionPort): void {
   }
 }
 
+/** Where the tool the agent would run was registered, relative to the host tool of the same name. */
+export type ToolOrigin = 'inherited' | 'shadow' | 'reserved' | 'unknown'
+
+/** Facts the guard re-reads on every call. */
+export interface ReadOnlyGate {
+  /** Latest sandbox mode, or undefined when the log has none. */
+  readonly mode: string | undefined
+  /** True once a re-pin for this session has failed. */
+  readonly pinFailed: boolean
+  /** `inherited` when the visible tool is the host or ancestor tool. `reserved` is only `run_code`. */
+  readonly origin: ToolOrigin
+  /** True when `send_message` / `interrupt_agent` names a read-only destination. */
+  readonly destinationReadOnly?: boolean
+}
+
 function delegateDenial(args: unknown, roles: readonly RoleDefinition[]): string | undefined {
   if (isRecord(args) && args.role !== undefined && typeof args.role !== 'string') {
     return refuse('delegate', 'the role argument is not a string')
@@ -258,24 +255,55 @@ function delegateDenial(args: unknown, roles: readonly RoleDefinition[]): string
   return undefined
 }
 
+function destinationDenial(name: string, gate: ReadOnlyGate): string | undefined {
+  if (gate.destinationReadOnly === true) return undefined
+  return refuse(name, 'its destination is not a read-only agent')
+}
+
 /**
  * Whether a read-only agent may run this tool call.
+ * The mode and the pin flag are read by the caller on every call.
  * @param name - the tool's public name.
- * @param args - the call's arguments (`delegate` is judged from them).
+ * @param args - the call's arguments (`delegate` and coordination tools are judged from them).
  * @param roles - the session's selectable roles, used only for `delegate`.
+ * @param gate - the session's live sandbox facts and the tool's registration origin.
  * @returns a denial the model should see, or undefined to allow the call.
  */
-export function readOnlyCallDenial(name: string, args: unknown, roles: readonly RoleDefinition[]): string | undefined {
+export function readOnlyCallDenial(
+  name: string,
+  args: unknown,
+  roles: readonly RoleDefinition[],
+  gate: ReadOnlyGate,
+): string | undefined {
+  if (gate.pinFailed) return refuse(name, 'the read-only sandbox could not be restored')
+  if (gate.mode !== 'read-only') return refuse(name, 'the sandbox mode is not read-only')
   if (name === 'delegate') return delegateDenial(args, roles)
-  if (ALLOWED_TOOLS.has(name)) return undefined
-  if (DENIED_TOOLS.has(name) || name.startsWith('stagehand_')) {
-    return refuse(name, 'it can change state outside the read-only file sandbox')
+  if (gate.origin !== 'inherited' && gate.origin !== 'reserved') {
+    return refuse(name, 'its registration is not the inherited host tool')
   }
-  const tokens = tokensOf(name)
-  if (tokens.some(token => WRITE_TOKENS.has(token))) return refuse(name, 'its name marks it as a write')
-  if (tokens.some(token => READ_TOKENS.has(token))) return undefined
-  return refuse(
-    name,
-    'its name does not identify it as read-only, and MCP read-only annotations are not visible to plugins',
-  )
+  if (COORDINATION_TOOLS.has(name)) return destinationDenial(name, gate)
+  if (ALLOWED_TOOLS.has(name)) return undefined
+  if (tokensOf(name).some(token => WRITE_TOKENS.has(token)) || name.startsWith('stagehand_')) {
+    return refuse(name, 'its name marks it as a write')
+  }
+  return refuse(name, 'it is not an allowlisted read-only tool')
+}
+
+/**
+ * The inherited definition when `visible` is that object, otherwise a shadow.
+ * `run_code` with no definition is the reserved transport, which plugins cannot register.
+ * @param name - the tool name.
+ * @param visible - the definition the agent would run, if the registry answered.
+ * @param inherited - the host or ancestor definition of the same name, if it is the same object.
+ * @returns the origin the guard enforces.
+ */
+export function toolOrigin(
+  name: string,
+  visible: ToolDefinition | undefined,
+  inherited: ToolDefinition | undefined,
+): ToolOrigin {
+  if (name === 'run_code' && visible === undefined) return 'reserved'
+  if (visible === undefined) return 'unknown'
+  if (inherited !== undefined && inherited === visible) return 'inherited'
+  return 'shadow'
 }

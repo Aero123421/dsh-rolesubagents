@@ -7,6 +7,7 @@
 
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { type Mock, vi } from 'vitest'
+import { ALLOWED_TOOLS, COORDINATION_TOOLS } from '../src/host/readonly.ts'
 import type {
   AgentPort,
   HostContext,
@@ -150,6 +151,25 @@ export async function toolsModule() {
 // ---------------------------------------------------------------------------------------------------------------
 // Agents
 
+/**
+ * Definitions shared by the host registry and every agent that has not shadowed them.
+ * An allowlisted name resolves to one of these objects unless a test replaces it.
+ */
+export const inheritedTools = new Map<string, ToolDefinition>()
+
+for (const name of [...ALLOWED_TOOLS, ...COORDINATION_TOOLS]) {
+  inheritedTools.set(name, { name } as ToolDefinition)
+}
+
+/** Publish one definition as the inherited host tool of `name`. */
+export function shareInheritedTool(
+  name: string,
+  definition: ToolDefinition = { name } as ToolDefinition,
+): ToolDefinition {
+  inheritedTools.set(name, definition)
+  return definition
+}
+
 /** An Agent whose scoped tool registry records what is registered and hands out spy disposers. */
 export interface FakeAgent extends AgentPort {
   readonly session: FakeSession
@@ -159,6 +179,8 @@ export interface FakeAgent extends AgentPort {
   /** Guards registered in this Agent's scope, in registration order. */
   readonly guards: ((call: ToolGuardCall) => string | undefined)[]
   readonly guardDisposers: Mock<() => void>[]
+  /** Tools this agent registered over the inherited host tools. */
+  readonly shadows: Map<string, ToolDefinition>
 }
 
 export function fakeAgent(id: string, session: FakeSession = fakeSession(`session-${id}`)): FakeAgent {
@@ -181,7 +203,19 @@ export function fakeAgent(id: string, session: FakeSession = fakeSession(`sessio
     guardDisposers.push(dispose)
     return dispose
   })
-  return { id, session, registered, disposers, register, guards, guardDisposers, ctx: { tools: { register, guard } } }
+  const shadows = new Map<string, ToolDefinition>()
+  const get = (name: string) => shadows.get(name) ?? inheritedTools.get(name)
+  return {
+    id,
+    session,
+    registered,
+    disposers,
+    register,
+    guards,
+    guardDisposers,
+    shadows,
+    ctx: { tools: { register, guard, get } },
+  }
 }
 
 /** The tool an Agent had registered; fails the test when it has none. */
@@ -350,6 +384,7 @@ export function fakeWorld(): FakeWorld {
   }
 
   const ctx: HostContext = {
+    tools: { get: name => inheritedTools.get(name) },
     subagents: world.subagents,
     systemPrompt: {
       context(context) {

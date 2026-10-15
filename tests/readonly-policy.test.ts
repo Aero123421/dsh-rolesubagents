@@ -1,7 +1,23 @@
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
-import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from '../src/host/readonly.ts'
 import type { SessionPort } from '../src/host/ports.ts'
-import { FORK_INHERIT_WARNING, normalizeSettings, type RoleDefinition } from '../src/shared/roles.ts'
+import {
+  holdReadOnly,
+  lastSandboxMode,
+  markPinFailed,
+  pinFailed,
+  type ReadOnlyGate,
+  readOnlyCallDenial,
+  sandboxModeOf,
+  toolOrigin,
+} from '../src/host/readonly.ts'
+import {
+  FORK_INHERIT_WARNING,
+  forkInheritsHistory,
+  normalizeSettings,
+  type RoleDefinition,
+  selectableRoles,
+} from '../src/shared/roles.ts'
 
 const EXPLORER: RoleDefinition = {
   id: 'explorer',
@@ -75,27 +91,68 @@ describe('sandbox mode hold', () => {
 })
 
 describe('read-only tool gate', () => {
-  const deny = (name: string, args: unknown = {}) => readOnlyCallDenial(name, args, ROLES)
+  const open: ReadOnlyGate = { mode: 'read-only', pinFailed: false, origin: 'inherited' }
+  const deny = (name: string, args: unknown = {}, gate: Partial<ReadOnlyGate> = {}) =>
+    readOnlyCallDenial(name, args, ROLES, { ...open, ...gate })
 
-  it('allows sandbox reads and refuses file mutations and external writes', () => {
+  it('allows only the known host tools', () => {
     expect(deny('bash')).toBeUndefined()
     expect(deny('read')).toBeUndefined()
     expect(deny('web_search')).toBeUndefined()
-    expect(deny('send_message')).toBeUndefined()
-    expect(deny('write')).toMatch(/refused/)
-    expect(deny('edit')).toMatch(/refused/)
-    expect(deny('plugin_manager')).toMatch(/refused/)
-    expect(deny('todo_write')).toMatch(/refused/)
-    expect(deny('stagehand_act')).toMatch(/refused/)
+    expect(deny('web_fetch')).toBeUndefined()
+    expect(deny('cordis_inspect_query')).toBeUndefined()
+    expect(deny('run_code', {}, { origin: 'reserved' })).toBeUndefined()
+    expect(deny('write')).toMatch(/its name marks it as a write/)
+    expect(deny('edit')).toMatch(/its name marks it as a write/)
+    expect(deny('plugin_manager')).toMatch(/not an allowlisted read-only tool/)
+    expect(deny('todo_write')).toMatch(/its name marks it as a write/)
+    expect(deny('stagehand_act')).toMatch(/its name marks it as a write/)
   })
 
-  it('stops MCP writes, allows MCP reads, and fails closed when the name is neither', () => {
-    expect(deny('mcp__fs__read_file')).toBeUndefined()
+  it('does not treat query or fetch as permission, and refuses a write token beside a read-like word', () => {
+    for (const name of ['postgres_query', 'mcp__db__query', 'http_fetch', 'search_query', 'get_user']) {
+      expect(deny(name)).toMatch(/not an allowlisted read-only tool/)
+    }
+    expect(deny('check_and_merge')).toMatch(/its name marks it as a write/)
+    expect(deny('search_and_destroy')).toMatch(/its name marks it as a write/)
+    expect(deny('mcp__fs__read_file')).toMatch(/not an allowlisted read-only tool/)
     expect(deny('mcp__fs__write_file')).toMatch(/its name marks it as a write/)
-    expect(deny('mcp__fs__get_and_delete')).toMatch(/write/)
-    expect(deny('mcp__notes__frobnicate')).toMatch(/annotations are not visible/)
-    expect(deny('other_plugin_lookup')).toBeUndefined()
-    expect(deny('other_plugin_update_issue')).toMatch(/write/)
+    expect(deny('mcp__fs__get_and_delete')).toMatch(/its name marks it as a write/)
+    expect(deny('mcp__notes__frobnicate')).toMatch(/not an allowlisted read-only tool/)
+    expect(deny('other_plugin_lookup')).toMatch(/not an allowlisted read-only tool/)
+    expect(deny('other_plugin_update_issue')).toMatch(/its name marks it as a write/)
+  })
+
+  it('refuses every tool when the pin failed or the live mode is not read-only', () => {
+    expect(deny('bash', {}, { pinFailed: true })).toMatch(/could not be restored/)
+    expect(deny('run_code', {}, { pinFailed: true, origin: 'reserved' })).toMatch(/could not be restored/)
+    expect(deny('delegate', { role: 'explorer' }, { pinFailed: true })).toMatch(/could not be restored/)
+    expect(deny('bash', {}, { mode: 'workspace-write' })).toMatch(/sandbox mode is not read-only/)
+    expect(deny('run_code', {}, { mode: 'danger-full-access', origin: 'reserved' })).toMatch(
+      /sandbox mode is not read-only/,
+    )
+    expect(deny('read', {}, { mode: undefined })).toMatch(/sandbox mode is not read-only/)
+  })
+
+  it('refuses a tool whose registration is not the inherited host tool', () => {
+    expect(deny('bash', {}, { origin: 'shadow' })).toMatch(/registration is not the inherited host tool/)
+    expect(deny('read', {}, { origin: 'unknown' })).toMatch(/registration is not the inherited host tool/)
+    expect(deny('run_code', {}, { origin: 'shadow' })).toMatch(/registration is not the inherited host tool/)
+    expect(toolOrigin('run_code', undefined, undefined)).toBe('reserved')
+    expect(toolOrigin('bash', undefined, undefined)).toBe('unknown')
+    const inherited = { name: 'bash' } as ToolDefinition
+    expect(toolOrigin('bash', inherited, inherited)).toBe('inherited')
+    expect(toolOrigin('bash', { name: 'bash' } as ToolDefinition, inherited)).toBe('shadow')
+  })
+
+  it('allows send_message and interrupt_agent only toward a read-only destination', () => {
+    expect(deny('send_message', { agent_id: 'parent' })).toMatch(/destination is not a read-only agent/)
+    expect(deny('interrupt_agent', {})).toMatch(/destination is not a read-only agent/)
+    expect(deny('send_message', { agent_id: 'child' }, { destinationReadOnly: true })).toBeUndefined()
+    expect(deny('interrupt_agent', { agent_id: 'child' }, { destinationReadOnly: true })).toBeUndefined()
+    expect(deny('send_message', { agent_id: 'child' }, { destinationReadOnly: true, origin: 'shadow' })).toMatch(
+      /registration is not the inherited host tool/,
+    )
   })
 
   it('refuses delegation to a writable role or a full fork, and allows a read-only task fork', () => {
@@ -106,10 +163,19 @@ describe('read-only tool gate', () => {
     expect(deny('delegate', { role: 'task' })).toBeUndefined()
     expect(deny('delegate', { role: 'missing' })).toMatch(/unknown role/)
   })
+
+  it('remembers a failed pin on a later session object with the same id', () => {
+    const first = logSession('pin-stuck')
+    const later = logSession('pin-stuck')
+    expect(pinFailed(later)).toBe(false)
+    markPinFailed(first)
+    expect(pinFailed(later)).toBe(true)
+    expect(deny('bash', {}, { pinFailed: pinFailed(later) })).toMatch(/could not be restored/)
+  })
 })
 
 describe('fork scope normalization', () => {
-  it('keeps full and task, repairs an invalid scope, and drops a scope on a spawn role', () => {
+  it('keeps full and task, switches an invalid scope off, and drops a scope on a spawn role', () => {
     const full = normalizeSettings({
       enabled: true,
       roles: [
@@ -127,10 +193,16 @@ describe('fork scope normalization', () => {
         { id: 'fresh', context: 'spawn', forkScope: 'task', readOnly: false, description: '', instructions: '' },
       ],
     })
-    expect(full.settings.roles.find(role => role.id === 'fork')).toMatchObject({ forkScope: 'task' })
-    expect(full.settings.roles.find(role => role.id === 'wide')).toMatchObject({ forkScope: 'full' })
+    expect(full.settings.roles.find(role => role.id === 'fork')).toMatchObject({ forkScope: 'task', enabled: true })
+    const wide = full.settings.roles.find(role => role.id === 'wide')
+    expect(wide).toMatchObject({ forkScope: 'task', enabled: false, context: 'fork' })
+    expect(wide === undefined ? undefined : forkInheritsHistory(wide)).toBe(false)
+    expect(selectableRoles(full.settings).map(role => role.id)).not.toContain('wide')
     expect(full.settings.roles.find(role => role.id === 'fresh')?.forkScope).toBeUndefined()
     expect(full.problems.map(problem => problem.code)).toEqual(['invalid-fork-scope', 'spawn-fork-scope-ignored'])
+    expect(full.problems.map(problem => problem.message).join('\n')).toMatch(
+      /switched off and does not inherit history/,
+    )
     expect(FORK_INHERIT_WARNING).toMatch(/untrusted data/)
   })
 })

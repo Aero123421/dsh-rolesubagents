@@ -268,9 +268,10 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
           index,
           id,
           code: 'invalid-fork-scope',
-          message: `fork role "${id}" must inherit "full" or "task"; it inherits the full history`,
+          message: `fork role "${id}" must inherit "full" or "task"; it is switched off and does not inherit history`,
         })
-        role.forkScope = 'full'
+        role.forkScope = 'task'
+        role.enabled = false
       }
     } else if (raw.forkScope !== undefined && raw.forkScope !== null && raw.forkScope !== '') {
       problems.push({

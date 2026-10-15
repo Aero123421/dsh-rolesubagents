@@ -2,9 +2,10 @@
 
 ## 0.1.1
 
-- Read-only roles re-pin `sandbox/mode` to `read-only` when a later change selects a wider mode.
-- Read-only agents refuse write-like MCP and plugin tools by public name. The README lists what that guard cannot see.
-- Fork roles warn that inherited tool results can carry prompt injection, and can pass only the task instead of the parent conversation.
+- Read-only roles re-pin `sandbox/mode` to `read-only` when a later change selects a wider mode. A failed re-pin refuses every tool, and a failed pin on startup or resume aborts that startup.
+- Read-only agents allow only a fixed list of inherited host tools, and only while the live mode is `read-only`. `query` or `fetch` in a name is not enough. `send_message` and `interrupt_agent` reach only a read-only destination. The README lists what that guard cannot see.
+- A child started by `delegate` receives its role whichever `agent/created` source arrives. A delegated child with no role is pinned read-only.
+- Fork roles warn that inherited tool results can carry prompt injection. Task only refuses a provider that copies the parent conversation. An invalid fork scope switches that role off.
 
 ## 0.1.0
 
