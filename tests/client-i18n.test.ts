@@ -13,6 +13,8 @@ const CODES: SettingsProblem['code'][] = [
   'invalid-model',
   'fork-model-ignored',
   'fork-preset-ignored',
+  'invalid-fork-scope',
+  'spawn-fork-scope-ignored',
   'invalid-preset',
   'builtin-context-fixed',
   'builtin-missing',

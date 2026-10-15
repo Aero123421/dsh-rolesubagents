@@ -16,6 +16,7 @@ import {
   MAX_ROLES,
   normalizeSettings,
   ROLE_ID_PATTERN,
+  type ForkScope,
   type RoleContext,
   type RoleDefinition,
   type RoleModel,
@@ -87,6 +88,7 @@ function canonical(role: RoleDefinition): unknown[] {
     role.description,
     role.instructions,
     role.context,
+    role.forkScope ?? null,
     role.readOnly,
     role.agentPreset ?? null,
     model === undefined ? null : [model.provider, model.model, model.reasoningEffort ?? null],
@@ -183,9 +185,26 @@ export function patchRole(draft: Draft, uid: number, patch: RolePatch): Draft {
 export function setContext(draft: Draft, uid: number, context: RoleContext): Draft {
   return mapRow(draft, uid, role => {
     if (role.builtin !== undefined || role.context === context) return role
-    if (context === 'spawn') return { ...role, context }
+    if (context === 'spawn') {
+      const { model: _model, agentPreset: _preset, forkScope: _scope, ...rest } = role
+      return { ...rest, context }
+    }
     const { model: _model, agentPreset: _preset, ...rest } = role
-    return { ...rest, context }
+    return { ...rest, context, forkScope: 'full' }
+  })
+}
+
+/**
+ * Choose how much parent history a fork role copies. Ignored unless the role is a fork.
+ * @param draft - the draft.
+ * @param uid - the row.
+ * @param scope - `full` copies completed turns; `task` does not.
+ * @returns the edited draft.
+ */
+export function setForkScope(draft: Draft, uid: number, scope: ForkScope): Draft {
+  return mapRow(draft, uid, role => {
+    if (role.context !== 'fork' || role.forkScope === scope) return role
+    return { ...role, forkScope: scope }
   })
 }
 

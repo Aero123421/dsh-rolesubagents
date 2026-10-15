@@ -9,7 +9,13 @@
  * it is a conflict, and the only ways out are to discard or reload.
  */
 
-import { normalizeSettings, type RoleContext, type RoleModel, type SettingsProblem } from '../shared/roles.ts'
+import {
+  type ForkScope,
+  normalizeSettings,
+  type RoleContext,
+  type RoleModel,
+  type SettingsProblem,
+} from '../shared/roles.ts'
 import {
   addBlankRole,
   addTemplateRole,
@@ -29,6 +35,7 @@ import {
   setAgentPreset,
   setContext,
   setEnabled,
+  setForkScope,
   setModel,
 } from './draft.ts'
 import type { CatalogEffort, ConfigFormLike, DshRemote, FormSnapshot, ModelCatalogLike } from './dsh.ts'
@@ -107,6 +114,7 @@ export interface Controller {
   setEnabled(enabled: boolean): void
   patchRole(uid: number, patch: RolePatch): void
   setContext(uid: number, context: RoleContext): void
+  setForkScope(uid: number, scope: ForkScope): void
   setModel(uid: number, model: RoleModel | undefined): void
   setAgentPreset(uid: number, preset: string | undefined): void
   moveRole(uid: number, delta: -1 | 1): void
@@ -315,6 +323,7 @@ export function createController(options: ControllerOptions): Controller {
     setEnabled: enabled => edit(current => setEnabled(current, enabled)),
     patchRole: (uid, patch) => edit(current => patchRole(current, uid, patch)),
     setContext: (uid, context) => edit(current => setContext(current, uid, context)),
+    setForkScope: (uid, scope) => edit(current => setForkScope(current, uid, scope)),
     setModel: (uid, model) => edit(current => setModel(current, uid, model)),
     setAgentPreset: (uid, preset) => edit(current => setAgentPreset(current, uid, preset)),
     moveRole: (uid, delta) => edit(current => moveRow(current, uid, delta)),

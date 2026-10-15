@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef } from 'react'
 import {
+  type ForkScope,
   MAX_DESCRIPTION_LENGTH,
   MAX_INSTRUCTIONS_LENGTH,
   type RoleDefinition,
@@ -119,6 +120,8 @@ export function RoleEditor({ row, state }: EditorProps) {
         {builtin ? <p className="dshrs-hint">{t('ed.contextFixed')}</p> : null}
       </fieldset>
 
+      {role.context === 'fork' ? <ForkScopeField uid={uid} role={role} canEdit={canEdit} /> : null}
+
       <ModelFields uid={uid} role={role} state={state} error={errorOf('model')} />
       <PresetField uid={uid} role={role} state={state} error={errorOf('preset')} />
 
@@ -141,6 +144,35 @@ export function RoleEditor({ row, state }: EditorProps) {
 
       <Preview role={role} />
     </section>
+  )
+}
+
+function ForkScopeField({ uid, role, canEdit }: { uid: number; role: RoleDefinition; canEdit: boolean }) {
+  const c = useController()
+  const t = useT()
+  const scope: ForkScope = role.forkScope === 'task' ? 'task' : 'full'
+  return (
+    <>
+      <Field label={t('ed.forkScope')} help={scope === 'task' ? t('ed.forkScopeTaskHelp') : undefined}>
+        {a11y => (
+          <select
+            {...a11y}
+            className="dshrs-select"
+            value={scope}
+            disabled={!canEdit}
+            onChange={event => c.setForkScope(uid, event.target.value === 'task' ? 'task' : 'full')}
+          >
+            <option value="full">{t('ed.forkScopeFull')}</option>
+            <option value="task">{t('ed.forkScopeTask')}</option>
+          </select>
+        )}
+      </Field>
+      {scope === 'full' ? (
+        <p className="dshrs-notice dshrs-notice--warn" role="note">
+          {t('ed.forkScopeWarn')}
+        </p>
+      ) : null}
+    </>
   )
 }
 

@@ -7,8 +7,17 @@
 
 import { randomUUID } from 'node:crypto'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { type RoleDefinition, type RoleSettings, roleListLine, selectableRoles } from '../shared/roles.ts'
+import {
+  FORK_RESULT_WARNING,
+  forkInheritsHistory,
+  type RoleDefinition,
+  type RoleSettings,
+  roleListLine,
+  selectableRoles,
+} from '../shared/roles.ts'
 import type { AgentPort, ChildAgentOptions, HostContext } from './ports.ts'
+import { readOnlyCallDenial } from './readonly.ts'
+import { readRole } from './records.ts'
 
 export const TOOL_NAME = 'delegate'
 
@@ -113,7 +122,19 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           subagentId: { type: 'string', required: true },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: `started subagent ${value.subagentId}` }],
+      render: (args, value) => {
+        const requested = typeof args === 'object' && args !== null && 'role' in args ? args.role : undefined
+        let text = `started subagent ${value.subagentId}`
+        if (typeof requested === 'string' || requested === undefined) {
+          try {
+            const chosen = resolveRole(roles, requested === '' ? undefined : requested)
+            if (forkInheritsHistory(chosen)) text = `${text}\n${FORK_RESULT_WARNING}`
+          } catch {
+            // A rejected role never renders a successful start.
+          }
+        }
+        return [{ type: 'text', text }]
+      },
     },
     isConcurrencySafe: () => true,
     async execute(rawArgs, exec) {
@@ -121,7 +142,17 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const parent = (exec as { agent?: AgentPort }).agent
       if (parent === undefined) throw new Error('subagent tool requires a calling agent')
       const role = resolveRole(roles, args.role)
-      const providerName = role.context === 'fork' ? deps.forkProvider : deps.spawnProvider
+      if (readRole(parent.session)?.readOnly === true) {
+        const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles)
+        if (denial !== undefined) throw new Error(denial)
+      }
+      const inheritsHistory = forkInheritsHistory(role)
+      if (inheritsHistory) {
+        deps.ctx.logger.warn(
+          `rolesubagents: role "${role.id}" forks the parent conversation; inherited tool results can carry prompt injection`,
+        )
+      }
+      const providerName = inheritsHistory ? deps.forkProvider : deps.spawnProvider
       const provider = deps.ctx.subagents.getProvider(providerName)
       if (provider === undefined) throw new Error(`subagent provider "${providerName}" is not available`)
       const agentOptions: ChildAgentOptions | undefined =

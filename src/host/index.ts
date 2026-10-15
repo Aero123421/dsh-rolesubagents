@@ -5,9 +5,11 @@
  * fixes the Session's role list (first meeting records the current settings),
  * registers the role-aware `delegate` tool in that Agent's own scope, and, for
  * each child the tool starts, writes the child's role into the child's log and
- * pins the read-only sandbox before the child's first request. The role's
- * instructions reach the child as runtime context, so the child's system
- * prompt and tools stay identical to its parent's.
+ * pins the read-only sandbox before the child's first request and, while that
+ * role is read-only, appends `read-only` again whenever a later `sandbox/mode`
+ * selects anything else. A guard on that agent refuses write-like MCP and
+ * plugin tools. The role's instructions reach the child as runtime context, so
+ * the child's system prompt and tools stay identical to its parent's.
  */
 
 import z from '@deepseek-ai/schemastery'
@@ -17,8 +19,10 @@ import {
   type RoleDefinition,
   type RoleSettings,
   roleContextText,
+  selectableRoles,
 } from '../shared/roles.ts'
-import type { AgentPort, HostContext } from './ports.ts'
+import type { AgentPort, HostContext, SessionPort } from './ports.ts'
+import { holdReadOnly, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
 import { readRole, readRolesSnapshot, writeRole, writeRolesSnapshot } from './records.ts'
 import { buildTool, type PendingChild, TOOL_NAME } from './tool.ts'
 
@@ -65,12 +69,19 @@ interface SessionState {
   toolInstalled: boolean
 }
 
+interface Prepared {
+  tool?: () => void
+  guard?: () => void
+}
+
 export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   const spawnProvider = config.spawnProvider ?? 'spawn'
   const forkProvider = config.forkProvider ?? 'fork'
   const pending = new Map<string, PendingChild>()
-  const installed = new Map<AgentPort, () => void>()
+  const installed = new Map<AgentPort, Prepared>()
   const sessions = new Map<string, SessionState>()
+  /** Sessions whose live role is read-only, including the moment before the role record is written. */
+  const readOnlySessions = new WeakSet<SessionPort>()
   let lastProblems = ''
 
   const currentSettings = (): RoleSettings => {
@@ -110,12 +121,37 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     return snapshot
   }
 
+  const isReadOnlySession = (session: SessionPort): boolean => {
+    if (readOnlySessions.has(session)) return true
+    return readRole(session)?.readOnly === true
+  }
+
+  const disposePrepared = (prepared: Prepared | undefined): void => {
+    prepared?.guard?.()
+    prepared?.tool?.()
+  }
+
   const install = (agent: AgentPort, snapshot: RoleSettings): void => {
     if (installed.has(agent)) return
     const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending })
-    if (definition === undefined) return
-    installed.set(agent, agent.ctx.tools.register(definition))
-    stateOf(agent.session.id).toolInstalled = true
+    const prepared: Prepared = {}
+    if (definition !== undefined) {
+      prepared.tool = agent.ctx.tools.register(definition)
+      stateOf(agent.session.id).toolInstalled = true
+    }
+    const role = roleOf(agent)
+    if (role?.readOnly === true) {
+      readOnlySessions.add(agent.session)
+      prepared.guard = agent.ctx.tools.guard(call =>
+        readOnlyCallDenial(call.name, call.arguments, selectableRoles(snapshot)),
+      )
+    }
+    installed.set(agent, prepared)
+  }
+
+  const pinReadOnly = (agent: AgentPort): void => {
+    readOnlySessions.add(agent.session)
+    holdReadOnly(agent.session)
   }
 
   const onCreated = (agent: AgentPort, source: string): void => {
@@ -123,14 +159,16 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     if (child !== undefined && source === 'startup') {
       // Pin the sandbox first: if it fails, the error escapes `guarded` and
       // aborts the child's creation instead of letting it run writable.
-      if (child.role.readOnly) agent.session.append('sandbox/mode', { mode: 'read-only' })
+      if (child.role.readOnly) pinReadOnly(agent)
       writeRole(agent.session, child.role)
       writeRolesSnapshot(agent.session, child.snapshot)
       stateOf(agent.session.id).role = child.role
       install(agent, child.snapshot)
       return
     }
-    install(agent, snapshotFor(agent))
+    const snapshot = snapshotFor(agent)
+    install(agent, snapshot)
+    if (roleOf(agent)?.readOnly === true) pinReadOnly(agent)
   }
 
   ctx.systemPrompt.context({
@@ -172,17 +210,35 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     }
   }
 
-  ctx.on('agent/created', ({ agent, source }) => guarded(agent, source))
-  ctx.on('agent/disposed', ({ agent }) => {
-    installed.get(agent)?.()
+  const stopCreated = ctx.on('agent/created', ({ agent, source }) => guarded(agent, source))
+  const stopDisposed = ctx.on('agent/disposed', ({ agent }) => {
+    disposePrepared(installed.get(agent))
     installed.delete(agent)
     sessions.delete(agent.session.id)
   })
+  const stopSession = ctx.on('session/event', (session, event) => {
+    if (event.type !== 'sandbox/mode' || sandboxModeOf(event.data) === 'read-only') return
+    if (!isReadOnlySession(session)) return
+    try {
+      holdReadOnly(session)
+    } catch (error) {
+      ctx.logger.warn(
+        `rolesubagents: could not re-pin read-only on session ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  })
   for (const agent of ctx.agents.list()) guarded(agent, 'resume')
+
+  const unsubscribe = (stop: unknown): void => {
+    if (typeof stop === 'function') stop()
+  }
 
   ctx.effect(
     () => () => {
-      for (const dispose of installed.values()) dispose()
+      unsubscribe(stopCreated)
+      unsubscribe(stopDisposed)
+      unsubscribe(stopSession)
+      for (const prepared of installed.values()) disposePrepared(prepared)
       installed.clear()
       sessions.clear()
       pending.clear()

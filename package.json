@@ -1,6 +1,6 @@
 {
   "name": "dsh-rolesubagents",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, and let the parent pick one per delegation.",
   "keywords": [
     "dsh",

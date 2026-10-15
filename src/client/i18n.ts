@@ -27,6 +27,7 @@ const en = {
   'row.freshTitle': 'The child starts with an empty conversation',
   'row.fork': 'Fork',
   'row.forkTitle': "The child inherits the parent's completed turns",
+  'row.taskOnly': 'Task only',
   'row.model': 'Model: {model}',
   'row.modelParent': "parent's model",
   'row.readOnly': 'Read-only',
@@ -59,6 +60,13 @@ const en = {
   'ed.contextSpawn': 'Fresh (spawn): the child starts with an empty conversation',
   'ed.contextFork': "Fork: the child inherits the parent's completed turns",
   'ed.contextFixed': 'The context of a built-in role is fixed.',
+  'ed.forkScope': 'Inherited context',
+  'ed.forkScopeFull': 'All completed turns',
+  'ed.forkScopeTask': 'Task only',
+  'ed.forkScopeWarn':
+    'Full inheritance copies the parent\'s completed turns, including tool results. A prompt injection in that history is copied into the child. Choose "Task only" to pass only the delegation prompt.',
+  'ed.forkScopeTaskHelp':
+    'The child starts fresh and does not see this conversation. Put everything it needs in the prompt.',
   'ed.model': 'Child model',
   'ed.provider': 'Provider',
   'ed.modelId': 'Model',
@@ -81,7 +89,8 @@ const en = {
   'ed.presetNoneAvailable': 'This Host has no agent presets.',
   'ed.readOnly': 'Read-only',
   'ed.readOnlyLabel': 'Block file writes for this role',
-  'ed.readOnlyHelp': "Blocks file writes by bash and file tools. MCP tools and other plugins' tools are not covered.",
+  'ed.readOnlyHelp':
+    'Pins the file sandbox to read-only and blocks write-like MCP and plugin tools. Tools are classified by name; the README lists what still runs.',
   'ed.preview': 'Preview',
   'ed.previewParent': 'What the parent sees',
   'ed.previewChild': 'What the child gets',
@@ -116,6 +125,8 @@ const en = {
   'issue.forkModel': 'Fork role "{id}" always uses the parent\'s model.',
   'issue.preset': 'The agent preset of "{id}" is not a valid ID.',
   'issue.forkPreset': 'Fork role "{id}" cannot use an agent preset.',
+  'issue.forkScope': 'Fork role "{id}" must inherit either all completed turns or the task only.',
+  'issue.spawnForkScope': 'Role "{id}" is not a fork, so its inherited-context option is removed.',
   'issue.builtin': 'The built-in roles general and fork must stay in the list, once each, with their fixed context.',
 } as const
 
@@ -141,6 +152,7 @@ const ja: Record<Key, string> = {
   'row.freshTitle': '子は空の会話から始まります',
   'row.fork': 'フォーク',
   'row.forkTitle': '子は親の完了済みのやり取りを引き継ぎます',
+  'row.taskOnly': 'タスクのみ',
   'row.model': 'モデル: {model}',
   'row.modelParent': '親と同じモデル',
   'row.readOnly': '読み取り専用',
@@ -172,6 +184,12 @@ const ja: Record<Key, string> = {
   'ed.contextSpawn': '新規（spawn）: 子は空の会話から始まります',
   'ed.contextFork': 'フォーク（fork）: 子は親の完了済みのやり取りを引き継ぎます',
   'ed.contextFixed': '組み込みロールのコンテキストは固定です。',
+  'ed.forkScope': '引き継ぐ文脈',
+  'ed.forkScopeFull': '完了済みのやり取りすべて',
+  'ed.forkScopeTask': 'タスクのみ',
+  'ed.forkScopeWarn':
+    'すべて引き継ぐと、親の完了済みのやり取り（ツール結果を含む）が子にコピーされます。その履歴に紛れたプロンプト注入も子に届きます。委譲プロンプトだけを渡すときは「タスクのみ」を選んでください。',
+  'ed.forkScopeTaskHelp': '子は空の会話から始まり、この会話は見えません。必要な内容はプロンプトに書いてください。',
   'ed.model': '子のモデル',
   'ed.provider': 'プロバイダー',
   'ed.modelId': 'モデル',
@@ -194,7 +212,8 @@ const ja: Record<Key, string> = {
   'ed.presetNoneAvailable': 'このホストには利用できるエージェントプリセットがありません。',
   'ed.readOnly': '読み取り専用',
   'ed.readOnlyLabel': 'このロールではファイルへの書き込みを禁止する',
-  'ed.readOnlyHelp': 'bash とファイルツールによる書き込みを止めます。MCPツールや他のプラグインのツールは対象外です。',
+  'ed.readOnlyHelp':
+    'ファイルサンドボックスを読み取り専用に固定し、書き込み系の MCP ツールと他プラグインのツールを止めます。判定はツール名によります。止まりきらない範囲は README に書いてあります。',
   'ed.preview': 'プレビュー',
   'ed.previewParent': '親に見える内容',
   'ed.previewChild': '子に渡される内容',
@@ -228,6 +247,8 @@ const ja: Record<Key, string> = {
   'issue.forkModel': 'フォークのロール「{id}」は常に親のモデルを使います。',
   'issue.preset': '「{id}」のエージェントプリセットIDが正しくありません。',
   'issue.forkPreset': 'フォークのロール「{id}」ではエージェントプリセットを使えません。',
+  'issue.forkScope': 'フォークのロール「{id}」が引き継げるのは、完了済みのやり取り全部か、タスクだけか、どちらかです。',
+  'issue.spawnForkScope': 'ロール「{id}」はフォークではないので、引き継ぐ文脈の指定は外します。',
   'issue.builtin': '組み込みロール general と fork は、固定のコンテキストで1つずつ残す必要があります。',
 }
 
@@ -260,6 +281,8 @@ const ISSUE_KEYS: Record<SettingsProblem['code'], Key> = {
   'invalid-model': 'issue.model',
   'fork-model-ignored': 'issue.forkModel',
   'fork-preset-ignored': 'issue.forkPreset',
+  'invalid-fork-scope': 'issue.forkScope',
+  'spawn-fork-scope-ignored': 'issue.spawnForkScope',
   'invalid-preset': 'issue.preset',
   'builtin-context-fixed': 'issue.builtin',
   'builtin-missing': 'issue.builtin',

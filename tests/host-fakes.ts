@@ -16,6 +16,7 @@ import type {
   SubagentProviderPort,
   SubagentsPort,
   SystemPromptPort,
+  ToolGuardCall,
 } from '../src/host/ports.ts'
 import { DEFAULT_ROLES, type RoleDefinition, type RoleSettings } from '../src/shared/roles.ts'
 
@@ -155,18 +156,32 @@ export interface FakeAgent extends AgentPort {
   readonly registered: ToolDefinition[]
   readonly disposers: Mock<() => void>[]
   readonly register: Mock<(definition: ToolDefinition) => () => void>
+  /** Guards registered in this Agent's scope, in registration order. */
+  readonly guards: ((call: ToolGuardCall) => string | undefined)[]
+  readonly guardDisposers: Mock<() => void>[]
 }
 
 export function fakeAgent(id: string, session: FakeSession = fakeSession(`session-${id}`)): FakeAgent {
   const registered: ToolDefinition[] = []
   const disposers: Mock<() => void>[] = []
+  const guards: ((call: ToolGuardCall) => string | undefined)[] = []
+  const guardDisposers: Mock<() => void>[] = []
   const register = vi.fn((definition: ToolDefinition) => {
     registered.push(definition)
     const dispose = vi.fn<() => void>()
     disposers.push(dispose)
     return dispose
   })
-  return { id, session, registered, disposers, register, ctx: { tools: { register } } }
+  const guard = vi.fn((check: (call: ToolGuardCall) => string | undefined) => {
+    guards.push(check)
+    const dispose = vi.fn<() => void>(() => {
+      const index = guards.indexOf(check)
+      if (index >= 0) guards.splice(index, 1)
+    })
+    guardDisposers.push(dispose)
+    return dispose
+  })
+  return { id, session, registered, disposers, register, guards, guardDisposers, ctx: { tools: { register, guard } } }
 }
 
 /** The tool an Agent had registered; fails the test when it has none. */
@@ -199,6 +214,7 @@ export function fakeProvider(name: string, patch: Partial<SubagentProviderPort> 
 type RuntimeContext = Parameters<SystemPromptPort['context']>[0]
 type CreatedPayload = { agent: AgentPort; source: string }
 type DisposedPayload = { agent: AgentPort }
+type SessionListener = (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void
 type SessionsService = { get(id: string): SessionPort | undefined }
 
 export interface FakeWorld {
@@ -225,6 +241,8 @@ export interface FakeWorld {
   newAgent(id: string, header?: SessionPort['header']): FakeAgent
   emitCreated(agent: AgentPort, source?: string): void
   emitDisposed(agent: AgentPort): void
+  /** Append a sandbox mode and publish it on `session/event`, as a live Session does. */
+  emitSandbox(session: FakeSession, mode: string): void
   /** The text the plugin's runtime-context provider contributes for an Agent (or for none). */
   runtimeContext(agent?: AgentPort): string
   /** Run the plugin's `ctx.effect` cleanups, as the Host does when the plugin is unloaded. */
@@ -238,6 +256,7 @@ export interface FakeWorld {
 export function fakeWorld(): FakeWorld {
   const created: ((payload: CreatedPayload) => void)[] = []
   const disposed: ((payload: DisposedPayload) => void)[] = []
+  const sessionEvents: SessionListener[] = []
   const cleanups: (() => void)[] = []
   const providers = new Map<string, SubagentProviderPort>([
     ['spawn', fakeProvider('spawn')],
@@ -289,6 +308,11 @@ export function fakeWorld(): FakeWorld {
     emitDisposed(agent) {
       for (const listener of disposed) listener({ agent })
     },
+    emitSandbox(session, mode) {
+      session.append('sandbox/mode', { mode })
+      const event = { type: 'sandbox/mode', data: { mode } }
+      for (const listener of sessionEvents) listener(session, event)
+    },
     runtimeContext(agent) {
       const context = contexts.find(entry => entry.name === 'rolesubagents:role')
       if (context === undefined) throw new Error('the plugin registered no runtime context')
@@ -310,10 +334,18 @@ export function fakeWorld(): FakeWorld {
 
   function on(event: 'agent/created', listener: (payload: CreatedPayload) => void): unknown
   function on(event: 'agent/disposed', listener: (payload: DisposedPayload) => void): unknown
-  function on(event: string, listener: (payload: never) => void): unknown {
+  function on(event: 'session/event', listener: SessionListener): unknown
+  function on(event: string, listener: (...args: never[]) => void): unknown {
     if (event === 'agent/created') created.push(listener as (payload: CreatedPayload) => void)
     else if (event === 'agent/disposed') disposed.push(listener as (payload: DisposedPayload) => void)
-    else throw new Error(`unexpected event ${event}`)
+    else if (event === 'session/event') {
+      const fn = listener as SessionListener
+      sessionEvents.push(fn)
+      return () => {
+        const index = sessionEvents.indexOf(fn)
+        if (index >= 0) sessionEvents.splice(index, 1)
+      }
+    } else throw new Error(`unexpected event ${event}`)
     return () => {}
   }
 
