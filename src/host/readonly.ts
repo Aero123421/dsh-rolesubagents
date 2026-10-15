@@ -9,7 +9,14 @@
  */
 
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import type { RoleDefinition } from '../shared/roles.ts'
+import {
+  MAX_DESCRIPTION_LENGTH,
+  MAX_INSTRUCTIONS_LENGTH,
+  MAX_NAME_LENGTH,
+  MAX_ROLES,
+  ROLE_ID_PATTERN,
+  type RoleDefinition,
+} from '../shared/roles.ts'
 import type { SessionPort } from './ports.ts'
 
 /** How many times one hold will re-append `read-only` if a nested writer undoes it. */
@@ -218,15 +225,35 @@ export function lastSandboxMode(session: SessionPort): string | undefined {
  * conversation.
  *
  * `setup` events carry mode, route, and boundary metadata. They are allowed
- * when the payload does not embed a conversation message. `schedule/change`
- * is the exception that also carries a reminder prompt: a `prompt` field
- * refuses it. `message` events carry conversation text and are refused even
- * when the payload is empty. `splice` is `agent/inbox/spliced`, judged from
- * its inserted messages. `plugin` is a `plugin:` record, allowed only for
- * this plugin's namespace and only without a transcript. Anything else is
- * `unknown` and refused.
+ * when the payload does not embed a conversation message and its strings stay
+ * within the host's label sizes. `schedule/change` is the exception that also
+ * carries a reminder prompt: a `prompt` field refuses it. `message` events
+ * carry conversation text. Before the matching delegation task they are
+ * refused. After that task, the child's own step (system prompt, the task
+ * echoed back, host notices, assistant output, and tool events) is allowed.
+ * A `user` message whose text is not that task stays parent history. `splice`
+ * is `agent/inbox/spliced`. `plugin` is a `plugin:` record, allowed only for
+ * this plugin's namespace and only with the fields this plugin writes.
+ * Anything else is `unknown` and refused.
  */
 export type ChildEventClass = 'setup' | 'message' | 'splice' | 'plugin' | 'unknown'
+
+/**
+ * The task this `delegate` call submitted. The child's inbox splice has to
+ * match it. `delivery: 'parent'` also accepts the prompt followed by
+ * {@link continuableReturnGuidance}, which is what the host appends when
+ * `send_message` is the adjacent-agent tool. The prompt alone stays accepted
+ * because that host omits the guidance when the tool is absent.
+ */
+export interface FreshChildTask {
+  /** `request.prompt`. This plugin sends one text block. */
+  readonly prompt: readonly { readonly type: 'text'; readonly text: string }[]
+  /** Parent agent id named by the return guidance. */
+  readonly parentId: string
+  readonly delivery: 'parent' | 'caller'
+  /** `spec.label`. A catalog or descriptor label may repeat it. */
+  readonly description: string
+}
 
 /** Records this plugin writes. Other `plugin:` namespaces can carry a transcript. */
 const PLUGIN_RECORD_PREFIX = 'plugin:dsh-rolesubagents/'
@@ -234,13 +261,44 @@ const PLUGIN_RECORD_PREFIX = 'plugin:dsh-rolesubagents/'
 /** How far a payload is walked before an unscanned remainder is treated as parent content. */
 const PAYLOAD_SCAN_LIMIT = 32
 
+/**
+ * A session title is one line. The base profile caps it at 80 UTF-8 bytes;
+ * 240 characters still rejects a copied conversation and accepts that title.
+ */
+const TITLE_LIMIT = 240
+
+/** Model ids, modes, policies, and other setup tokens. */
+const SETUP_TOKEN_LIMIT = 512
+
+/** `request/context` carries a provider id and a model id, not a transcript. */
+const REQUEST_CONTEXT_LIMIT = 256
+
+/** Working directories. */
+const PATH_LIMIT = 4_096
+
+/** Error text on `turn/end` and similar diagnostics. */
+const DIAGNOSTIC_LIMIT = 8_192
+
+/** Tool schema text inside `request/header`. One description can be several kilobytes. */
+const SCHEMA_LIMIT = 16_384
+
 const CONVERSATION_ROLES: ReadonlySet<string> = new Set(['user', 'assistant', 'system', 'developer', 'tool'])
 
-/**
- * Fields that carry conversation text. A plugin record with one of these is
- * refused. Role instructions use `instructions` and `description`, which stay.
- */
-const TRANSCRIPT_FIELDS: ReadonlySet<string> = new Set(['message', 'messages', 'transcript', 'prompt', 'prompts'])
+/** Fields a role record may contain. Anything else can hide a transcript. */
+const ROLE_RECORD_KEYS = [
+  'id',
+  'enabled',
+  'builtin',
+  'description',
+  'instructions',
+  'context',
+  'forkScope',
+  'model',
+  'agentPreset',
+  'readOnly',
+] as const
+
+const ROLE_MODEL_KEYS = ['provider', 'model', 'reasoningEffort'] as const
 
 /**
  * Setup a fresh child, or the host around it, writes without copying the
@@ -271,9 +329,9 @@ const SETUP_EVENT_TYPES: ReadonlySet<string> = new Set([
 
 /**
  * Events whose payload is conversation text or parent-owned work.
- * DSH 0.2.1-alpha.3 writes several of these during the child's own first
- * step, after `startActivation` has already returned, so refusing them does
- * not reject a legitimate start. A seed that contains them is parent history.
+ * Before the matching delegation task they are parent history. After it, the
+ * child's own step is recognized separately, because that step can already
+ * be in the log when activation returns.
  */
 const MESSAGE_EVENT_TYPES: ReadonlySet<string> = new Set([
   'approval/asked',
@@ -410,9 +468,51 @@ function isWorkingDirectoryMessage(message: unknown): boolean {
 }
 
 /**
- * The one task `startLocal` queues. Delivery to the parent appends a second
- * text block of return guidance; both blocks stay inside this one message.
- * `source` is exactly `{ kind: 'user' }`.
+ * The return-guidance block `withContinuableReturnGuidance` appends.
+ * The text is the one in `@deepseek-ai/dsh-subagent` 0.2.1-alpha.3.
+ * @param parentId - the parent agent id the guidance names.
+ * @returns the guidance text, with the id JSON-encoded as the host does.
+ */
+export function continuableReturnGuidance(parentId: string): string {
+  const encodedParentId = JSON.stringify(parentId)
+  return `Your parent agent id is ${encodedParentId}. Before you finish, send your result to that agent with send_message({ agent_id: ${encodedParentId}, message: "<self-contained result>" }). The parent shares your workspace but does not automatically receive your transcript, tool output, or reasoning. Send earlier messages as well when a finding changes what the parent should do next; sending a message does not end your turn.`
+}
+
+type TextBlock = { readonly type: 'text'; readonly text: string }
+
+function textBlocks(content: unknown): TextBlock[] | undefined {
+  if (!Array.isArray(content) || content.length === 0) return undefined
+  const blocks: TextBlock[] = []
+  for (const block of content) {
+    if (!isTextBlock(block) || !isRecord(block) || typeof block.text !== 'string') return undefined
+    blocks.push({ type: 'text', text: block.text })
+  }
+  return blocks
+}
+
+function sameBlocks(actual: readonly TextBlock[], expected: readonly TextBlock[]): boolean {
+  if (actual.length !== expected.length) return false
+  return actual.every((block, index) => block.text === expected[index]?.text)
+}
+
+/** Prompt alone, and, for parent delivery, prompt plus the host's return guidance. */
+function acceptedTaskContents(task: FreshChildTask): TextBlock[][] {
+  const prompt = task.prompt.map(block => ({ type: 'text' as const, text: block.text }))
+  if (task.delivery === 'caller') return [prompt]
+  return [prompt, [...prompt, { type: 'text', text: continuableReturnGuidance(task.parentId) }]]
+}
+
+function isTaskContent(content: unknown, task: FreshChildTask | undefined): boolean {
+  if (task === undefined) return false
+  const blocks = textBlocks(content)
+  if (blocks === undefined) return false
+  return acceptedTaskContents(task).some(expected => sameBlocks(blocks, expected))
+}
+
+/**
+ * The one task `startLocal` queues. The shape is a single user message of text
+ * blocks with `source` exactly `{ kind: 'user' }`. The text itself is checked
+ * against {@link FreshChildTask}.
  */
 function isDelegationTaskMessage(message: unknown): boolean {
   if (!isRecord(message) || !keysWithin(message, ['role', 'content', 'source', 'id'])) return false
@@ -469,47 +569,181 @@ function hasField(value: unknown, names: ReadonlySet<string>, depth: number): bo
   return false
 }
 
-function isContentFreeSetup(event: Record<string, unknown>, type: string): boolean {
+/** Two dialogue markers, or two JSON role tags, are a copied conversation rather than a label. */
+function looksLikeTranscript(text: string): boolean {
+  const lines = text.match(/(?:^|\n)\s*(?:user|assistant|system|developer)\s*:/gi)
+  if (lines !== null && lines.length >= 2) return true
+  const roles = text.match(/"role"\s*:\s*"(?:user|assistant|system|developer)"/g)
+  return roles !== null && roles.length >= 2
+}
+
+function setupTextLimit(type: string, key: string, inHeader: boolean): number {
+  if (type === 'session/title' && key === 'title') return TITLE_LIMIT
+  if (type === 'request/context') return REQUEST_CONTEXT_LIMIT
+  if (key === 'cwd' || key === 'path' || key === 'directory') return PATH_LIMIT
+  if (key === 'message' || key === 'reason' || key === 'diagnostic') return DIAGNOSTIC_LIMIT
+  if (inHeader) return SCHEMA_LIMIT
+  if (key === 'persona') return DIAGNOSTIC_LIMIT
+  return SETUP_TOKEN_LIMIT
+}
+
+/**
+ * Setup strings are labels, ids, paths, and tool schemas. A copied conversation
+ * in a title, a catalog label, or request context is refused. A label equal to
+ * the description this call sent is the host's own descriptor label.
+ */
+function setupStringsAllowed(
+  type: string,
+  value: unknown,
+  task: FreshChildTask | undefined,
+  depth: number,
+  key: string | undefined,
+  inHeader: boolean,
+): boolean {
+  if (depth > PAYLOAD_SCAN_LIMIT) return false
+  if (value === undefined) return true
+  if (typeof value === 'string') {
+    if (key === 'label' && task !== undefined && value === task.description) return true
+    if (looksLikeTranscript(value)) return false
+    if (type === 'session/title' && key === 'title' && value.includes('\n')) return false
+    return value.length <= setupTextLimit(type, key ?? '', inHeader)
+  }
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return true
+  if (Array.isArray(value)) {
+    return value.every(item => setupStringsAllowed(type, item, task, depth + 1, key, inHeader))
+  }
+  if (!isRecord(value)) return false
+  const header = inHeader || type === 'request/header'
+  return Object.entries(value).every(([childKey, child]) =>
+    setupStringsAllowed(type, child, task, depth + 1, childKey, header),
+  )
+}
+
+function isContentFreeSetup(event: Record<string, unknown>, type: string, task: FreshChildTask | undefined): boolean {
   if (containsConversationMessage(event.data, 0)) return false
   if (type === 'schedule/change' && hasField(event.data, new Set(['prompt']), 0)) return false
+  return setupStringsAllowed(type, event.data, task, 0, undefined, type === 'request/header')
+}
+
+function boundedName(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_NAME_LENGTH
+}
+
+/** A role object this plugin writes. Extra fields are refused. */
+function isRolePayload(value: unknown): boolean {
+  if (!isRecord(value) || !keysWithin(value, ROLE_RECORD_KEYS)) return false
+  if (typeof value.id !== 'string' || !ROLE_ID_PATTERN.test(value.id)) return false
+  if (typeof value.enabled !== 'boolean') return false
+  if ('builtin' in value && value.builtin !== 'general' && value.builtin !== 'fork') return false
+  if (typeof value.description !== 'string' || value.description.length > MAX_DESCRIPTION_LENGTH) return false
+  if (typeof value.instructions !== 'string' || value.instructions.length > MAX_INSTRUCTIONS_LENGTH) return false
+  if (value.context !== 'spawn' && value.context !== 'fork') return false
+  if ('forkScope' in value && value.forkScope !== 'full' && value.forkScope !== 'task') return false
+  if (value.context === 'spawn' && 'forkScope' in value) return false
+  if ('agentPreset' in value && (!boundedName(value.agentPreset) || value.context === 'fork')) return false
+  if (typeof value.readOnly !== 'boolean') return false
+  if ('model' in value) {
+    if (value.context === 'fork' || !isRecord(value.model) || !keysWithin(value.model, ROLE_MODEL_KEYS)) return false
+    if (!boundedName(value.model.provider) || !boundedName(value.model.model)) return false
+    if ('reasoningEffort' in value.model && !boundedName(value.model.reasoningEffort)) return false
+  }
   return true
 }
 
 function isOwnPluginRecord(event: Record<string, unknown>, type: string): boolean {
   if (!type.startsWith(PLUGIN_RECORD_PREFIX)) return false
-  if (typeof event.data === 'string' || Array.isArray(event.data)) return false
-  if (hasField(event.data, TRANSCRIPT_FIELDS, 0)) return false
-  return !containsConversationMessage(event.data, 0)
+  const data = event.data
+  if (!isRecord(data) || !keysWithin(data, ['version', 'role', 'settings'])) return false
+  if (data.version !== 1 || ('role' in data && 'settings' in data)) return false
+  if ('role' in data) return isRolePayload(data.role)
+  if (!('settings' in data) || !isRecord(data.settings) || !keysWithin(data.settings, ['enabled', 'roles']))
+    return false
+  if (typeof data.settings.enabled !== 'boolean' || !Array.isArray(data.settings.roles)) return false
+  if (data.settings.roles.length > MAX_ROLES) return false
+  return data.settings.roles.every(role => isRolePayload(role))
+}
+
+function isSystemPromptEvent(data: unknown): boolean {
+  if (!isRecord(data) || typeof data.turn !== 'number' || typeof data.step !== 'number') return false
+  const message = data.message
+  if (!isRecord(message) || message.role !== 'system') return false
+  if (!sameRecord(message.source, { kind: 'system-prompt' })) return false
+  return textBlocks(message.content) !== undefined || (Array.isArray(message.content) && message.content.length === 0)
+}
+
+/**
+ * A user message the child itself has after the task was queued.
+ * The claimed task echoes `request.prompt`. Later host notices use some other
+ * source kind. A `user` source whose text is not the task is parent history.
+ */
+function isOwnUserMessage(data: unknown, task: FreshChildTask | undefined): boolean {
+  if (!isRecord(data) || data.role !== 'user' || !isRecord(data.source) || typeof data.source.kind !== 'string') {
+    return false
+  }
+  if (data.source.kind === 'working-directory') return isWorkingDirectoryMessage(data)
+  if (data.source.kind !== 'user') return textBlocks(data.content) !== undefined
+  if (!sameRecord(data.source, { kind: 'user' })) return false
+  return isTaskContent(data.content, task)
+}
+
+function isChildStepEvent(type: string, data: unknown, task: FreshChildTask | undefined): boolean {
+  if (type === 'system/message') return isSystemPromptEvent(data)
+  if (type === 'user/message') return isOwnUserMessage(data, task)
+  if (!isRecord(data) || typeof data.turn !== 'number' || typeof data.step !== 'number') return false
+  if (type === 'developer/message') return isRecord(data.message) && data.message.role === 'developer'
+  if (type === 'assistant/attempt') return true
+  if (type === 'assistant/message') return isRecord(data.message) && data.message.role === 'assistant'
+  if (type === 'tool/call') return typeof data.name === 'string' && typeof data.arguments === 'string'
+  if (type === 'tool/result') return isRecord(data.message)
+  return type === 'tool/ptc-dispatch' || type === 'tool/ptc-dispatch-start'
+}
+
+function taskSpliceMatches(event: Record<string, unknown>, task: FreshChildTask | undefined): boolean {
+  const data = event.data
+  if (!isRecord(data) || !Array.isArray(data.inserted)) return false
+  return isTaskContent((data.inserted[0] as { content?: unknown } | undefined)?.content, task)
 }
 
 type EventVerdict = 'own' | 'delegation-task' | 'parent'
 
-function classifyChildEvent(event: unknown): EventVerdict {
+function classifyChildEvent(event: unknown, task: FreshChildTask | undefined, running: boolean): EventVerdict {
   if (!isRecord(event) || typeof event.type !== 'string') return 'parent'
   const type = event.type
-  if (MESSAGE_EVENT_TYPES.has(type)) return 'parent'
-  if (type === 'agent/inbox/spliced') return classifySplice(event)
+  if (MESSAGE_EVENT_TYPES.has(type)) {
+    return running && isChildStepEvent(type, event.data, task) ? 'own' : 'parent'
+  }
+  if (type === 'agent/inbox/spliced') {
+    const verdict = classifySplice(event)
+    if (verdict !== 'delegation-task') return verdict
+    return taskSpliceMatches(event, task) ? 'delegation-task' : 'parent'
+  }
   if (type.startsWith('plugin:')) return isOwnPluginRecord(event, type) ? 'own' : 'parent'
-  if (SETUP_EVENT_TYPES.has(type) && isContentFreeSetup(event, type)) return 'own'
+  if (SETUP_EVENT_TYPES.has(type) && isContentFreeSetup(event, type, task)) return 'own'
   return 'parent'
 }
 
 /**
  * Whether a seed or session log already contains parent history.
- * Content-free setup does not count. One delegation-task splice does not
- * count; a second one does, because the host queues the task once. Parent
- * content, another plugin's records, and any unrecognized type do count.
+ * Content-free setup does not count. One delegation-task splice whose text is
+ * exactly {@link FreshChildTask} does not count; a second one does, and so does
+ * any other task text. After that task, the child's own step does not count.
+ * A `user` message that is not the task does. Parent content, another plugin's
+ * records, and any unrecognized type do count. With no task, every delegation
+ * splice counts, so a caller that forgot the prompt fails closed.
  * @param events - a session log or a provider seed.
+ * @param task - the prompt this call submitted. Omitted only when no prompt is known.
  * @returns true when an event is parent history.
  */
-export function eventsHaveParentTurns(events: readonly unknown[]): boolean {
+export function eventsHaveParentTurns(events: readonly unknown[], task?: FreshChildTask): boolean {
+  let running = false
   let delegationTasks = 0
   for (const event of events) {
-    const verdict = classifyChildEvent(event)
+    const verdict = classifyChildEvent(event, task, running)
     if (verdict === 'parent') return true
     if (verdict !== 'delegation-task') continue
     delegationTasks += 1
     if (delegationTasks > 1) return true
+    running = true
   }
   return false
 }
@@ -518,10 +752,11 @@ export function eventsHaveParentTurns(events: readonly unknown[]): boolean {
  * Whether the log already contains parent history.
  * A fresh child does not; a forked seed does.
  * @param session - the child session.
+ * @param task - the prompt this call submitted.
  * @returns true when {@link eventsHaveParentTurns} is true for the log.
  */
-export function sessionHasParentTurns(session: SessionPort): boolean {
-  return eventsHaveParentTurns(session.snapshotEvents())
+export function sessionHasParentTurns(session: SessionPort, task: FreshChildTask): boolean {
+  return eventsHaveParentTurns(session.snapshotEvents(), task)
 }
 
 /**

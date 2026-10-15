@@ -285,6 +285,8 @@ export interface FakeWorld {
   emitDisposed(agent: AgentPort): void
   /** Append a sandbox mode and publish it on `session/event`, as a live Session does. */
   emitSandbox(session: FakeSession, mode: string): void
+  /** Append one event and publish it on `session/event`, as a live Session does. */
+  emitSession(session: FakeSession, type: string, data: unknown): void
   /** The text the plugin's runtime-context provider contributes for an Agent (or for none). */
   runtimeContext(agent?: AgentPort): string
   /** Run the plugin's `ctx.effect` cleanups, as the Host does when the plugin is unloaded. */
@@ -352,8 +354,12 @@ export function fakeWorld(): FakeWorld {
     },
     emitSandbox(session, mode) {
       session.append('sandbox/mode', { mode })
-      const event = { type: 'sandbox/mode', data: { mode } }
-      for (const listener of sessionEvents) listener(session, event)
+      for (const listener of sessionEvents) listener(session, { type: 'sandbox/mode', data: { mode } })
+    },
+    emitSession(session, type, data) {
+      const stored: unknown = JSON.parse(JSON.stringify(data))
+      session.log.push({ type, seq: session.log.length, time: 0, data: stored })
+      for (const listener of sessionEvents) listener(session, { type, data: stored })
     },
     runtimeContext(agent) {
       const context = contexts.find(entry => entry.name === 'rolesubagents:role')

@@ -131,10 +131,14 @@ describe('read-only tool guard', () => {
     expect(child.guardDisposers[0]).not.toHaveBeenCalled()
   })
 
-  it('does not install a guard on a writable child', async () => {
+  it('guards a writable child only against parent history', async () => {
     const { parent, delegate } = boot()
     const child = await delegate('worker')
-    expect(child.guards).toEqual([])
+    expect(child.guards).toHaveLength(1)
+    const guard = child.guards[0]
+    if (guard === undefined) throw new Error('writable child has no history guard')
+    expect(guard({ name: 'bash', arguments: {} })).toBeUndefined()
+    expect(guard({ name: 'write', arguments: {} })).toBeUndefined()
     expect(parent.guards).toEqual([])
   })
 

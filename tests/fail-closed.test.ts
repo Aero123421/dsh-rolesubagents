@@ -6,7 +6,12 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/host/index.ts'
-import { eventsHaveParentTurns, pinFailed } from '../src/host/readonly.ts'
+import {
+  continuableReturnGuidance,
+  eventsHaveParentTurns,
+  type FreshChildTask,
+  pinFailed,
+} from '../src/host/readonly.ts'
 import { readRole, writeRole } from '../src/host/records.ts'
 import {
   builtinRole,
@@ -46,6 +51,15 @@ function bury(levels: number, hidden: unknown, agentId: string): Record<string, 
 
 function textBlock(text: string): { type: 'text'; text: string } {
   return { type: 'text', text }
+}
+
+function taskOf(parentId: string, description = ARGS.description, prompt = ARGS.prompt): FreshChildTask {
+  return {
+    prompt: [{ type: 'text', text: prompt }],
+    parentId,
+    delivery: 'parent',
+    description,
+  }
 }
 
 function delegationTask(text: string, extra: { type: 'text'; text: string }[] = []): unknown {
@@ -627,7 +641,8 @@ describe('an activation holds unmatched children of that parent', () => {
     if (child === undefined) return
     expect(readRole(child.session)).toMatchObject({ id: 'worker', readOnly: false })
     expect(modes(child.session)).toEqual([])
-    expect(child.guards).toHaveLength(0)
+    expect(call(child, 'bash')).toBeUndefined()
+    expect(call(child, 'write')).toBeUndefined()
   })
 
   it('releases a third id instead of stopping it, and still roles the reserved child', async () => {
@@ -1191,9 +1206,59 @@ describe('task-only inspects the provider seed', () => {
       [
         {
           type: 'plugin:dsh-rolesubagents/role',
+          data: {
+            version: 1,
+            role: {
+              id: 'fork',
+              enabled: true,
+              description: 'Judges.',
+              instructions: 'Judge.',
+              context: 'fork',
+              forkScope: 'task',
+              readOnly: true,
+              history: 'the parent said this',
+            },
+          },
+        },
+      ],
+      [{ type: 'session/title', data: { title: 'P'.repeat(241), messageSeqs: [], source: { kind: 'fallback' } } }],
+      [
+        {
+          type: 'session/title',
+          data: { title: 'user: the plan\nassistant: done', messageSeqs: [], source: { kind: 'user' } },
+        },
+      ],
+      [
+        {
+          type: 'request/context',
+          data: { provider: 'deepseek-official', model: 'm', note: 'Q'.repeat(300) },
+        },
+      ],
+      [
+        {
+          type: 'subagent/catalog',
+          data: {
+            version: 1,
+            childId: 'child',
+            childCreatedAt: 0,
+            mode: 'continuable',
+            label: 'user: remember this\nassistant: I will',
+          },
+        },
+      ],
+      [
+        {
+          type: 'plugin:dsh-rolesubagents/role',
           data: { version: 1, role: { id: 'fork', message: { role: 'user', content: 'from the parent' } } },
         },
       ],
+      [delegationTask('from the parent')],
+      [
+        delegationTask(ARGS.prompt, [
+          textBlock('Your parent agent id is "parent". Before you finish, send your result with send_message.'),
+        ]),
+      ],
+      [delegationTask(ARGS.prompt), delegationTask(ARGS.prompt)],
       [delegationTask('first task'), delegationTask('second task')],
       [spoofedWorkingDirectoryNotice('from the parent')],
       [workingDirectoryNotice('/same', '/same')],
@@ -1234,7 +1299,7 @@ describe('task-only inspects the provider seed', () => {
 
   it('starts when the seed is only sandbox setup or a plugin record', async () => {
     const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
-    const { world, delegate } = boot([GENERAL, taskFork])
+    const { world, parent, delegate } = boot([GENERAL, taskFork])
     world.providers.set(
       'spawn',
       fakeProvider('spawn', {
@@ -1267,9 +1332,7 @@ describe('task-only inspects the provider seed', () => {
             { type: 'working-directory/change', data: { cwd: '/workspace' } },
             workingDirectoryNotice('/old', '/workspace'),
             workingDirectoryNotice('/missing', '/workspace', true),
-            delegationTask(ARGS.prompt, [
-              textBlock('Your parent agent id is "parent". Before you finish, send your result with send_message.'),
-            ]),
+            delegationTask(ARGS.prompt, [textBlock(continuableReturnGuidance(parent.id))]),
             { type: 'turn/start', data: { turn: 1 } },
             claimSplice(),
             { type: 'model/selection', data: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
@@ -1417,9 +1480,7 @@ describe('task-only inspects the provider seed', () => {
       world.children.push(child)
       world.emitCreated(child, 'startup')
       const later = [
-        delegationTask(ARGS.prompt, [
-          textBlock(`Your parent agent id is ${JSON.stringify(parent.id)}. Before you finish, send your result.`),
-        ]),
+        delegationTask(ARGS.prompt, [textBlock(continuableReturnGuidance(parent.id))]),
         { type: 'turn/start', data: { turn: 1 } },
         claimSplice(),
         { type: 'model/selection', data: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
@@ -1442,7 +1503,7 @@ describe('task-only inspects the provider seed', () => {
     const started = world.children[0]
     if (started === undefined) throw new Error('no child')
     expect(readRole(started.session)?.id).toBe('worker')
-    expect(eventsHaveParentTurns(started.session.snapshotEvents())).toBe(false)
+    expect(eventsHaveParentTurns(started.session.snapshotEvents(), taskOf(parent.id))).toBe(false)
     expect(child).toMatchObject({ kind: 'activation' })
   })
 
@@ -1467,6 +1528,169 @@ describe('task-only inspects the provider seed', () => {
     )
     expect(activationDispose).toHaveBeenCalledTimes(1)
     expect(world.children[0]?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+  })
+
+  it('starts when the delegation task is only the prompt', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, delegate } = boot([GENERAL, taskFork])
+    world.providers.set(
+      'spawn',
+      fakeProvider('spawn', {
+        inheritsParentContext: false,
+        prepareContinuable: async () => ({ seed: [delegationTask(ARGS.prompt)] }),
+      }),
+    )
+    const child = await delegate('fork')
+    expect(readRole(child.session)?.id).toBe('fork')
+    expect(world.subagents.startActivation).toHaveBeenCalledTimes(1)
+  })
+
+  it('starts when a long description is the catalog label and the header carries a real tool schema', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const description = 'Investigate the module and report file paths. '.repeat(40)
+    const { world, parent } = boot([GENERAL, taskFork])
+    world.providers.set(
+      'spawn',
+      fakeProvider('spawn', {
+        inheritsParentContext: false,
+        prepareContinuable: async () => ({
+          seed: [
+            {
+              type: 'subagent/catalog',
+              data: { version: 1, childId: 'child', childCreatedAt: 0, mode: 'continuable', label: description },
+            },
+            {
+              type: 'subagent/descriptor',
+              data: { provider: 'spawn', mode: 'continuable', label: description },
+            },
+            {
+              type: 'session/title',
+              data: { title: 'check things', messageSeqs: [], source: { kind: 'fallback' } },
+            },
+            {
+              type: 'request/context',
+              data: { provider: 'deepseek-official', model: 'deepseek-v4-flash', contextWindow: 1_000_000 },
+            },
+            {
+              type: 'request/header',
+              data: {
+                header: {
+                  config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+                  tools: [
+                    { name: 'read', description: 'Read one file and report its path. '.repeat(30), parameters: {} },
+                  ],
+                },
+                reason: 'initial',
+              },
+            },
+          ],
+        }),
+      }),
+    )
+    await registeredTool(parent).execute({ ...ARGS, description, role: 'fork' }, execContext(parent))
+    const child = world.children.at(-1)
+    if (child === undefined) throw new Error('no child')
+    expect(readRole(child.session)?.id).toBe('fork')
+    expect(description.length).toBeGreaterThan(512)
+  })
+
+  it('starts when the child step has already echoed the task', async () => {
+    const { world, parent } = boot()
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const id = spec.childId ?? 'stepped'
+      const child = world.newAgent(id, {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      world.children.push(child)
+      world.emitCreated(child, 'startup')
+      const guidance = continuableReturnGuidance(parent.id)
+      world.emitSession(child.session, 'agent/inbox/spliced', {
+        target: 'next-turn',
+        start: 0,
+        inserted: [
+          {
+            role: 'user',
+            id: '11111111-1111-4111-8111-111111111111',
+            content: [textBlock(ARGS.prompt), textBlock(guidance)],
+            source: { kind: 'user' },
+          },
+        ],
+      })
+      world.emitSession(child.session, 'turn/start', { turn: 1 })
+      world.emitSession(child.session, 'agent/inbox/spliced', {
+        target: 'next-turn',
+        start: 0,
+        removedCount: 1,
+        inserted: [],
+      })
+      world.emitSession(child.session, 'step/start', { turn: 1, step: 1 })
+      world.emitSession(child.session, 'system/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          id: '33333333-3333-4333-8333-333333333333',
+          role: 'system',
+          content: [textBlock('You are a worker.')],
+          source: { kind: 'system-prompt' },
+        },
+      })
+      world.emitSession(child.session, 'user/message', {
+        id: '44444444-4444-4444-8444-444444444444',
+        role: 'user',
+        content: [textBlock(ARGS.prompt), textBlock(guidance)],
+        source: { kind: 'user' },
+      })
+      world.emitSession(child.session, 'user/message', {
+        id: '55555555-5555-4555-8555-555555555555',
+        role: 'user',
+        content: [textBlock('Current runtime context: worker.')],
+        source: { kind: 'runtime-context' },
+      })
+      world.agents = [...world.agents, child]
+      return { childId: child.id }
+    })
+    const started = world.children
+    const result = await registeredTool(parent).execute({ ...ARGS, role: 'worker' }, execContext(parent))
+    const child = started[0]
+    if (child === undefined) throw new Error('no child')
+    expect(child.cancel).not.toHaveBeenCalled()
+    expect(eventsHaveParentTurns(child.session.snapshotEvents(), taskOf(parent.id))).toBe(false)
+    expect(child.guards[0]?.({ name: 'bash', arguments: {} })).toBeUndefined()
+    expect(result).toMatchObject({ kind: 'activation' })
+  })
+
+  it('stops a child when parent history is appended after activation returns', async () => {
+    const { world, parent } = boot()
+    const child = await registeredTool(parent)
+      .execute({ ...ARGS, role: 'worker' }, execContext(parent))
+      .then(() => world.children[0])
+    if (child === undefined) throw new Error('no child')
+    world.agents = [...world.agents, child]
+    expect(child.guards[0]?.({ name: 'bash', arguments: {} })).toBeUndefined()
+    world.emitSession(child.session, 'user/message', {
+      role: 'user',
+      content: [textBlock('from the parent')],
+      source: { kind: 'user' },
+    })
+    expect(child.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(child.guards[0]?.({ name: 'bash', arguments: {} })).toMatch(/already contains it/)
+    await Promise.resolve()
+    expect(child.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops a read-only child when parent history is appended after its own step', async () => {
+    const { world, delegate } = boot()
+    const child = await delegate('reviewer')
+    world.emitSession(child.session, 'user/message', {
+      role: 'user',
+      content: [textBlock(ARGS.prompt), textBlock('and the rest of the parent transcript')],
+      source: { kind: 'user' },
+    })
+    expect(child.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(call(child, 'bash')).toMatch(/already contains it/)
+    expect(call(child, 'read')).toMatch(/already contains it/)
   })
 
   it('starts when the seed is empty', async () => {

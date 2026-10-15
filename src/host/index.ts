@@ -92,11 +92,22 @@ interface SessionState {
 interface Prepared {
   tool?: () => void
   guard?: () => void
+  /** Writable fresh children: refuses tools once parent history is in the log. */
+  historyGuard?: () => void
   /** The `delegate` definition this plugin registered, when the role list has one. */
   delegate?: ToolDefinition
   /** True while the guard denies every tool because the child is not bound yet. */
   held?: boolean
 }
+
+interface HistoryWatch {
+  readonly task: PendingChild['task']
+  readonly agent: AgentPort
+  stopped: boolean
+}
+
+const PARENT_HISTORY_DENIAL =
+  'this child must not inherit the parent conversation, but its session already contains it. Do not retry the tool; report that the child was stopped.'
 
 interface Inflight {
   readonly parentAgentId: string
@@ -215,6 +226,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   const spawnProvider = config.spawnProvider ?? 'spawn'
   const forkProvider = config.forkProvider ?? 'fork'
   const pending = new Map<string, PendingChild>()
+  /** Fresh children whose log must keep matching the prompt this call sent. */
+  const historyWatches = new Map<string, HistoryWatch>()
   const installed = new Map<AgentPort, Prepared>()
   const sessions = new Map<string, SessionState>()
   /** Agents already announced, so a reservation can be bound to an id that was not the one reserved. */
@@ -287,7 +300,38 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
 
   const disposePrepared = (prepared: Prepared | undefined): void => {
     prepared?.guard?.()
+    prepared?.historyGuard?.()
     prepared?.tool?.()
+  }
+
+  const stopForParentHistory = (watch: HistoryWatch): void => {
+    if (watch.stopped) return
+    watch.stopped = true
+    try {
+      watch.agent.cancel?.({ kind: 'user' })
+    } catch (error) {
+      ctx.logger.warn(
+        `rolesubagents: could not cancel child ${watch.agent.id} after parent history arrived: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    queueMicrotask(() => {
+      if (!alive) return
+      void Promise.resolve(watch.agent.dispose?.()).catch((error: unknown) => {
+        ctx.logger.warn(
+          `rolesubagents: could not dispose child ${watch.agent.id} after parent history arrived: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
+    })
+  }
+
+  /** Refuse the call, and stop the child, when the log now contains parent history. */
+  const historyDenial = (agent: AgentPort): string | undefined => {
+    const watch = historyWatches.get(agent.session.id)
+    if (watch === undefined) return undefined
+    if (watch.stopped) return PARENT_HISTORY_DENIAL
+    if (!sessionHasParentTurns(agent.session, watch.task)) return undefined
+    stopForParentHistory(watch)
+    return PARENT_HISTORY_DENIAL
   }
 
   const lookup = (tools: ToolLookup | undefined, name: string, scope?: AgentPort) => {
@@ -425,6 +469,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       const delegateDefinition = prepared.delegate
       prepared.guard = agent.ctx.tools.guard(call => {
         try {
+          const history = historyDenial(agent)
+          if (history !== undefined) return history
           const visible = lookup(agent.ctx.tools, call.name, agent)
           const origin =
             call.name === TOOL_NAME
@@ -440,6 +486,15 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
           })
         } catch {
           return `read-only role: \`${call.name}\` was refused (the session log could not be read). Do not retry it; report what should change instead.`
+        }
+      })
+    }
+    if (historyWatches.has(agent.session.id) && prepared.guard === undefined && prepared.historyGuard === undefined) {
+      prepared.historyGuard = agent.ctx.tools.guard(() => {
+        try {
+          return historyDenial(agent)
+        } catch {
+          return PARENT_HISTORY_DENIAL
         }
       })
     }
@@ -472,7 +527,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   /** Apply a reserved child. The creation source is irrelevant: a late or retitled event still matches the id. */
   const applyChild = (agent: AgentPort, child: PendingChild): void => {
     clearHold(agent)
-    if (!forkInheritsHistory(child.role) && sessionHasParentTurns(agent.session)) {
+    if (!forkInheritsHistory(child.role) && sessionHasParentTurns(agent.session, child.task)) {
       readOnlySessions.add(agent.session)
       install(agent, child.snapshot, true)
       markPinFailed(agent.session)
@@ -480,6 +535,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       throw new Error(
         `role "${child.role.id}" must not inherit the parent conversation, but the child session already contains it`,
       )
+    }
+    if (!forkInheritsHistory(child.role)) {
+      historyWatches.set(agent.session.id, { task: child.task, agent, stopped: false })
     }
     stateOf(agent.session.id).role = child.role
     if (child.role.readOnly) readOnlySessions.add(agent.session)
@@ -729,11 +787,20 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     }
     disposePrepared(installed.get(agent))
     installed.delete(agent)
+    historyWatches.delete(agent.session.id)
     sessions.delete(agent.session.id)
     seenAgents.delete(agent.id)
     seenAgents.delete(agent.session.id)
   })
   const stopSession = ctx.on('session/event', (session, event) => {
+    const watch = historyWatches.get(session.id)
+    if (watch !== undefined && !watch.stopped) {
+      try {
+        if (sessionHasParentTurns(session, watch.task)) stopForParentHistory(watch)
+      } catch {
+        // A later tool call still fails closed when the log cannot be read.
+      }
+    }
     if (event.type !== 'sandbox/mode' || sandboxModeOf(event.data) === 'read-only') return
     if (!isReadOnlySession(session)) return
     // The wider mode is already in the log. DSH refuses an append that reenters this
@@ -765,6 +832,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     () => () => {
       alive = false
       repinScheduled.clear()
+      historyWatches.clear()
       unsubscribe(stopCreated)
       unsubscribe(stopDisposed)
       unsubscribe(stopSession)

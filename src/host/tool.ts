@@ -18,6 +18,7 @@ import {
 import type { AgentPort, ChildAgentOptions, HostContext } from './ports.ts'
 import {
   eventsHaveParentTurns,
+  type FreshChildTask,
   lastSandboxMode,
   pinFailed,
   readOnlyCallDenial,
@@ -33,6 +34,8 @@ export interface PendingChild {
   readonly snapshot: RoleSettings
   /** Parent session the reservation belongs to. Dispose of that parent drops it. */
   readonly parentSessionId: string
+  /** Prompt this call submitted. A non-inheriting child must echo it and nothing else. */
+  readonly task: FreshChildTask
 }
 
 /**
@@ -271,6 +274,12 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       }
       const maxDepth = deps.ctx.subagents.resolveMaxDepth(undefined)
       const childId = randomUUID()
+      const task: FreshChildTask = {
+        prompt: [{ type: 'text', text: typeof args.prompt === 'string' ? args.prompt : '' }],
+        parentId: parent.id,
+        delivery: 'parent',
+        description: typeof args.description === 'string' ? args.description : '',
+      }
       if (!inheritsHistory && provider.prepareContinuable !== undefined) {
         let prepared: { seed?: readonly unknown[] } | undefined
         try {
@@ -279,12 +288,13 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           throw copiesParent()
         }
         const seed = prepared?.seed
-        if ((seed !== undefined && !Array.isArray(seed)) || eventsHaveParentTurns(seed ?? [])) throw copiesParent()
+        if ((seed !== undefined && !Array.isArray(seed)) || eventsHaveParentTurns(seed ?? [], task))
+          throw copiesParent()
       }
       let activeId: string = childId
       let returnedId: string | undefined
       let settled = false
-      deps.pending.set(childId, { role, snapshot, parentSessionId: parent.session.id })
+      deps.pending.set(childId, { role, snapshot, parentSessionId: parent.session.id, task })
       const settle = async (): Promise<void> => {
         if (settled) return
         settled = true
@@ -351,7 +361,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           let leaked = false
           if (session !== undefined) {
             try {
-              leaked = sessionHasParentTurns(session)
+              leaked = sessionHasParentTurns(session, task)
             } catch {
               leaked = true
             }
