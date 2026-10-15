@@ -8,7 +8,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/host/index.ts'
 import { pinFailed } from '../src/host/readonly.ts'
 import { readRole } from '../src/host/records.ts'
-import { RESERVATION_TTL_MS } from '../src/host/tool.ts'
 import {
   builtinRole,
   execContext,
@@ -489,54 +488,224 @@ describe('a returned child id still receives the reservation', () => {
   })
 })
 
-describe('reservations are cleaned up', () => {
-  it('drops a reservation when agent/created never arrives', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    try {
-      const { world, parent } = boot()
-      let late: FakeAgent | undefined
-      world.subagents.startActivation.mockImplementation(async spec => {
-        late = world.newAgent(spec.childId ?? 'late', {
-          origin: 'subagent',
-          parentSession: spec.request.parent.session.id,
-          delegationDepth: 1,
-        })
-        world.children.push(late)
-        return { childId: late.id }
-      })
-      await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
-      expect(late).toBeDefined()
-      await vi.advanceTimersByTimeAsync(RESERVATION_TTL_MS)
-      if (late === undefined) return
-      world.emitCreated(late, 'startup')
-      expect(readRole(late.session)).toBeUndefined()
-      expect(late.guards).toHaveLength(0)
-      expect(modes(late.session)).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
+describe('an activation holds unmatched children of that parent', () => {
+  function childOf(world: ReturnType<typeof boot>['world'], id: string, parentSession: string | undefined): FakeAgent {
+    return world.newAgent(id, {
+      origin: 'subagent',
+      ...(parentSession === undefined ? {} : { parentSession }),
+      delegationDepth: 1,
+    })
+  }
+
+  it('denies every tool until activation returns that other id, then applies the read-only role', async () => {
+    const { world, parent } = boot()
+    let during: Array<string | undefined> = []
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const child = childOf(world, 'during-other', spec.request.parent.session.id)
+      world.children.push(child)
+      world.emitCreated(child, 'startup')
+      during = [call(child, 'bash'), call(child, 'write')]
+      return { childId: child.id }
+    })
+    await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+    expect(during[0]).toMatch(/not bound/)
+    expect(during[0]).toMatch(/refused/)
+    expect(during[1]).toMatch(/refused/)
+    const child = world.children[0]
+    expect(child).toBeDefined()
+    if (child === undefined) return
+    expect(readRole(child.session)).toMatchObject({ id: 'reviewer', readOnly: true })
+    expect(modes(child.session).at(-1)).toEqual({ mode: 'read-only' })
+    expect(call(child, 'write')).toMatch(/refused/)
+    expect(call(child, 'bash')).toBeUndefined()
   })
 
-  it('keeps the reservation until the cleanup delay when created is only late', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  it('does not pin a writable role while the unmatched child is held', async () => {
+    const { world, parent } = boot()
+    let during: string | undefined
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const child = childOf(world, 'during-worker', spec.request.parent.session.id)
+      world.children.push(child)
+      world.emitCreated(child, 'startup')
+      during = call(child, 'bash')
+      expect(modes(child.session)).toEqual([])
+      return { childId: child.id }
+    })
+    await registeredTool(parent).execute({ ...ARGS, role: 'worker' }, execContext(parent))
+    expect(during).toMatch(/refused/)
+    const child = world.children[0]
+    expect(child).toBeDefined()
+    if (child === undefined) return
+    expect(readRole(child.session)).toMatchObject({ id: 'worker', readOnly: false })
+    expect(modes(child.session)).toEqual([])
+    expect(child.guards).toHaveLength(0)
+  })
+
+  it('stops a third id that never binds and still roles the reserved child', async () => {
+    const { world, parent } = boot()
+    const official = childOf(world, 'official-other', 'session-someone-else')
+    let during: string | undefined
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const third = childOf(world, 'third-id', spec.request.parent.session.id)
+      world.children.push(third)
+      world.emitCreated(third, 'startup')
+      during = call(third, 'bash')
+      const reserved = childOf(world, spec.childId ?? 'reserved', spec.request.parent.session.id)
+      world.children.push(reserved)
+      world.emitCreated(reserved, 'startup')
+      world.emitCreated(official, 'startup')
+      return { childId: reserved.id }
+    })
+    await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+    expect(during).toMatch(/refused/)
+    const third = world.children[0]
+    const reserved = world.children[1]
+    expect(third?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(third?.dispose).toHaveBeenCalledTimes(1)
+    expect(reserved).toBeDefined()
+    if (reserved === undefined) return
+    expect(readRole(reserved.session)?.id).toBe('reviewer')
+    expect(official.cancel).not.toHaveBeenCalled()
+    expect(official.dispose).not.toHaveBeenCalled()
+    expect(official.guards).toHaveLength(0)
+  })
+
+  it('leaves a parentless child and another parent untouched during activation', async () => {
+    const { world, parent } = boot()
+    const teams = childOf(world, 'teams-member', undefined)
+    const other = childOf(world, 'other-parent', 'session-someone-else')
+    world.subagents.startActivation.mockImplementation(async spec => {
+      world.emitCreated(teams, 'startup')
+      world.emitCreated(other, 'startup')
+      const child = childOf(world, spec.childId ?? 'real', spec.request.parent.session.id)
+      world.children.push(child)
+      world.emitCreated(child, 'startup')
+      return { childId: child.id }
+    })
+    await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+    expect(teams.guards).toHaveLength(0)
+    expect(other.guards).toHaveLength(0)
+    expect(modes(teams.session)).toEqual([])
+    expect(modes(other.session)).toEqual([])
+    expect(teams.cancel).not.toHaveBeenCalled()
+    expect(teams.dispose).not.toHaveBeenCalled()
+    expect(other.cancel).not.toHaveBeenCalled()
+    expect(other.dispose).not.toHaveBeenCalled()
+  })
+
+  it('stops an unbound child when activation throws', async () => {
+    const { world, parent } = boot()
+    let third: FakeAgent | undefined
+    world.subagents.startActivation.mockImplementation(async spec => {
+      third = childOf(world, 'third-throw', spec.request.parent.session.id)
+      world.emitCreated(third, 'startup')
+      throw new Error('provider failed')
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))).rejects.toThrow(
+      /provider failed/,
+    )
+    expect(third?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(third?.dispose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('reservations are cleaned up without a timer', () => {
+  async function reserveWithoutCreated(world: ReturnType<typeof boot>['world'], parent: FakeAgent): Promise<FakeAgent> {
+    let late: FakeAgent | undefined
+    world.subagents.startActivation.mockImplementation(async spec => {
+      late = world.newAgent(spec.childId ?? 'late', {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      world.children.push(late)
+      return { childId: late.id }
+    })
+    await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+    if (late === undefined) throw new Error('no child')
+    return late
+  }
+
+  it('drops the reservation when the parent is disposed, so a later created is not pinned', async () => {
+    const { world, parent } = boot()
+    let stray: FakeAgent | undefined
+    let reservedId = ''
+    world.subagents.startActivation.mockImplementation(async spec => {
+      stray = world.newAgent('stray-parent-gone', {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      world.emitCreated(stray, 'startup')
+      world.emitDisposed(parent)
+      reservedId = spec.childId ?? 'reserved-late'
+      return { childId: reservedId }
+    })
+    await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+    expect(stray?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(stray?.dispose).toHaveBeenCalledTimes(1)
+    const late = world.newAgent(reservedId, {
+      origin: 'subagent',
+      parentSession: parent.session.id,
+      delegationDepth: 1,
+    })
+    world.emitCreated(late, 'startup')
+    expect(readRole(late.session)).toBeUndefined()
+    expect(late.guards).toHaveLength(0)
+    expect(modes(late.session)).toEqual([])
+  })
+
+  it('drops the reservation when the reserved child is disposed before agent/created', async () => {
+    const { world, parent } = boot()
+    const late = await reserveWithoutCreated(world, parent)
+    world.emitDisposed(late)
+    world.emitCreated(late, 'startup')
+    expect(readRole(late.session)).toBeUndefined()
+    expect(late.guards).toHaveLength(0)
+    expect(modes(late.session)).toEqual([])
+  })
+
+  it('drops the reservation when the plugin unloads', async () => {
+    const { world, parent } = boot()
+    const late = await reserveWithoutCreated(world, parent)
+    world.teardown()
+    world.emitCreated(late, 'startup')
+    expect(readRole(late.session)).toBeUndefined()
+    expect(late.guards).toHaveLength(0)
+    expect(modes(late.session)).toEqual([])
+  })
+
+  it('stops an unbound child when the plugin unloads during activation', async () => {
+    const { world, parent } = boot()
+    let stray: FakeAgent | undefined
+    world.subagents.startActivation.mockImplementation(async spec => {
+      stray = world.newAgent('during-unload', {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      world.emitCreated(stray, 'startup')
+      world.teardown()
+      return { childId: stray.id }
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))).rejects.toThrow(
+      /could not be matched/,
+    )
+    expect(stray?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(stray?.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('still applies the role when created arrives long after activation', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
     try {
       const { world, parent } = boot()
-      let late: FakeAgent | undefined
-      world.subagents.startActivation.mockImplementation(async spec => {
-        late = world.newAgent(spec.childId ?? 'late', {
-          origin: 'subagent',
-          parentSession: spec.request.parent.session.id,
-          delegationDepth: 1,
-        })
-        world.children.push(late)
-        return { childId: late.id }
-      })
-      await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
-      await vi.advanceTimersByTimeAsync(RESERVATION_TTL_MS - 1)
-      if (late === undefined) return
-      world.emitCreated(late, 'fork')
+      const late = await reserveWithoutCreated(world, parent)
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+      world.emitCreated(late, 'startup')
       expect(readRole(late.session)).toMatchObject({ id: 'reviewer', readOnly: true })
       expect(modes(late.session).at(-1)).toEqual({ mode: 'read-only' })
+      expect(call(late, 'write')).toMatch(/refused/)
+      expect(call(late, 'bash')).toBeUndefined()
     } finally {
       vi.useRealTimers()
     }
@@ -557,9 +726,32 @@ describe('destination checks do not trust agent_id alone', () => {
     expect(call(explorer, 'interrupt_agent', { target: { agent_id: parent.id } })).toMatch(
       /destination is not a read-only/,
     )
+    expect(call(explorer, 'send_message', { agent_id: reviewer.session.id, message: 'status update' })).toBeUndefined()
+    expect(call(explorer, 'send_message', { agent_ids: [reviewer.session.id] })).toBeUndefined()
+    expect(call(explorer, 'send_message', { agent_ids: [reviewer.session.id, parent.session.id] })).toMatch(
+      /destination is not a read-only/,
+    )
+    expect(call(explorer, 'send_message', { note: reviewer.session.id })).toBeUndefined()
     expect(
-      call(explorer, 'send_message', { agent_id: reviewer.session.id, message: parent.session.id }),
-    ).toBeUndefined()
+      call(explorer, 'send_message', { agent_id: reviewer.session.id, message: `see ${parent.session.id}` }),
+    ).toMatch(/destination is not a read-only/)
+    expect(
+      call(explorer, 'send_message', {
+        agent_id: reviewer.session.id,
+        message: '12345678-1234-1234-1234-123456789abc',
+      }),
+    ).toMatch(/destination is not a read-only/)
+  })
+
+  it('refuses every tool when this session log cannot be read', async () => {
+    const { delegate } = boot()
+    const child = await delegate('reviewer')
+    child.session.snapshotEvents = () => {
+      throw new Error('log closed')
+    }
+    expect(() => call(child, 'read')).not.toThrow()
+    expect(call(child, 'read')).toMatch(/session log could not be read/)
+    expect(call(child, 'bash')).toMatch(/session log could not be read/)
   })
 
   it('refuses a destination whose log cannot be read', async () => {
@@ -670,6 +862,102 @@ describe('task-only inspects the provider seed', () => {
     )
     await expect(delegate('fork')).rejects.toThrow(/provider "spawn" copies it/)
     expect(world.subagents.startActivation).not.toHaveBeenCalled()
+  })
+
+  it('refuses a parent message that is not a turn, and an unknown seed shape', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const seeds: unknown[] = [
+      [{ type: 'user/message', data: { text: 'from the parent' } }],
+      [{ type: 'assistant/message' }],
+      [{ weird: true }],
+      [{ type: 'mystery/blob' }],
+      [null],
+      ['not-an-event'],
+    ]
+    for (const seed of seeds) {
+      const { world, delegate } = boot([GENERAL, taskFork])
+      world.providers.set(
+        'spawn',
+        fakeProvider('spawn', {
+          inheritsParentContext: false,
+          prepareContinuable: async () => ({ seed: seed as readonly unknown[] }),
+        }),
+      )
+      await expect(delegate('fork')).rejects.toThrow(/provider "spawn" copies it/)
+      expect(world.subagents.startActivation).not.toHaveBeenCalled()
+    }
+  })
+
+  it('starts when the seed is only sandbox setup or a plugin record', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, delegate } = boot([GENERAL, taskFork])
+    world.providers.set(
+      'spawn',
+      fakeProvider('spawn', {
+        inheritsParentContext: false,
+        prepareContinuable: async () => ({
+          seed: [
+            { type: 'sandbox/mode', data: { mode: 'read-only' } },
+            { type: 'plugin:dsh-rolesubagents/roles', data: {} },
+            { type: 'approval/policy' },
+            { type: 'session/end-seed' },
+          ],
+        }),
+      }),
+    )
+    const child = await delegate('fork')
+    expect(readRole(child.session)?.id).toBe('fork')
+    expect(world.subagents.startActivation).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops a child whose log contains a parent message that is not a turn', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, parent } = boot([GENERAL, taskFork])
+    const activationDispose = vi.fn(async () => {})
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const id = spec.childId ?? 'seeded'
+      const session = fakeSession(id)
+      session.log.push({ type: 'user/message', seq: 0, time: 0, data: { text: 'from the parent' } })
+      world.sessions.set(id, session)
+      const child = world.newAgent(id, {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      child.session.log.push({ type: 'user/message', seq: 0, time: 0, data: { text: 'from the parent' } })
+      world.children.push(child)
+      world.agents = [...world.agents, child]
+      return { childId: id, dispose: activationDispose }
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))).rejects.toThrow(
+      /already contains it/,
+    )
+    expect(world.children[0]?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(world.children[0]?.dispose).toHaveBeenCalledTimes(1)
+    expect(activationDispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops a child whose log contains an unknown event', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const { world, parent } = boot([GENERAL, taskFork])
+    const activationDispose = vi.fn(async () => {})
+    world.subagents.startActivation.mockImplementation(async spec => {
+      const id = spec.childId ?? 'mystery'
+      const child = world.newAgent(id, {
+        origin: 'subagent',
+        parentSession: spec.request.parent.session.id,
+        delegationDepth: 1,
+      })
+      child.session.log.push({ type: 'mystery/blob', seq: 0, time: 0, data: {} })
+      world.children.push(child)
+      world.agents = [...world.agents, child]
+      return { childId: child.id, dispose: activationDispose }
+    })
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))).rejects.toThrow(
+      /already contains it/,
+    )
+    expect(activationDispose).toHaveBeenCalledTimes(1)
+    expect(world.children[0]?.cancel).toHaveBeenCalledWith({ kind: 'user' })
   })
 
   it('starts when the seed is empty', async () => {

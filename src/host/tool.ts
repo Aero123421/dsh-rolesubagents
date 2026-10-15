@@ -31,24 +31,16 @@ export const TOOL_NAME = 'delegate'
 export interface PendingChild {
   readonly role: RoleDefinition
   readonly snapshot: RoleSettings
+  /** Parent session the reservation belongs to. Dispose of that parent drops it. */
+  readonly parentSessionId: string
 }
 
-/** How long a reservation stays when `agent/created` never arrives. */
-export const RESERVATION_TTL_MS = 30_000
-
-const reservationTimers = new WeakMap<PendingChild, ReturnType<typeof setTimeout>>()
-
 /**
- * Drop one reservation and its cleanup timer, whichever id it is filed under.
+ * Drop one reservation, whichever id it is filed under.
  * @param pending - the table shared with `agent/created`.
  * @param child - the reservation object.
  */
 export function discardReservation(pending: Map<string, PendingChild>, child: PendingChild): void {
-  const timer = reservationTimers.get(child)
-  if (timer !== undefined) {
-    clearTimeout(timer)
-    reservationTimers.delete(child)
-  }
   for (const [id, entry] of pending) {
     if (entry === child) pending.delete(id)
   }
@@ -59,21 +51,14 @@ export function discardPending(pending: Map<string, PendingChild>): void {
   for (const child of new Set(pending.values())) discardReservation(pending, child)
 }
 
-function retainReservation(pending: Map<string, PendingChild>, id: string): void {
-  const child = pending.get(id)
-  if (child === undefined) return
-  const existing = reservationTimers.get(child)
-  if (existing !== undefined) clearTimeout(existing)
-  const timer = setTimeout(() => {
-    reservationTimers.delete(child)
-    for (const [key, entry] of pending) {
-      if (entry === child) pending.delete(key)
-    }
-  }, RESERVATION_TTL_MS)
-  if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
-    timer.unref()
+/** Drop reservations owned by a disposed parent or child. */
+export function discardReservationsFor(pending: Map<string, PendingChild>, agent: AgentPort): void {
+  const ids = new Set([agent.id, agent.session.id])
+  const drop: PendingChild[] = []
+  for (const [id, child] of pending) {
+    if (ids.has(id) || ids.has(child.parentSessionId)) drop.push(child)
   }
-  reservationTimers.set(child, timer)
+  for (const child of new Set(drop)) discardReservation(pending, child)
 }
 
 export interface ToolDeps {
@@ -87,14 +72,22 @@ export interface ToolDeps {
    * Throws when that child must not keep running.
    */
   claimStarted?(id: string): void
+  /**
+   * Track one activation so a child announced under an unexpected id can be
+   * held shut until the call returns, then bound or stopped.
+   */
+  activation?: {
+    begin(flight: { parent: AgentPort; reservedId: string; role: RoleDefinition; snapshot: RoleSettings }): void
+    finish(reservedId: string, returnedId: string | undefined): Promise<void>
+  }
 }
 
 function findAgent(ctx: HostContext, id: string): AgentPort | undefined {
   return ctx.agents.list().find(candidate => candidate.id === id || candidate.session.id === id)
 }
 
-/** Stop a child that must not keep a copied parent conversation. Failures are logged; the original error still propagates. */
-async function stopChild(
+/** Stop a child that must not keep running. Failures are logged; the caller still throws its own error. */
+export async function stopRunningChild(
   ctx: HostContext,
   started: { childId: string; dispose?: () => Promise<void> | void },
   agent: AgentPort | undefined,
@@ -289,7 +282,15 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
         if ((seed !== undefined && !Array.isArray(seed)) || eventsHaveParentTurns(seed ?? [])) throw copiesParent()
       }
       let activeId: string = childId
-      deps.pending.set(childId, { role, snapshot })
+      let returnedId: string | undefined
+      let settled = false
+      deps.pending.set(childId, { role, snapshot, parentSessionId: parent.session.id })
+      const settle = async (): Promise<void> => {
+        if (settled) return
+        settled = true
+        await deps.activation?.finish(childId, returnedId)
+      }
+      deps.activation?.begin({ parent, reservedId: childId, role, snapshot })
       try {
         const started = await deps.ctx.subagents.startActivation({
           provider: providerName,
@@ -316,7 +317,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
             activeId = started.childId
           }
         }
-        const returnedId = started.childId
+        returnedId = started.childId
         let bound = false
         try {
           if (deps.pending.has(activeId)) {
@@ -324,16 +325,17 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
             bound = !deps.pending.has(activeId)
           }
         } catch (error) {
-          await stopChild(deps.ctx, started, findAgent(deps.ctx, activeId) ?? findAgent(deps.ctx, childId))
+          await stopRunningChild(deps.ctx, started, findAgent(deps.ctx, activeId) ?? findAgent(deps.ctx, childId))
           throw error
         }
+        await settle()
         const agent = findAgent(deps.ctx, returnedId) ?? findAgent(deps.ctx, childId)
         const sessions = deps.ctx.get('sessions')
         const session = agent?.session ?? sessions?.get(returnedId) ?? sessions?.get(childId)
         // Bound means this call's reservation was applied to the id activation returned.
         // A different id that is still unbound, with no agent and no session, fails closed.
         if (!bound && returnedId !== childId && agent === undefined && session === undefined) {
-          await stopChild(deps.ctx, started, undefined)
+          await stopRunningChild(deps.ctx, started, undefined)
           throw new Error(`role "${role.id}" could not be matched to the started child "${returnedId}"`)
         }
         if (!inheritsHistory) {
@@ -346,15 +348,15 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
             }
           }
           if (leaked) {
-            await stopChild(deps.ctx, started, agent)
+            await stopRunningChild(deps.ctx, started, agent)
             throw new Error(
               `role "${role.id}" must not inherit the parent conversation, but the child session already contains it`,
             )
           }
         }
-        if (deps.pending.has(activeId)) retainReservation(deps.pending, activeId)
         return { kind: 'activation' as const, subagentId: returnedId }
       } catch (error) {
+        await settle()
         const child = deps.pending.get(childId) ?? deps.pending.get(activeId)
         if (child !== undefined) discardReservation(deps.pending, child)
         throw error
