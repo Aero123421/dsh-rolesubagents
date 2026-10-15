@@ -16,7 +16,13 @@ export interface SessionPort {
   }
   /** Committed events in log order (deprecated upstream but the only full read). */
   snapshotEvents(): readonly unknown[]
-  append(type: 'sandbox/mode', data: { mode: 'read-only' }): unknown
+  append(type: 'sandbox/mode', data: { mode: string }): unknown
+}
+
+/** The fields a read-only guard reads off one tool call. */
+export interface ToolGuardCall {
+  readonly name: string
+  readonly arguments: unknown
 }
 
 /** One live Agent as `agent/created` and tool execution supply it. */
@@ -25,7 +31,10 @@ export interface AgentPort {
   readonly session: SessionPort
   /** The Agent's own scoped context: registrations here are visible to this Agent only. */
   readonly ctx: {
-    readonly tools: { register(definition: ToolDefinition): () => void }
+    readonly tools: {
+      register(definition: ToolDefinition): () => void
+      guard(guard: (call: ToolGuardCall) => string | undefined): () => void
+    }
   }
 }
 
@@ -103,5 +112,9 @@ export interface HostContext {
   get(name: string): unknown
   on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown
+  on(
+    event: 'session/event',
+    listener: (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void,
+  ): unknown
   effect(execute: () => () => void, label?: string): unknown
 }

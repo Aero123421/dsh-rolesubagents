@@ -169,6 +169,7 @@ function RoleRow(props: { row: DraftRow; index: number; count: number; state: Pa
           <Badge tone={fork ? 'fork' : undefined} title={t(fork ? 'row.forkTitle' : 'row.freshTitle')}>
             {t(fork ? 'row.fork' : 'row.fresh')}
           </Badge>
+          {fork && role.forkScope === 'task' ? <Badge>{t('row.taskOnly')}</Badge> : null}
           {role.readOnly ? <Badge tone="ro">{t('row.readOnly')}</Badge> : null}
           {preset === undefined ? null : <Badge>{t('row.preset', { preset })}</Badge>}
           {broken ? <Badge tone="err">{t('row.needsFix')}</Badge> : null}
