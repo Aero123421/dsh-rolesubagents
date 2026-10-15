@@ -257,7 +257,7 @@ type RuntimeContext = Parameters<SystemPromptPort['context']>[0]
 type CreatedPayload = { agent: AgentPort; source: string }
 type DisposedPayload = { agent: AgentPort }
 type SessionListener = (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void
-type SessionsService = { get(id: string): SessionPort | undefined }
+type SessionsService = { get(id: string): SessionPort | undefined; list(): readonly SessionPort[] }
 
 export interface FakeWorld {
   readonly ctx: HostContext
@@ -311,7 +311,7 @@ export function fakeWorld(): FakeWorld {
   const logger = { info: vi.fn<LoggerPort['info']>(), warn: vi.fn<LoggerPort['warn']>() }
   const services: FakeWorld['services'] = {
     llm: { resolveCallConfig: vi.fn<LlmPort['resolveCallConfig']>(async () => ({})) },
-    sessions: { get: id => sessions.get(id) },
+    sessions: { get: id => sessions.get(id), list: () => [...sessions.values()] },
   }
   const contexts: RuntimeContext[] = []
 

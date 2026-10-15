@@ -211,41 +211,41 @@ export function lastSandboxMode(session: SessionPort): string | undefined {
 }
 
 /**
- * Events a brand-new child may already carry: sandbox and session setup,
- * approvals, and this plugin's own records. Anything else in a task-only
- * seed or child log is treated as parent history, including a parent
- * message that is not wrapped in `turn/start` / `turn/end`, and any shape
- * this plugin does not recognize.
+ * Event types that carry the parent's own speech or the turn and tool
+ * exchange around it. Anything else, including an event type this build
+ * has never seen, is not parent history: a newer DSH can add session
+ * events without making task-only delegation fail.
  */
-function isFreshChildEvent(event: unknown): boolean {
+const PARENT_SPEECH_TYPES: ReadonlySet<string> = new Set([
+  'turn/start',
+  'turn/end',
+  'user/message',
+  'assistant/message',
+  'developer/message',
+  'system/message',
+  'tool/call',
+  'tool/result',
+  'tool/ptc-dispatch',
+  'tool/ptc-dispatch-start',
+  'assistant/attempt',
+  'compaction/summary',
+])
+
+function isParentSpeech(event: unknown): boolean {
   if (!isRecord(event)) return false
   const type = event.type
-  if (typeof type !== 'string' || type === '') return false
-  if (type.startsWith('plugin:') || type.startsWith('approval/')) return true
-  return (
-    type === 'sandbox/mode' ||
-    type === 'session/title' ||
-    type === 'permission/preset' ||
-    type === 'working-directory/change' ||
-    type === 'model/selection' ||
-    type === 'subagent/descriptor' ||
-    type === 'subagent/catalog' ||
-    type === 'subagent/model-selection-policy' ||
-    type === 'agent-preset/selected' ||
-    type === 'plan/mode' ||
-    type === 'session/end-seed'
-  )
+  return typeof type === 'string' && PARENT_SPEECH_TYPES.has(type)
 }
 
 /**
- * Whether a seed or session log already contains parent history.
- * A message, a turn, a tool exchange, or an unrecognized event counts.
- * A fresh child, whose log is only sandbox and setup events, does not.
+ * Whether a seed or session log already contains parent speech.
+ * Turns, messages, tool exchanges, and compaction summaries count.
+ * Unrecognized event types do not.
  * @param events - a session log or a provider seed.
- * @returns true when the list is not a fresh child log.
+ * @returns true when parent speech is present.
  */
 export function eventsHaveParentTurns(events: readonly unknown[]): boolean {
-  return events.some(event => !isFreshChildEvent(event))
+  return events.some(event => isParentSpeech(event))
 }
 
 /**

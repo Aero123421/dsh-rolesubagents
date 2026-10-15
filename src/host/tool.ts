@@ -318,7 +318,17 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           }
         }
         returnedId = started.childId
-        let bound = false
+        // Settle while the activation is still open, so a child announced
+        // during that wait is still attached to it. Claiming afterwards
+        // covers an id that was not visible yet.
+        const pendingBeforeFinish = deps.pending.has(activeId)
+        try {
+          await settle()
+        } catch (error) {
+          await stopRunningChild(deps.ctx, started, findAgent(deps.ctx, activeId) ?? findAgent(deps.ctx, childId))
+          throw error
+        }
+        let bound = pendingBeforeFinish && !deps.pending.has(activeId)
         try {
           if (deps.pending.has(activeId)) {
             deps.claimStarted?.(activeId)
@@ -328,7 +338,6 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           await stopRunningChild(deps.ctx, started, findAgent(deps.ctx, activeId) ?? findAgent(deps.ctx, childId))
           throw error
         }
-        await settle()
         const agent = findAgent(deps.ctx, returnedId) ?? findAgent(deps.ctx, childId)
         const sessions = deps.ctx.get('sessions')
         const session = agent?.session ?? sessions?.get(returnedId) ?? sessions?.get(childId)

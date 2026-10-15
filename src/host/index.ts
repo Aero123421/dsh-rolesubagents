@@ -43,7 +43,6 @@ import {
   discardReservation,
   discardReservationsFor,
   type PendingChild,
-  stopRunningChild,
   TOOL_NAME,
 } from './tool.ts'
 
@@ -114,18 +113,76 @@ const ID_TOKEN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 const UNBOUND_DENIAL =
   'read-only role: this delegated child is not bound to its reservation and was refused. Do not retry it; report what should change instead.'
 
-function collectStrings(value: unknown, into: string[], depth: number): void {
+/** Argument keys whose values name an agent or session. Plurals and nesting count. */
+const DESTINATION_KEYS = new Set([
+  'agent_id',
+  'agentId',
+  'agent_ids',
+  'agentIds',
+  'session_id',
+  'sessionId',
+  'session_ids',
+  'sessionIds',
+  'target',
+  'target_id',
+  'targetId',
+  'target_ids',
+  'targetIds',
+  'target_agent_id',
+  'targetAgentId',
+  'target_agent_ids',
+  'targetAgentIds',
+  'to',
+  'recipient',
+  'recipients',
+  'parent_id',
+  'parentId',
+  'parent_ids',
+  'parentIds',
+])
+
+/** Body and metadata. A trace id or a parent id written here is not a destination. */
+const BODY_KEYS = new Set([
+  'message',
+  'messages',
+  'text',
+  'content',
+  'contents',
+  'prompt',
+  'prompts',
+  'description',
+  'title',
+  'body',
+  'note',
+  'notes',
+  'metadata',
+  'meta',
+  'trace',
+  'trace_id',
+  'traceId',
+  'trace_ids',
+  'traceIds',
+  'span_id',
+  'spanId',
+  'request_id',
+  'requestId',
+])
+
+function collectDestinations(value: unknown, into: string[], depth: number, asDestination: boolean): void {
   if (depth > 8) return
   if (typeof value === 'string') {
-    if (value !== '') into.push(value)
+    if (asDestination && value !== '') into.push(value)
     return
   }
   if (Array.isArray(value)) {
-    for (const item of value) collectStrings(item, into, depth + 1)
+    for (const item of value) collectDestinations(item, into, depth + 1, asDestination)
     return
   }
   if (typeof value === 'object' && value !== null) {
-    for (const child of Object.values(value)) collectStrings(child, into, depth + 1)
+    for (const [key, child] of Object.entries(value)) {
+      if (BODY_KEYS.has(key)) continue
+      collectDestinations(child, into, depth + 1, asDestination || DESTINATION_KEYS.has(key))
+    }
   }
 }
 
@@ -232,13 +289,6 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     return undefined
   }
 
-  const sessionOf = (agentId: string): SessionPort | undefined => {
-    const listed =
-      ctx.agents.list().find(candidate => candidate.id === agentId || candidate.session.id === agentId) ??
-      seenAgents.get(agentId)
-    return ctx.get('sessions')?.get(agentId) ?? listed?.session
-  }
-
   /**
    * A destination is read-only only when its live mode is `read-only`, the pin
    * has not failed, and the role mark agrees. A broken log is not read-only.
@@ -259,6 +309,10 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     const add = (id: string, session: SessionPort) => {
       if (id !== '') sessionsById.set(id, session)
     }
+    const service = ctx.get('sessions')
+    if (service?.list !== undefined) {
+      for (const session of service.list()) add(session.id, session)
+    }
     for (const agent of ctx.agents.list()) {
       add(agent.id, agent.session)
       add(agent.session.id, agent.session)
@@ -270,28 +324,41 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     return sessionsById
   }
 
+  const sessionForId = (sessionsById: Map<string, SessionPort>, id: string): SessionPort | undefined => {
+    const known = sessionsById.get(id)
+    if (known !== undefined) return known
+    const loaded = ctx.get('sessions')?.get(id)
+    if (loaded !== undefined) sessionsById.set(id, loaded)
+    return loaded
+  }
+
   /**
-   * Every known agent or session id that appears anywhere in the arguments is
-   * a destination, whichever key holds it. An id-shaped token that is not a
-   * known agent cannot be judged and fails closed.
+   * Destination fields name an agent or session. Body and metadata do not.
+   * An unknown id in a destination field cannot be judged and fails closed.
+   * A known id has to be read-only, including a session that is still listed
+   * after its agent has gone.
    */
   const destinationsAreReadOnly = (args: unknown): boolean => {
-    const strings: string[] = []
-    collectStrings(args, strings, 0)
-    if (strings.length === 0) return false
+    const destinations: string[] = []
+    collectDestinations(args, destinations, 0, false)
+    if (destinations.length === 0) return false
     const sessionsById = knownSessions()
     const referenced = new Set<SessionPort>()
-    for (const [id, session] of sessionsById) {
-      const mentioned = strings.some(value => value === id || (id.length >= 8 && value.includes(id)))
-      if (mentioned) referenced.add(session)
-    }
     const idToken = new RegExp(ID_TOKEN, 'gi')
-    for (const value of strings) {
-      idToken.lastIndex = 0
-      const tokens = value.match(idToken) ?? []
-      for (const token of tokens) {
-        if (!sessionsById.has(token)) return false
+    for (const value of destinations) {
+      const direct = sessionForId(sessionsById, value)
+      if (direct !== undefined) referenced.add(direct)
+      for (const [id, session] of sessionsById) {
+        if (id.length >= 8 && value.includes(id)) referenced.add(session)
       }
+      idToken.lastIndex = 0
+      for (const token of value.match(idToken) ?? []) {
+        const known = sessionForId(sessionsById, token)
+        if (known === undefined) return false
+        referenced.add(known)
+      }
+      const recognized = [...sessionsById.keys()].some(id => value === id || (id.length >= 8 && value.includes(id)))
+      if (!recognized) return false
     }
     if (referenced.size === 0) return false
     for (const session of referenced) {
@@ -405,11 +472,15 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   }
 
   /**
-   * The latest activation this plugin has open for the child's parent.
-   * A child with no parent, or a different parent, is not one of ours: official
-   * subagents, teams, and other plugins stay out of the hold. A same-parent
-   * child that some other feature starts during this window cannot be told
-   * apart from an id our provider emitted, so it is held with the rest.
+   * The latest open activation whose parent is this child's parent.
+   * DSH 0.2.1-alpha.3 publishes `agent/created` as `{ agent, source }` only.
+   * `startActivation` returns `{ childId, dispose }`. The child's
+   * `subagent/descriptor` names the shared spawn or fork provider, and the
+   * tool call id is not copied onto the child. A same-parent child therefore
+   * cannot be proved to be ours until its id is the reservation or the id
+   * activation returns. A child with no parentSession is not held here; the
+   * reservation match and {@link activationHooks.finish} still guard it when
+   * the id matches.
    */
   const flightFor = (agent: AgentPort): Inflight | undefined => {
     const parent = agent.session.header.parentSession
@@ -429,7 +500,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     }
   }
 
-  /** Refuse every tool until the child is bound. A read-only flight is pinned too. */
+  /** Refuse every tool until the child is bound. The sandbox stays untouched until then. */
   const holdClosed = (agent: AgentPort, flight: Inflight): void => {
     install(agent, flight.snapshot)
     const prepared = installed.get(agent)
@@ -437,7 +508,15 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       prepared.held = true
       prepared.guard = agent.ctx.tools.guard(() => UNBOUND_DENIAL)
     }
-    if (flight.role.readOnly) pinReadOnly(agent)
+  }
+
+  /** Drop the temporary refusal and leave the child as one this plugin did not start. */
+  const releaseHold = (agent: AgentPort): void => {
+    clearHold(agent)
+    if (hasRoleRecord(agent)) return
+    const snapshot = snapshotFor(agent)
+    install(agent, snapshot)
+    if (roleOf(agent)?.readOnly === true) pinReadOnly(agent)
   }
 
   const sameAgent = (agent: AgentPort, id: string | undefined): boolean =>
@@ -468,30 +547,63 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       const index = inflight.findIndex(flight => flight.reservedId === reservedId)
       const flight = index < 0 ? undefined : inflight[index]
       if (flight === undefined) return
-      inflight.splice(index, 1)
       const matches = (agent: AgentPort): boolean => sameAgent(agent, reservedId) || sameAgent(agent, returnedId)
-      // Stop children that will never receive the role before binding the ones that will,
-      // so a later failure cannot leave the extras running.
-      for (const agent of flight.unbound) {
-        if (matches(agent)) continue
-        await stopRunningChild(ctx, { childId: agent.id }, agent)
+      const handled = new Set<AgentPort>()
+      const agentFor = (id: string | undefined): AgentPort | undefined => {
+        if (id === undefined) return undefined
+        const listed = ctx.agents.list().find(candidate => candidate.id === id || candidate.session.id === id)
+        return listed ?? seenAgents.get(id)
       }
-      for (const agent of flight.unbound) {
-        if (!matches(agent)) continue
-        const child = reservationFor(agent, reservedId, returnedId)
-        if (child === undefined) {
-          // Still held, and nothing left to bind: the reservation was dropped without a role.
-          if (installed.get(agent)?.held === true) await stopRunningChild(ctx, { childId: agent.id }, agent)
-          continue
+      const take = (): AgentPort[] => {
+        const batch: AgentPort[] = []
+        const queued = new Set<AgentPort>()
+        const push = (agent: AgentPort | undefined): void => {
+          if (agent === undefined || handled.has(agent) || queued.has(agent)) return
+          queued.add(agent)
+          batch.push(agent)
         }
-        clearHold(agent)
-        discardReservation(pending, child)
-        try {
-          applyChild(agent, child)
-        } catch (error) {
-          await stopRunningChild(ctx, { childId: agent.id }, agent)
-          throw error
+        for (const agent of flight.unbound) push(agent)
+        // A parentless child is not held, but a matching reservation or
+        // returned id is still ours.
+        push(agentFor(reservedId))
+        push(agentFor(returnedId))
+        return batch
+      }
+      try {
+        let idleYields = 0
+        while (idleYields < 1) {
+          const batch = take()
+          if (batch.length === 0) {
+            // A child created while this wait runs is still on the open flight.
+            await Promise.resolve()
+            idleYields += 1
+            if (take().length === 0) break
+            idleYields = 0
+            continue
+          }
+          idleYields = 0
+          for (const agent of batch) {
+            handled.add(agent)
+            if (!matches(agent)) {
+              releaseHold(agent)
+              continue
+            }
+            const child = reservationFor(agent, reservedId, returnedId)
+            if (child === undefined) {
+              if (installed.get(agent)?.held === true) releaseHold(agent)
+              continue
+            }
+            clearHold(agent)
+            discardReservation(pending, child)
+            applyChild(agent, child)
+          }
         }
+      } finally {
+        for (const agent of flight.unbound) {
+          if (installed.get(agent)?.held === true) releaseHold(agent)
+        }
+        const at = inflight.indexOf(flight)
+        if (at >= 0) inflight.splice(at, 1)
       }
     },
   }
@@ -506,8 +618,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       return
     }
     const flight = flightFor(agent)
-    // No role record yet, and this parent has an activation open: hold the child
-    // shut until that call returns. Push first so a pin failure is still stopped.
+    // No role record yet, and this parent has an activation open: refuse every
+    // tool until that call returns. Push first so finish can release the hold.
+    // The sandbox stays as the child left it until the id is confirmed ours.
     if (flight !== undefined && !hasRoleRecord(agent)) {
       flight.unbound.push(agent)
       holdClosed(agent, flight)
@@ -582,7 +695,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       if (!parentIds.has(flight.parentAgentId) && !parentIds.has(flight.parentSessionId)) continue
       const orphans = flight.unbound.splice(0)
       inflight.splice(index, 1)
-      for (const child of orphans) void stopRunningChild(ctx, { childId: child.id }, child)
+      for (const child of orphans) releaseHold(child)
     }
     disposePrepared(installed.get(agent))
     installed.delete(agent)
@@ -626,7 +739,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       unsubscribe(stopDisposed)
       unsubscribe(stopSession)
       const orphans = inflight.splice(0).flatMap(flight => flight.unbound)
-      for (const child of orphans) void stopRunningChild(ctx, { childId: child.id }, child)
+      for (const child of orphans) clearHold(child)
       for (const agent of installed.keys()) releasePinFailure(agent.session)
       for (const prepared of installed.values()) disposePrepared(prepared)
       installed.clear()

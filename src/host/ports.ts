@@ -124,6 +124,15 @@ export interface LoggerPort {
   warn(message: string): void
 }
 
+/**
+ * `ctx.sessions`. `list` is the live set, including a resumed session whose
+ * agent is not in `ctx.agents.list()`.
+ */
+export interface SessionsPort {
+  get(id: string): SessionPort | undefined
+  list?(): readonly SessionPort[]
+}
+
 /** The plugin's Host context. */
 export interface HostContext {
   readonly subagents: SubagentsPort
@@ -133,7 +142,7 @@ export interface HostContext {
   readonly agents: { list(): readonly AgentPort[] }
   readonly logger: LoggerPort
   get(name: 'llm'): LlmPort | undefined
-  get(name: 'sessions'): { get(id: string): SessionPort | undefined } | undefined
+  get(name: 'sessions'): SessionsPort | undefined
   get(name: string): unknown
   on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown
