@@ -866,6 +866,27 @@ describe('destination checks do not trust agent_id alone', () => {
     expect(call(explorer, 'send_message', { agent_id: '12345678-1234-1234-1234-123456789abc' })).toMatch(
       /destination is not a read-only/,
     )
+
+    const worker = await delegate('worker')
+    world.agents = [parent, reviewer, explorer, worker]
+    const readable = reviewer.session.id
+    const writable = worker.session.id
+    const hidden: Record<string, unknown>[] = [
+      { id: writable },
+      { destination: writable },
+      { agents: [writable] },
+      { subagent_id: writable },
+      { metadata: { agent_id: writable } },
+    ]
+    for (const extra of hidden) {
+      expect(call(explorer, 'send_message', { agent_id: readable, ...extra })).toMatch(/destination is not a read-only/)
+    }
+    expect(
+      call(explorer, 'send_message', {
+        agent_id: readable,
+        id: '12345678-1234-1234-1234-123456789abc',
+      }),
+    ).toBeUndefined()
   })
 
   it('accepts a resumed read-only session that only the sessions service still lists', async () => {
@@ -1029,15 +1050,23 @@ describe('task-only inspects the provider seed', () => {
     }
   })
 
-  it('starts when the seed has no parent speech, including an event type this build has not seen', async () => {
+  it('refuses parent-content events and unknown types in the seed', async () => {
     const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
     const seeds: unknown[] = [
-      [{ weird: true }],
+      [{ type: 'agent/inbox/spliced', data: { inserted: [{ role: 'user', content: 'from the parent' }] } }],
+      [{ type: 'team/message/queued', data: { message: { content: [{ type: 'text', text: 'ping' }] } } }],
+      [{ type: 'team/message/delivered', data: { messageId: 'm1', targetId: 'child' } }],
+      [{ type: 'feedback/message-put', data: { item: { note: 'wrong answer' } } }],
+      [{ type: 'feedback/record', data: { text: 'please review' } }],
+      [{ type: 'goal/change', data: { goal: { objective: 'finish the parent task' } } }],
+      [{ type: 'command/run', data: { name: 'compact' } }],
+      [{ type: 'session/title', data: { title: 'the parent conversation' } }],
+      [{ type: 'schedule/change', data: { operation: 'create' } }],
+      [{ type: 'request/header', data: { header: { tools: [] } } }],
       [{ type: 'mystery/blob' }],
+      [{ weird: true }],
       [null],
       ['not-an-event'],
-      [{ type: 'schedule/change' }],
-      [{ type: 'request/header' }],
     ]
     for (const seed of seeds) {
       const { world, delegate } = boot([GENERAL, taskFork])
@@ -1048,9 +1077,8 @@ describe('task-only inspects the provider seed', () => {
           prepareContinuable: async () => ({ seed: seed as readonly unknown[] }),
         }),
       )
-      const child = await delegate('fork')
-      expect(readRole(child.session)?.id).toBe('fork')
-      expect(world.subagents.startActivation).toHaveBeenCalledTimes(1)
+      await expect(delegate('fork')).rejects.toThrow(/provider "spawn" copies it/)
+      expect(world.subagents.startActivation).not.toHaveBeenCalled()
     }
   })
 
@@ -1066,9 +1094,18 @@ describe('task-only inspects the provider seed', () => {
             { type: 'sandbox/mode', data: { mode: 'read-only' } },
             { type: 'plugin:dsh-rolesubagents/roles', data: {} },
             { type: 'approval/policy' },
+            { type: 'permission/preset', data: { preset: 'auto' } },
             { type: 'session/end-seed' },
-            { type: 'schedule/change' },
-            { type: 'request/header' },
+            { type: 'agent-preset/selected', data: { agentPreset: 'default' } },
+            { type: 'subagent/descriptor', data: { provider: 'spawn', mode: 'one-shot' } },
+            { type: 'subagent/model-selection-policy', data: { allowedModels: [] } },
+            { type: 'working-directory/change', data: { cwd: '/workspace' } },
+            {
+              type: 'agent/inbox/spliced',
+              data: {
+                inserted: [{ role: 'user', content: 'cwd', source: { kind: 'working-directory' } }],
+              },
+            },
           ],
         }),
       }),
@@ -1105,7 +1142,7 @@ describe('task-only inspects the provider seed', () => {
     expect(activationDispose).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps a child whose log contains an event that is not parent speech', async () => {
+  it('stops a child whose log contains an unknown event', async () => {
     const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
     const { world, parent } = boot([GENERAL, taskFork])
     const activationDispose = vi.fn(async () => {})
@@ -1121,14 +1158,45 @@ describe('task-only inspects the provider seed', () => {
       world.agents = [...world.agents, child]
       return { childId: child.id, dispose: activationDispose }
     })
-    await registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))
-    const child = world.children[0]
-    expect(child).toBeDefined()
-    if (child === undefined) return
-    expect(readRole(child.session)?.id).toBe('fork')
-    expect(activationDispose).not.toHaveBeenCalled()
-    expect(child.cancel).not.toHaveBeenCalled()
-    expect(child.dispose).not.toHaveBeenCalled()
+    await expect(registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))).rejects.toThrow(
+      /already contains it/,
+    )
+    expect(activationDispose).toHaveBeenCalledTimes(1)
+    expect(world.children[0]?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    expect(world.children[0]?.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops a child whose log contains a team message or feedback note', async () => {
+    const taskFork = builtinRole('fork', { forkScope: 'task', readOnly: true })
+    const leaks = [
+      { type: 'team/message/queued', data: { message: { content: [] } } },
+      { type: 'feedback/message-put', data: { item: { note: 'from the parent' } } },
+      {
+        type: 'agent/inbox/spliced',
+        data: { inserted: [{ role: 'user', content: 'parent prompt', source: { kind: 'user' } }] },
+      },
+    ]
+    for (const leak of leaks) {
+      const { world, parent } = boot([GENERAL, taskFork])
+      const activationDispose = vi.fn(async () => {})
+      world.subagents.startActivation.mockImplementation(async spec => {
+        const id = spec.childId ?? 'leaked'
+        const child = world.newAgent(id, {
+          origin: 'subagent',
+          parentSession: spec.request.parent.session.id,
+          delegationDepth: 1,
+        })
+        child.session.log.push({ ...leak, seq: 0, time: 0 })
+        world.children.push(child)
+        world.agents = [...world.agents, child]
+        return { childId: child.id, dispose: activationDispose }
+      })
+      await expect(registeredTool(parent).execute({ ...ARGS, role: 'fork' }, execContext(parent))).rejects.toThrow(
+        /already contains it/,
+      )
+      expect(activationDispose).toHaveBeenCalledTimes(1)
+      expect(world.children[0]?.cancel).toHaveBeenCalledWith({ kind: 'user' })
+    }
   })
 
   it('starts when the seed is empty', async () => {

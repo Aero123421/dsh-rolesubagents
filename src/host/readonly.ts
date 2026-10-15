@@ -211,41 +211,79 @@ export function lastSandboxMode(session: SessionPort): string | undefined {
 }
 
 /**
- * Event types that carry the parent's own speech or the turn and tool
- * exchange around it. Anything else, including an event type this build
- * has never seen, is not parent history: a newer DSH can add session
- * events without making task-only delegation fail.
+ * Events a fresh child writes for itself before its first request, checked
+ * against every `SessionEventMap` member in DSH 0.2.1-alpha.3
+ * (`known-event-types.ts`). Anything else is parent history: the parent
+ * conversation, or a type this build cannot prove is free of it.
+ *
+ * Allowed here:
+ * `agent-preset/selected`, `approval/policy`, `permission/preset`,
+ * `sandbox/mode`, `session/end-seed`, `subagent/descriptor`,
+ * `subagent/model-selection-policy`, `working-directory/change`, and
+ * `plugin:` records. `agent/inbox/spliced` is allowed only when every
+ * inserted message is a working-directory notice, which child setup writes.
+ *
+ * Refused, because the payload carries parent content or parent-owned work:
+ * `agent/inbox/spliced` (other messages), `approval/asked`, `approval/decided`,
+ * `assistant/attempt`, `assistant/message`, `command/done`, `command/run`,
+ * `compaction/end`, `compaction/prune`, `compaction/start`, `compaction/summary`,
+ * `deliverables/presented`, `developer/message`, `feedback/message-delete`,
+ * `feedback/message-put`, `feedback/record`, `goal/change`, `hook/invoked`,
+ * `hook/result`, `image/offload`, `job/registered`, `job/settled`, `llm/retry`,
+ * `llm/retry-started`, `model/selection`, `plan/mode`, `request/context`,
+ * `request/header`, `schedule/change`, `session-log-deepseek/delivery-accepted`,
+ * `session/title`, `session/title-llm-request`, `step/end`, `step/start`,
+ * `subagent/catalog`, `system/message`, `team/member`, `team/message/delivered`,
+ * `team/message/queued`, `team/task`, `todo/write`, `tool-workflow/agent-end`,
+ * `tool-workflow/agent-start`, `tool-workflow/run-end`, `tool-workflow/run-start`,
+ * `tool/call`, `tool/ptc-dispatch`, `tool/ptc-dispatch-start`, `tool/result`,
+ * `turn/end`, `turn/start`, `user/message`, `web/deepseek-search-llm-request`,
+ * `workspace/changes`. A type that is not in either list is refused too.
  */
-const PARENT_SPEECH_TYPES: ReadonlySet<string> = new Set([
-  'turn/start',
-  'turn/end',
-  'user/message',
-  'assistant/message',
-  'developer/message',
-  'system/message',
-  'tool/call',
-  'tool/result',
-  'tool/ptc-dispatch',
-  'tool/ptc-dispatch-start',
-  'assistant/attempt',
-  'compaction/summary',
+const CHILD_OWN_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'agent-preset/selected',
+  'approval/policy',
+  'permission/preset',
+  'sandbox/mode',
+  'session/end-seed',
+  'subagent/descriptor',
+  'subagent/model-selection-policy',
+  'working-directory/change',
 ])
 
-function isParentSpeech(event: unknown): boolean {
-  if (!isRecord(event)) return false
-  const type = event.type
-  return typeof type === 'string' && PARENT_SPEECH_TYPES.has(type)
+/** A splice child setup writes when it records the working directory. */
+function isWorkingDirectoryNotice(event: Record<string, unknown>): boolean {
+  const data = event.data
+  if (!isRecord(data) || !Array.isArray(data.inserted) || data.inserted.length === 0) return false
+  return data.inserted.every(message => {
+    if (!isRecord(message)) return false
+    const source = message.source
+    return isRecord(source) && source.kind === 'working-directory'
+  })
 }
 
 /**
- * Whether a seed or session log already contains parent speech.
- * Turns, messages, tool exchanges, and compaction summaries count.
- * Unrecognized event types do not.
+ * Whether one event is bookkeeping a fresh child writes itself.
+ * Non-records and unknown types are not: task-only fails closed on them.
+ */
+function isChildOwnEvent(event: unknown): boolean {
+  if (!isRecord(event)) return false
+  const type = event.type
+  if (typeof type !== 'string') return false
+  if (type.startsWith('plugin:')) return true
+  if (CHILD_OWN_EVENT_TYPES.has(type)) return true
+  return type === 'agent/inbox/spliced' && isWorkingDirectoryNotice(event)
+}
+
+/**
+ * Whether a seed or session log already contains parent history.
+ * A fresh child's own setup events do not count. Parent content, and any
+ * type this build does not recognize, does.
  * @param events - a session log or a provider seed.
- * @returns true when parent speech is present.
+ * @returns true when an event is not one a fresh child writes itself.
  */
 export function eventsHaveParentTurns(events: readonly unknown[]): boolean {
-  return events.some(event => isParentSpeech(event))
+  return events.some(event => !isChildOwnEvent(event))
 }
 
 /**

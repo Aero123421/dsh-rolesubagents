@@ -113,7 +113,10 @@ const ID_TOKEN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 const UNBOUND_DENIAL =
   'read-only role: this delegated child is not bound to its reservation and was refused. Do not retry it; report what should change instead.'
 
-/** Argument keys whose values name an agent or session. Plurals and nesting count. */
+/**
+ * Keys that name a destination. An unknown id here cannot be judged.
+ * Every other non-body key is still scanned for known ids.
+ */
 const DESTINATION_KEYS = new Set([
   'agent_id',
   'agentId',
@@ -141,7 +144,11 @@ const DESTINATION_KEYS = new Set([
   'parentIds',
 ])
 
-/** Body and metadata. A trace id or a parent id written here is not a destination. */
+/**
+ * Message text and trace fields. A parent id or a trace id written here is
+ * not consulted. `metadata` is not in this set: a nested agent id there is
+ * still a known id and has to be read-only.
+ */
 const BODY_KEYS = new Set([
   'message',
   'messages',
@@ -155,8 +162,6 @@ const BODY_KEYS = new Set([
   'body',
   'note',
   'notes',
-  'metadata',
-  'meta',
   'trace',
   'trace_id',
   'traceId',
@@ -168,20 +173,29 @@ const BODY_KEYS = new Set([
   'requestId',
 ])
 
-function collectDestinations(value: unknown, into: string[], depth: number, asDestination: boolean): void {
+interface ScannedArguments {
+  /** Every string outside {@link BODY_KEYS}. Known ids among these must be read-only. */
+  readonly values: string[]
+  /** Strings under {@link DESTINATION_KEYS}. Unknown ids here fail closed. */
+  readonly destinations: string[]
+}
+
+function collectArguments(value: unknown, into: ScannedArguments, depth: number, asDestination: boolean): void {
   if (depth > 8) return
   if (typeof value === 'string') {
-    if (asDestination && value !== '') into.push(value)
+    if (value === '') return
+    into.values.push(value)
+    if (asDestination) into.destinations.push(value)
     return
   }
   if (Array.isArray(value)) {
-    for (const item of value) collectDestinations(item, into, depth + 1, asDestination)
+    for (const item of value) collectArguments(item, into, depth + 1, asDestination)
     return
   }
   if (typeof value === 'object' && value !== null) {
     for (const [key, child] of Object.entries(value)) {
       if (BODY_KEYS.has(key)) continue
-      collectDestinations(child, into, depth + 1, asDestination || DESTINATION_KEYS.has(key))
+      collectArguments(child, into, depth + 1, asDestination || DESTINATION_KEYS.has(key))
     }
   }
 }
@@ -333,24 +347,27 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   }
 
   /**
-   * Destination fields name an agent or session. Body and metadata do not.
-   * An unknown id in a destination field cannot be judged and fails closed.
-   * A known id has to be read-only, including a session that is still listed
-   * after its agent has gone.
+   * Every known id outside message text and trace fields has to be read-only,
+   * including one nested under `metadata` or carried by `id`, `agents`, or
+   * `subagent_id`. An unknown id fails closed only in a destination field.
+   * A known id includes a session the sessions service still lists.
    */
   const destinationsAreReadOnly = (args: unknown): boolean => {
-    const destinations: string[] = []
-    collectDestinations(args, destinations, 0, false)
-    if (destinations.length === 0) return false
+    const scanned: ScannedArguments = { values: [], destinations: [] }
+    collectArguments(args, scanned, 0, false)
+    if (scanned.destinations.length === 0) return false
     const sessionsById = knownSessions()
     const referenced = new Set<SessionPort>()
-    const idToken = new RegExp(ID_TOKEN, 'gi')
-    for (const value of destinations) {
+    const mentions = (value: string): void => {
       const direct = sessionForId(sessionsById, value)
       if (direct !== undefined) referenced.add(direct)
       for (const [id, session] of sessionsById) {
         if (id.length >= 8 && value.includes(id)) referenced.add(session)
       }
+    }
+    for (const value of scanned.values) mentions(value)
+    const idToken = new RegExp(ID_TOKEN, 'gi')
+    for (const value of scanned.destinations) {
       idToken.lastIndex = 0
       for (const token of value.match(idToken) ?? []) {
         const known = sessionForId(sessionsById, token)
