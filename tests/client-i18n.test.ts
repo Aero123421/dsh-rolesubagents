@@ -11,6 +11,7 @@ const CODES: SettingsProblem['code'][] = [
   'description-too-long',
   'instructions-too-long',
   'invalid-model',
+  'invalid-workflow-model',
   'fork-model-ignored',
   'fork-preset-ignored',
   'invalid-fork-scope',
@@ -42,7 +43,7 @@ describe('translator', () => {
 
   it('states the save outcome in both languages', () => {
     expect(translator('en')('foot.saved')).toBe(
-      'Saved. Changes apply to new sessions; running sessions keep their roles.',
+      'Saved. Changes apply to new sessions; running sessions keep their roles and workflow default model.',
     )
     expect(translator('ja')('foot.saved')).toContain('新しいセッション')
   })

@@ -38,6 +38,7 @@ export interface DraftRow {
 /** The whole settings value being edited. */
 export interface Draft {
   readonly enabled: boolean
+  readonly workflowModel?: { provider: string; model: string }
   readonly rows: readonly DraftRow[]
   /** The settings this draft started from; the baseline of {@link isDirty}. */
   readonly base: RoleSettings
@@ -63,8 +64,13 @@ function cloneRole(role: RoleDefinition): RoleDefinition {
 export function createDraft(settings: RoleSettings, revision: number | undefined): Draft {
   return {
     enabled: settings.enabled,
+    ...(settings.workflowModel === undefined ? {} : { workflowModel: { ...settings.workflowModel } }),
     rows: settings.roles.map((role, index) => ({ uid: index + 1, role: cloneRole(role) })),
-    base: { enabled: settings.enabled, roles: settings.roles.map(cloneRole) },
+    base: {
+      enabled: settings.enabled,
+      roles: settings.roles.map(cloneRole),
+      ...(settings.workflowModel === undefined ? {} : { workflowModel: { ...settings.workflowModel } }),
+    },
     revision,
     nextUid: settings.roles.length + 1,
   }
@@ -76,7 +82,11 @@ export function createDraft(settings: RoleSettings, revision: number | undefined
  * @returns settings that may still be invalid.
  */
 export function draftSettings(draft: Draft): RoleSettings {
-  return { enabled: draft.enabled, roles: draft.rows.map(row => row.role) }
+  return {
+    enabled: draft.enabled,
+    roles: draft.rows.map(row => row.role),
+    ...(draft.workflowModel === undefined ? {} : { workflowModel: { ...draft.workflowModel } }),
+  }
 }
 
 function canonical(role: RoleDefinition): unknown[] {
@@ -104,6 +114,8 @@ function canonical(role: RoleDefinition): unknown[] {
 export function sameSettings(a: RoleSettings, b: RoleSettings): boolean {
   return (
     a.enabled === b.enabled &&
+    a.workflowModel?.provider === b.workflowModel?.provider &&
+    a.workflowModel?.model === b.workflowModel?.model &&
     a.roles.length === b.roles.length &&
     JSON.stringify(a.roles.map(canonical)) === JSON.stringify(b.roles.map(canonical))
   )
@@ -158,6 +170,17 @@ function mapRow(draft: Draft, uid: number, edit: (role: RoleDefinition) => RoleD
  */
 export function setEnabled(draft: Draft, enabled: boolean): Draft {
   return draft.enabled === enabled ? draft : { ...draft, enabled }
+}
+
+/** Set the workflow default route; preserve incomplete pairs for validation. */
+export function setWorkflowModel(draft: Draft, model: RoleSettings['workflowModel']): Draft {
+  const next =
+    model === undefined || (model.provider === '' && model.model === '')
+      ? undefined
+      : { provider: model.provider, model: model.model }
+  if (draft.workflowModel?.provider === next?.provider && draft.workflowModel?.model === next?.model) return draft
+  const { workflowModel: _previous, ...rest } = draft
+  return next === undefined ? rest : { ...rest, workflowModel: next }
 }
 
 /**
@@ -356,6 +379,7 @@ const FIELD_OF: Partial<Record<SettingsProblem['code'], IssueField>> = {
   'description-too-long': 'description',
   'instructions-too-long': 'instructions',
   'invalid-model': 'model',
+  'invalid-workflow-model': 'model',
   'fork-model-ignored': 'model',
   'invalid-preset': 'preset',
   'fork-preset-ignored': 'preset',

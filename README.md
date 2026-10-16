@@ -55,6 +55,20 @@ Children run on the official subagent runtime: they start in the background, not
 | Agent preset | Starts the child with this preset's system prompt and tools; fresh roles only |
 | Read-only | Keeps the file sandbox at `read-only` and refuses write-like MCP and plugin tools. Tools are classified by name; see Limitations |
 
+### Workflow default model
+
+The Plugins page has a separate **Workflow model** provider/model setting. It changes only the default LLM route for children started by the official `workflow` tool's `agent()` helper; it does not select a role or add role instructions, an Agent Preset, reasoning effort, or read-only restrictions.
+
+| Workflow `agent()` route | Workflow model setting | Result |
+|---|---|---|
+| Explicit `provider` and/or `model` | Set or empty | Native workflow override handling; the configured default is not injected |
+| Neither field specified | Set | Configured provider and model |
+| Neither field specified | Empty | Native parent model inheritance |
+
+For example, `await agent("Investigate the tests")` uses the configured workflow model, while `await agent("Review", { provider: "other", model: "other-model" })` overrides it. Specifying only one route field also bypasses the configured pair, retaining DSH's normal inheritance for the other field. Clear the provider selection to remove the default. The master Subagents switch disables this default as well. Changes apply to new sessions; existing sessions retain their recorded setting, including after resume.
+
+The original workflow tool still owns execution, schemas, limits, cancellation, foreground results, and background jobs. A preset without `workflow` does not gain the tool. This integration adapts the script's lexical `agent()` helper; direct calls to the workflow engine or access through `globalThis.agent` are not adapted. It is a convenience default, not a model-enforcement policy. Script wrapping can shift diagnostic line numbers. Standard preset and global/headless workflow tools are supported. If another plugin registers `workflow` directly in the same agent-local layer, DSH forbids replacing that registration: the plugin logs a warning and leaves that tool unchanged. External tool changes invalidate adapters lazily; each agent refreshes before its next prompt or workflow execution, and captured adapters refuse to execute a removed/restricted workflow.
+
 ### Prompt caching
 
 - A role with the parent's model and composition shares the parent's cached system prompt and tool definitions.
@@ -107,6 +121,7 @@ Keep the official `send_message`, `list_agents`, and `interrupt_agent` tools on.
 pnpm install
 pnpm check   # lint, typecheck, test, and committed lib/ matches a fresh build
 pnpm build   # lib/index.js (Host) and lib/client.js (Web)
+pnpm check:host # optional real installed-DSH workflow integration checks
 ```
 
 `lib/` is committed. After changing sources, run `pnpm build` and commit `lib/` with them.

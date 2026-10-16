@@ -306,6 +306,7 @@ export interface FakeWorld {
   newAgent(id: string, header?: SessionPort['header']): FakeAgent
   emitCreated(agent: AgentPort, source?: string): void
   emitDisposed(agent: AgentPort): void
+  emitToolsChange(): void
   /** Append a sandbox mode and publish it on `session/event`, as a live Session does. */
   emitSandbox(session: FakeSession, mode: string): void
   /** The text the plugin's runtime-context provider contributes for an Agent (or for none). */
@@ -322,6 +323,7 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
   const created: ((payload: CreatedPayload) => void)[] = []
   const disposed: ((payload: DisposedPayload) => void)[] = []
   const sessionEvents: SessionListener[] = []
+  const toolsChanged: (() => void)[] = []
   const cleanups: (() => void)[] = []
   const providers = new Map<string, SubagentProviderPort>([
     ['spawn', fakeProvider('spawn')],
@@ -381,6 +383,9 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
     emitDisposed(agent) {
       for (const listener of disposed) listener({ agent })
     },
+    emitToolsChange() {
+      for (const listener of [...toolsChanged]) listener()
+    },
     emitSandbox(session, mode) {
       session.append('sandbox/mode', { mode })
       const event = { type: 'sandbox/mode', data: { mode } }
@@ -410,10 +415,18 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
   function on(event: 'agent/created', listener: (payload: CreatedPayload) => void): unknown
   function on(event: 'agent/disposed', listener: (payload: DisposedPayload) => void): unknown
   function on(event: 'session/event', listener: SessionListener): unknown
+  function on(event: 'tools/change', listener: () => void): unknown
   function on(event: string, listener: (...args: never[]) => void): unknown {
     if (event === 'agent/created') created.push(listener as (payload: CreatedPayload) => void)
     else if (event === 'agent/disposed') disposed.push(listener as (payload: DisposedPayload) => void)
-    else if (event === 'session/event') {
+    else if (event === 'tools/change') {
+      const fn = listener as () => void
+      toolsChanged.push(fn)
+      return () => {
+        const index = toolsChanged.indexOf(fn)
+        if (index >= 0) toolsChanged.splice(index, 1)
+      }
+    } else if (event === 'session/event') {
       const fn = listener as SessionListener
       sessionEvents.push(fn)
       return () => {

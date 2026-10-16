@@ -21,6 +21,7 @@ import {
   setContext,
   setEnabled,
   setModel,
+  setWorkflowModel,
   templates,
   uniqueId,
 } from '../src/client/draft.ts'
@@ -325,5 +326,39 @@ describe('previews', () => {
     expect(routeLabel(undefined)).toBeUndefined()
     expect(routeLabel({ provider: 'p', model: 'm' })).toBe('p / m')
     expect(routeLabel({ provider: 'p', model: 'm', reasoningEffort: 'high' })).toBe('p / m · high')
+  })
+})
+
+describe('workflow model draft', () => {
+  it('clones the route into draft and base, preserves it through role edits, and compares by value', () => {
+    const settings = { ...defaults(), workflowModel: { provider: 'p', model: 'm' } }
+    const draft = createDraft(settings, 9)
+    expect(draft.workflowModel).toEqual(settings.workflowModel)
+    expect(draft.workflowModel).not.toBe(settings.workflowModel)
+    expect(draft.base.workflowModel).not.toBe(draft.workflowModel)
+    expect(isDirty(draft)).toBe(false)
+    expect(draftSettings(patchRole(draft, 3, { description: 'changed' })).workflowModel).toEqual(settings.workflowModel)
+    expect(sameSettings(settings, { ...settings, workflowModel: { model: 'm', provider: 'p' } })).toBe(true)
+    expect(sameSettings(settings, defaults())).toBe(false)
+    expect(setWorkflowModel(draft, { provider: 'p', model: 'm' })).toBe(draft)
+    expect(isDirty(setWorkflowModel(draft, undefined))).toBe(true)
+    expect(isDirty(setWorkflowModel(setWorkflowModel(draft, undefined), settings.workflowModel))).toBe(false)
+  })
+
+  it('keeps invalid pairs for validation and clears an empty pair', () => {
+    for (const model of [
+      { provider: 'p', model: '' },
+      { provider: '', model: 'm' },
+    ]) {
+      const draft = setWorkflowModel(fresh(), model)
+      expect(draft.workflowModel).toEqual(model)
+      expect(analyseDraft(draft).issues).toEqual([{ code: 'invalid-workflow-model', field: 'model' }])
+    }
+    const valid = setWorkflowModel(fresh(), { provider: ' p ', model: ' m ' })
+    expect(analyseDraft(valid)).toMatchObject({
+      issues: [],
+      settings: { workflowModel: { provider: 'p', model: 'm' } },
+    })
+    expect(draftSettings(setWorkflowModel(valid, { provider: '', model: '' })).workflowModel).toBeUndefined()
   })
 })

@@ -14,6 +14,7 @@ import {
   normalizeSettings,
   type RoleContext,
   type RoleModel,
+  type RoleSettings,
   type SettingsProblem,
 } from '../shared/roles.ts'
 import {
@@ -37,6 +38,7 @@ import {
   setEnabled,
   setForkScope,
   setModel,
+  setWorkflowModel,
 } from './draft.ts'
 import type { CatalogEffort, ConfigFormLike, DshRemote, FormSnapshot, ModelCatalogLike } from './dsh.ts'
 
@@ -112,6 +114,9 @@ export interface Controller {
   subscribe(listener: () => void): () => void
   getSnapshot(): PageState
   setEnabled(enabled: boolean): void
+  setWorkflowModel(model: RoleSettings['workflowModel']): void
+  /** Load only the workflow model catalog; explicit calls retry failures. */
+  loadWorkflowCatalog(): void
   patchRole(uid: number, patch: RolePatch): void
   setContext(uid: number, context: RoleContext): void
   setForkScope(uid: number, scope: ForkScope): void
@@ -171,6 +176,7 @@ export function createController(options: ControllerOptions): Controller {
   let catalog = IDLE_CATALOG
   let presets = IDLE_PRESETS
   let referenceWanted = false
+  let workflowCatalogWanted = false
   let catalogRun = 0
   let presetRun = 0
   let state: PageState
@@ -299,6 +305,11 @@ export function createController(options: ControllerOptions): Controller {
     publish()
   }
 
+  function loadWorkflowCatalog(): void {
+    workflowCatalogWanted = true
+    if (catalog.status === 'idle' || catalog.status === 'error') void loadCatalog()
+  }
+
   function loadReference(): void {
     referenceWanted = true
     if (catalog.status === 'idle' || catalog.status === 'error') void loadCatalog()
@@ -321,6 +332,8 @@ export function createController(options: ControllerOptions): Controller {
     },
     getSnapshot: () => state,
     setEnabled: enabled => edit(current => setEnabled(current, enabled)),
+    setWorkflowModel: model => edit(current => setWorkflowModel(current, model)),
+    loadWorkflowCatalog,
     patchRole: (uid, patch) => edit(current => patchRole(current, uid, patch)),
     setContext: (uid, context) => edit(current => setContext(current, uid, context)),
     setForkScope: (uid, scope) => edit(current => setForkScope(current, uid, scope)),
@@ -362,6 +375,7 @@ export function createController(options: ControllerOptions): Controller {
           [
             { op: 'set', path: ['enabled'], value: settings.enabled },
             { op: 'set', path: ['roles'], value: settings.roles },
+            { op: 'set', path: ['workflowModel'], value: settings.workflowModel ?? null },
           ],
           sent.revision,
         )
@@ -396,6 +410,7 @@ export function createController(options: ControllerOptions): Controller {
       catalog = { ...catalog, status: 'idle' }
       presets = { ...presets, status: 'idle' }
       if (referenceWanted) loadReference()
+      else if (workflowCatalogWanted) loadWorkflowCatalog()
       else publish()
     },
     setLocale(next) {

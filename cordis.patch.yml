@@ -1,8 +1,8 @@
 # dsh-rolesubagents bundle layer.
 #
 # Inserts one row. Its Host half (lib/index.js) installs the role-aware
-# `subagent` tool in each Agent's own scope, records each child's role in the
-# child's Session log, and contributes the role instructions as runtime
+# `delegate` tool in each Agent's own scope, records each child's role in the
+# storage domain, and contributes the role instructions as runtime
 # context. Its browser half (lib/client.js, declared under `dsh.client` in
 # package.json) adds the role editor to this bundle's page under Plugins.
 #

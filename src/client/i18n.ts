@@ -11,7 +11,12 @@ import { ID_MAX_LENGTH, type Issue } from './draft.ts'
 const en = {
   'master.label': 'Subagents',
   'master.hint':
-    'Turns role-based subagents on or off for new sessions. The depth limit and parallelism are set in the official Subagent settings.',
+    'Turns role-based subagents and the workflow default model on or off for new sessions. The depth limit and parallelism are set in the official Subagent settings.',
+
+  'workflow.heading': 'Workflow model',
+  'workflow.hint':
+    "Explicit workflow model overrides take priority over this setting, then the parent's model. Clear the provider to fall back to the parent unless the workflow specifies a model. This setting is captured per session; changes apply to new sessions only.",
+  'issue.workflowModel': 'The workflow model needs both a provider and a model, or both empty.',
 
   'roles.heading': 'Roles',
   'roles.hint': 'The parent picks a role by its ID. This order is the order the parent sees.',
@@ -101,7 +106,7 @@ const en = {
   'foot.save': 'Save',
   'foot.saving': 'Saving…',
   'foot.discard': 'Discard',
-  'foot.saved': 'Saved. Changes apply to new sessions; running sessions keep their roles.',
+  'foot.saved': 'Saved. Changes apply to new sessions; running sessions keep their roles and workflow default model.',
   'foot.failed': 'Could not save. Check the connection and try again.',
   'foot.conflict': 'The settings changed on the Host after you started editing, so nothing was saved.',
   'foot.reload': 'Reload latest settings',
@@ -137,7 +142,12 @@ export type Key = keyof typeof en
 const ja: Record<Key, string> = {
   'master.label': 'サブエージェント',
   'master.hint':
-    '新しいセッションでロール別サブエージェントを使うかどうかを切り替えます。深さの上限と並列数は、公式のサブエージェント設定で変更します。',
+    '新しいセッションでロール別サブエージェントとワークフローの既定モデルを使うかどうかを切り替えます。深さの上限と並列数は、公式のサブエージェント設定で変更します。',
+
+  'workflow.heading': 'ワークフローのモデル',
+  'workflow.hint':
+    'ワークフローでの明示的なモデル指定、この設定、親のモデルの順に優先します。プロバイダーを空にすると、明示指定がない限り親のモデルを使います。この設定はセッションごとに保持され、変更は新しいセッションにのみ適用されます。',
+  'issue.workflowModel': 'ワークフローのモデルは、プロバイダーとモデルの両方を指定するか、両方を空にしてください。',
 
   'roles.heading': 'ロール',
   'roles.hint': '親エージェントはIDでロールを選びます。ここでの並び順がそのまま親に表示されます。',
@@ -225,7 +235,8 @@ const ja: Record<Key, string> = {
   'foot.save': '保存',
   'foot.saving': '保存中…',
   'foot.discard': '破棄',
-  'foot.saved': '保存しました。変更は新しいセッションに適用され、実行中のセッションは今のロールのままです。',
+  'foot.saved':
+    '保存しました。変更は新しいセッションに適用され、実行中のセッションは今のロールとワークフローの既定モデルのままです。',
   'foot.failed': '保存できませんでした。接続を確認して、もう一度お試しください。',
   'foot.conflict': '編集を始めたあとにホスト側の設定が変更されたため、保存しませんでした。',
   'foot.reload': '最新の設定を読み込む',
@@ -281,6 +292,7 @@ const ISSUE_KEYS: Record<SettingsProblem['code'], Key> = {
   'description-too-long': 'issue.description',
   'instructions-too-long': 'issue.instructions',
   'invalid-model': 'issue.model',
+  'invalid-workflow-model': 'issue.workflowModel',
   'fork-model-ignored': 'issue.forkModel',
   'fork-preset-ignored': 'issue.forkPreset',
   'invalid-fork-scope': 'issue.forkScope',

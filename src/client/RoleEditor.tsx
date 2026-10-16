@@ -183,16 +183,42 @@ interface PickerProps {
   error: string | undefined
 }
 
-function ModelFields({ uid, role, state, error }: PickerProps) {
+/** The workflow picker shares provider/model controls, but never role-only settings. */
+export function WorkflowModelFields({ state }: { state: PageState }) {
+  const c = useController()
+  const t = useT()
+  useEffect(() => c.loadWorkflowCatalog(), [c])
+  const issue = state.issues.find(candidate => candidate.code === 'invalid-workflow-model')
+  return <ModelFields state={state} workflow error={issue === undefined ? undefined : issueText(issue, t)} />
+}
+
+function ModelFields({
+  uid,
+  role,
+  state,
+  error,
+  workflow = false,
+}: {
+  uid?: number
+  role?: RoleDefinition
+  state: PageState
+  error: string | undefined
+  workflow?: boolean
+}) {
   const c = useController()
   const t = useT()
   const { catalog } = state
-  const fork = role.context === 'fork'
+  const fork = role?.context === 'fork'
   const disabled = !state.canEdit || fork
-  const provider = role.model?.provider ?? ''
-  const model = role.model?.model ?? ''
-  const effort = role.model?.reasoningEffort ?? ''
-  const route = (next: Partial<RoleModel>) => c.setModel(uid, { provider, model, reasoningEffort: effort, ...next })
+  const selected = workflow ? state.draft?.workflowModel : role?.model
+  const provider = selected?.provider ?? ''
+  const model = selected?.model ?? ''
+  const effort = role?.model?.reasoningEffort ?? ''
+  const setModel = (next: RoleModel | undefined) => {
+    if (workflow) c.setWorkflowModel(next === undefined ? undefined : { provider: next.provider, model: next.model })
+    else if (uid !== undefined) c.setModel(uid, next)
+  }
+  const route = (next: Partial<RoleModel>) => setModel({ provider, model, reasoningEffort: effort, ...next })
 
   const group = catalog.groups.find(candidate => candidate.id === provider)
   const option = group?.models.find(candidate => candidate.id === model)
@@ -208,7 +234,7 @@ function ModelFields({ uid, role, state, error }: PickerProps) {
 
   return (
     <fieldset className="dshrs-group">
-      <legend>{t('ed.model')}</legend>
+      <legend>{t(workflow ? 'workflow.heading' : 'ed.model')}</legend>
       <div className="dshrs-model-grid">
         <Field label={t('ed.provider')} error={error}>
           {a11y =>
@@ -221,7 +247,7 @@ function ModelFields({ uid, role, state, error }: PickerProps) {
                 onChange={event => {
                   const next = event.target.value
                   const first = catalog.groups.find(candidate => candidate.id === next)?.models[0]?.id ?? ''
-                  c.setModel(uid, next === '' ? undefined : { provider: next, model: first })
+                  setModel(next === '' ? undefined : { provider: next, model: first })
                 }}
               >
                 <option value="">{t('ed.parentModel')}</option>
@@ -256,7 +282,7 @@ function ModelFields({ uid, role, state, error }: PickerProps) {
                   className="dshrs-select"
                   value={model}
                   disabled={disabled}
-                  onChange={event => c.setModel(uid, { provider, model: event.target.value })}
+                  onChange={event => setModel({ provider, model: event.target.value })}
                 >
                   <option value="">{t('ed.selectModel')}</option>
                   {(group?.models ?? []).map(candidate => (
@@ -282,7 +308,7 @@ function ModelFields({ uid, role, state, error }: PickerProps) {
             }
           </Field>
         )}
-        {listed && (provider === '' || model === '' || (efforts.length === 0 && effort === '')) ? null : (
+        {workflow || (listed && (provider === '' || model === '' || (efforts.length === 0 && effort === ''))) ? null : (
           <Field label={t('ed.effort')}>
             {a11y =>
               listed ? (
@@ -318,13 +344,14 @@ function ModelFields({ uid, role, state, error }: PickerProps) {
           </Field>
         )}
       </div>
+      {workflow ? <p className="dshrs-hint">{t('workflow.hint')}</p> : null}
       <p className="dshrs-hint">
         {hint}
         {catalog.partial && listed && !fork ? ` ${t('ed.catalogPartial')}` : ''}
       </p>
       {!fork && catalog.status === 'error' ? (
         <div>
-          <Button onClick={() => c.loadReference()}>{t('ed.retry')}</Button>
+          <Button onClick={() => (workflow ? c.loadWorkflowCatalog() : c.loadReference())}>{t('ed.retry')}</Button>
         </div>
       ) : null}
     </fieldset>

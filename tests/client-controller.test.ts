@@ -164,7 +164,11 @@ describe('save', () => {
     const call = fake.calls[0]
     if (call === undefined) throw new Error('no mutate call')
     expect(call.revision).toBe(4)
-    expect(call.ops.map(op => (op.op === 'set' ? op.path : ['unset']))).toEqual([['enabled'], ['roles']])
+    expect(call.ops.map(op => (op.op === 'set' ? op.path : ['unset']))).toEqual([
+      ['enabled'],
+      ['roles'],
+      ['workflowModel'],
+    ])
     expect(call.ops[0]).toMatchObject({ value: false })
     const written = (call.ops[1] as { value: RoleDefinition[] }).value
     expect(written.map(role => role.id)).toEqual(['general', 'fork', 'worker', 'explorer', 'reviewer'])
@@ -410,5 +414,63 @@ describe('dispose', () => {
     controller.setLocale('ja')
     expect(listener).not.toHaveBeenCalled()
     expect(controller.getSnapshot().catalog.status).toBe('loading')
+  })
+})
+
+describe('workflow model', () => {
+  it('saves and clears the route atomically with roles, blocking incomplete pairs', async () => {
+    const { controller, fake } = setup({ revision: 10 })
+    controller.setWorkflowModel({ provider: 'p', model: '' })
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      canSave: false,
+      issues: [{ code: 'invalid-workflow-model' }],
+    })
+    await controller.save()
+    expect(fake.calls).toHaveLength(0)
+    controller.setWorkflowModel({ provider: 'p', model: 'm' })
+    await controller.save()
+    expect(fake.calls[0]).toMatchObject({
+      revision: 10,
+      ops: [
+        { path: ['enabled'] },
+        { path: ['roles'] },
+        { path: ['workflowModel'], value: { provider: 'p', model: 'm' } },
+      ],
+    })
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: false,
+      draft: { workflowModel: { provider: 'p', model: 'm' } },
+    })
+    controller.setEnabled(false)
+    await controller.save()
+    expect(controller.getSnapshot().draft?.workflowModel).toEqual({ provider: 'p', model: 'm' })
+    controller.setWorkflowModel(undefined)
+    await controller.save()
+    expect(fake.calls[2]?.ops[2]).toEqual({ op: 'set', path: ['workflowModel'], value: null })
+    expect(controller.getSnapshot().draft?.workflowModel).toBeUndefined()
+    expect(controller.getSnapshot().repaired).toEqual([])
+  })
+
+  it('loads only the catalog once, reloads on invalidation, and retries only on request', async () => {
+    const { controller, remote } = setup()
+    remote.session.modelCatalog.mockResolvedValueOnce(fail('down'))
+    controller.loadWorkflowCatalog()
+    controller.loadWorkflowCatalog()
+    await flush()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(1)
+    expect(remote.agentPresets.list).not.toHaveBeenCalled()
+    expect(controller.getSnapshot().catalog.status).toBe('error')
+    controller.setWorkflowModel({ provider: 'p', model: 'm' })
+    await flush()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(1)
+    controller.loadWorkflowCatalog()
+    await flush()
+    controller.loadWorkflowCatalog()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(2)
+    controller.invalidateReference()
+    await flush()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(3)
+    expect(remote.agentPresets.list).not.toHaveBeenCalled()
   })
 })

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Add a separate workflow default provider/model setting to the Plugins page, with English/Japanese UI, model catalog selection, validation, save/clear, and per-session persistence.
+- Workflow `agent()` calls without an explicit route use the configured pair; explicit `provider` and/or `model` retain native workflow override behavior. With no setting, parent inheritance is unchanged.
+- Apply only model defaults: no role instructions, preset, reasoning effort, or read-only setting is added. Preserve the official workflow tool's execution and background lifecycle, and refresh scoped adapters when presets change.
+
 ## 0.1.2
 
 - Fix: the Host plugin never took effect in a real DSH profile. Per-Session role state was written with `appendPluginRecord` from `@deepseek-ai/dsh-session`, whose private brand check rejects Host Sessions when the plugin resolves that package to its own installed copy (`Receiver must be an instance of class Session`), so `delegate` was never registered. Role snapshots and child roles now live in the `rolesubagents` storage domain; records already written to Session logs are still read back.

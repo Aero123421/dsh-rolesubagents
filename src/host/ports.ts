@@ -32,6 +32,8 @@ export interface AgentPort {
   /** The Agent's own scoped context: registrations here are visible to this Agent only. */
   readonly ctx: {
     readonly tools: {
+      /** Resolve only tools already visible to this Agent; never add workflow to a preset without it. */
+      get?(name: string, scope?: AgentPort): ToolDefinition | undefined
       register(definition: ToolDefinition): () => void
       guard(guard: (call: ToolGuardCall) => string | undefined): () => void
     }
@@ -131,6 +133,7 @@ export interface HostContext {
   get(name: string): unknown
   on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown
+  on(event: 'tools/change', listener: () => void): unknown
   on(
     event: 'session/event',
     listener: (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void,

@@ -6,7 +6,7 @@ import { ControllerProvider, useController, usePageState, useT } from './context
 import type { Controller, PageState } from './controller.ts'
 import { type DraftRow, routeLabel, templates } from './draft.ts'
 import { languageOf, issueText } from './i18n.ts'
-import { RoleEditor } from './RoleEditor.tsx'
+import { RoleEditor, WorkflowModelFields } from './RoleEditor.tsx'
 import { Badge, Button, Switch } from './ui.tsx'
 
 export interface RolesPageProps {
@@ -61,6 +61,9 @@ function Page() {
         </div>
       )}
       <MasterSwitch state={state} />
+      <section className="dshrs-section">
+        <WorkflowModelFields state={state} />
+      </section>
       <RoleList state={state} rows={draft.rows} />
       {state.writable ? <Footer state={state} /> : null}
     </Frame>

@@ -54,11 +54,16 @@ export interface RoleDefinition {
   readOnly: boolean
 }
 
+/** Model-only default for workflow children; independent of roles. */
+export type WorkflowModel = Pick<RoleModel, 'provider' | 'model'>
+
 /** The row's editable settings. */
 export interface RoleSettings {
   /** Master switch: off removes the tool from new Sessions. */
   enabled: boolean
   roles: RoleDefinition[]
+  /** Workflow children use this route only when no explicit route is supplied. */
+  workflowModel?: WorkflowModel
 }
 
 export const ROLE_ID_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/
@@ -141,6 +146,7 @@ export interface SettingsProblem {
     | 'description-too-long'
     | 'instructions-too-long'
     | 'invalid-model'
+    | 'invalid-workflow-model'
     | 'fork-model-ignored'
     | 'fork-preset-ignored'
     | 'invalid-fork-scope'
@@ -357,7 +363,19 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
     problems.push({ id: dropped?.id, code: 'too-many-roles', message: `only ${MAX_ROLES} roles are kept` })
   }
 
-  return { settings: { enabled, roles }, problems }
+  let workflowModel: WorkflowModel | undefined
+  if (source.workflowModel !== undefined && source.workflowModel !== null) {
+    const route = isRecord(source.workflowModel) ? source.workflowModel : {}
+    const provider = nonEmpty(route.provider, MAX_NAME_LENGTH)
+    const model = nonEmpty(route.model, MAX_NAME_LENGTH)
+    if (provider === undefined || model === undefined) {
+      problems.push({
+        code: 'invalid-workflow-model',
+        message: 'workflow model needs both a provider and a model; it inherits the parent route instead',
+      })
+    } else workflowModel = { provider, model }
+  }
+  return { settings: { enabled, roles, ...(workflowModel === undefined ? {} : { workflowModel }) }, problems }
 }
 
 /**

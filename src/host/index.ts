@@ -26,6 +26,7 @@ import type { AgentPort, HostContext, SessionPort } from './ports.ts'
 import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
 import { createRoleState } from './state.ts'
 import { buildTool, type PendingChild, TOOL_NAME } from './tool.ts'
+import { workflowTool } from './workflow.ts'
 
 export const name = 'dsh-rolesubagents'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'agents', 'storageDomain']
@@ -41,6 +42,8 @@ export interface Config {
   enabled: Live<boolean>
   /** Role definitions; normalized on every read. */
   roles: Live<readonly unknown[]>
+  /** Model-only default for workflow children; null means inherit. */
+  workflowModel: Live<unknown>
   /** Provider used by fresh roles. */
   spawnProvider: string
   /** Provider used by fork roles. */
@@ -53,6 +56,7 @@ export const Config = z.object({
     .array(z.any())
     .default(DEFAULT_ROLES.map(role => ({ ...role })))
     .volatile(),
+  workflowModel: z.any().default(null).volatile(),
   spawnProvider: z.string().default('spawn'),
   forkProvider: z.string().default('fork'),
 })
@@ -71,6 +75,10 @@ interface SessionState {
 }
 
 interface Prepared {
+  snapshot: RoleSettings
+  workflow?: () => void
+  workflowOriginal?: import('@deepseek-ai/dsh-tools').ToolDefinition
+  workflowEpoch?: number
   tool?: () => void
   guard?: () => void
 }
@@ -97,6 +105,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     const { settings, problems } = normalizeSettings({
       enabled: read(config.enabled, true),
       roles: read(config.roles, DEFAULT_ROLES as unknown[]),
+      workflowModel: read(config.workflowModel, null),
     })
     const summary = problems.map(problem => problem.message).join('; ')
     if (summary !== '' && summary !== lastProblems) ctx.logger.warn(`rolesubagents: settings adjusted: ${summary}`)
@@ -137,13 +146,49 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
 
   const disposePrepared = (prepared: Prepared | undefined): void => {
     prepared?.guard?.()
+    prepared?.workflow?.()
     prepared?.tool?.()
+  }
+
+  // An external tool change invalidates in O(1), not by rebuilding every
+  // Agent's registry during workflow fan-out. Refresh only at the next prompt
+  // or execution for that Agent. Old captured wrappers re-resolve too, so a
+  // removed/restricted workflow cannot execute through a stale shadow.
+  let workflowEpoch = 0
+  let refreshingWorkflow = false
+  const refreshWorkflow = (agent: AgentPort, prepared: Prepared): void => {
+    const { snapshot } = prepared
+    if (!snapshot.enabled || snapshot.workflowModel === undefined || prepared.workflowEpoch === workflowEpoch) return
+    if (refreshingWorkflow) throw new Error('workflow refresh is already in progress')
+    refreshingWorkflow = true
+    prepared.workflowOriginal = undefined
+    try {
+      prepared.workflow?.()
+      prepared.workflow = undefined
+      const original = agent.ctx.tools.get?.('workflow', agent)
+      if (original !== undefined) {
+        const wrapped = workflowTool(original, snapshot.workflowModel, () => {
+          if (installed.get(agent) !== prepared) return undefined
+          refreshWorkflow(agent, prepared)
+          return prepared.workflowOriginal
+        })
+        prepared.workflow = agent.ctx.tools.register(wrapped)
+        prepared.workflowOriginal = original
+      }
+    } catch (error) {
+      ctx.logger.warn(
+        `rolesubagents: could not decorate workflow for agent ${agent.id}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    } finally {
+      prepared.workflowEpoch = workflowEpoch
+      refreshingWorkflow = false
+    }
   }
 
   const install = (agent: AgentPort, snapshot: RoleSettings): void => {
     if (installed.has(agent)) return
     const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending, state })
-    const prepared: Prepared = {}
+    const prepared: Prepared = { snapshot }
     if (definition !== undefined) {
       prepared.tool = agent.ctx.tools.register(definition)
       stateOf(agent.session.id).toolInstalled = true
@@ -156,6 +201,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       )
     }
     installed.set(agent, prepared)
+    refreshWorkflow(agent, prepared)
   }
 
   const pinReadOnly = (agent: AgentPort): void => {
@@ -188,6 +234,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     required: true,
     text: ({ agent }) => {
       if (agent === undefined) return ''
+      const prepared = installed.get(agent)
+      if (prepared !== undefined) refreshWorkflow(agent, prepared)
       const lines: string[] = []
       const role = roleOf(agent)
       if (role !== undefined) {
@@ -221,9 +269,13 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   }
 
   const stopCreated = ctx.on('agent/created', ({ agent, source }) => guarded(agent, source))
+  const stopTools = ctx.on('tools/change', () => {
+    if (!refreshingWorkflow) workflowEpoch++
+  })
   const stopDisposed = ctx.on('agent/disposed', ({ agent }) => {
-    disposePrepared(installed.get(agent))
+    const prepared = installed.get(agent)
     installed.delete(agent)
+    disposePrepared(prepared)
     sessions.delete(agent.session.id)
   })
   const stopSession = ctx.on('session/event', (session, event) => {
@@ -249,6 +301,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   ctx.effect(
     () => () => {
       unsubscribe(stopCreated)
+      unsubscribe(stopTools)
       unsubscribe(stopDisposed)
       unsubscribe(stopSession)
       for (const prepared of installed.values()) disposePrepared(prepared)

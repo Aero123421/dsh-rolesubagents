@@ -1,6 +1,6 @@
 {
   "name": "dsh-rolesubagents",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, and let the parent pick one per delegation.",
   "keywords": [
     "dsh",
@@ -60,7 +60,8 @@
     "lint:fix": "biome check --write .",
     "test": "vitest run",
     "check": "pnpm lint && pnpm typecheck && pnpm test && node scripts/check-lib.mjs",
-    "check:lib": "node scripts/check-lib.mjs"
+    "check:lib": "node scripts/check-lib.mjs",
+    "check:host": "node scripts/check-workflow-host.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-storage-domain": ">=0.2.1-alpha.3 <0.3.0-0",

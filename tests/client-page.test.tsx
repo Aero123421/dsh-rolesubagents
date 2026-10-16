@@ -21,10 +21,8 @@ async function mount(options: MountOptions = {}) {
   const remote = options.remote ?? fakeRemote()
   const controller = createController({ form: fake.form, remote, locale: options.locale ?? 'en' })
   render(<RolesPage controller={controller} view="page" />)
-  if (options.preload !== false) {
-    controller.loadReference()
-    await settle()
-  }
+  if (options.preload !== false) update(() => controller.loadReference())
+  await settle()
   return { fake, remote, controller }
 }
 
@@ -35,6 +33,7 @@ const rowOf = (id: string): HTMLElement => {
 }
 const button = (name: string | RegExp) => screen.getByRole('button', { name })
 const saved = async (fake: FakeForm) => {
+  await settle()
   await waitFor(() => expect(fake.calls.length).toBeGreaterThan(0))
   await screen.findByText(/^Saved\./)
 }
@@ -212,10 +211,10 @@ describe('role editor', () => {
     )
     await mount({ form: { value: { enabled: true, roles } } })
     fireEvent.click(button('Edit role worker'))
-    await screen.findByRole('option', { name: 'DeepSeek' })
-    expect((screen.getByLabelText('Provider') as HTMLSelectElement).disabled).toBe(false)
+    await within(rowOf('worker')).findByRole('option', { name: 'DeepSeek' })
+    expect((within(rowOf('worker')).getByLabelText('Provider') as HTMLSelectElement).disabled).toBe(false)
     fireEvent.click(screen.getByLabelText(/Fork: the child inherits/))
-    const provider = screen.getByLabelText('Provider') as HTMLSelectElement
+    const provider = within(rowOf('worker')).getByLabelText('Provider') as HTMLSelectElement
     expect(provider.disabled).toBe(true)
     expect(provider.value).toBe('')
     expect((screen.getByLabelText('Agent preset') as HTMLSelectElement).disabled).toBe(true)
@@ -228,17 +227,17 @@ describe('role editor', () => {
   it('offers the catalog as provider, model and effort choices', async () => {
     await mount()
     fireEvent.click(button('Edit role worker'))
-    await screen.findByRole('option', { name: 'DeepSeek' })
-    expect(screen.queryByLabelText('Model')).toBeNull()
-    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'deepseek' } })
-    const model = screen.getByLabelText('Model') as HTMLSelectElement
+    await within(rowOf('worker')).findByRole('option', { name: 'DeepSeek' })
+    expect(within(rowOf('worker')).queryByLabelText('Model')).toBeNull()
+    fireEvent.change(within(rowOf('worker')).getByLabelText('Provider'), { target: { value: 'deepseek' } })
+    const model = within(rowOf('worker')).getByLabelText('Model') as HTMLSelectElement
     expect(model.value).toBe('deepseek-v4-flash')
     fireEvent.change(screen.getByLabelText('Reasoning effort'), { target: { value: 'max' } })
     expect(within(rowOf('worker')).getByText('Model: deepseek / deepseek-v4-flash · max')).toBeTruthy()
     fireEvent.change(model, { target: { value: 'deepseek-v4-pro' } })
     expect(screen.queryByLabelText('Reasoning effort')).toBeNull()
     expect(within(rowOf('worker')).getByText('Model: deepseek / deepseek-v4-pro')).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: '' } })
+    fireEvent.change(within(rowOf('worker')).getByLabelText('Provider'), { target: { value: '' } })
     expect(within(rowOf('worker')).getByText("Model: parent's model")).toBeTruthy()
   })
 
@@ -249,7 +248,7 @@ describe('role editor', () => {
     await mount({ form: { value: { enabled: true, roles } } })
     fireEvent.click(button('Edit role worker'))
     await screen.findByRole('option', { name: 'gone (not listed)' })
-    expect((screen.getByLabelText('Provider') as HTMLSelectElement).value).toBe('gone')
+    expect((within(rowOf('worker')).getByLabelText('Provider') as HTMLSelectElement).value).toBe('gone')
     expect(screen.getByRole('option', { name: 'old (not listed)' })).toBeTruthy()
   })
 
@@ -259,12 +258,13 @@ describe('role editor', () => {
     remote.agentPresets.list.mockRejectedValue(new Error('down'))
     await mount({ remote, preload: false })
     fireEvent.click(button('Edit role worker'))
-    await screen.findByText('The model list is unavailable. Type the IDs instead.')
-    const provider = screen.getByLabelText('Provider') as HTMLInputElement
+    await settle()
+    await within(rowOf('worker')).findByText('The model list is unavailable. Type the IDs instead.')
+    const provider = within(rowOf('worker')).getByLabelText('Provider') as HTMLInputElement
     expect(provider.tagName).toBe('INPUT')
     fireEvent.change(provider, { target: { value: 'acme' } })
     expect(screen.getAllByText(/needs both a provider and a model/).length).toBeGreaterThan(0)
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'big' } })
+    fireEvent.change(within(rowOf('worker')).getByLabelText('Model'), { target: { value: 'big' } })
     fireEvent.change(screen.getByLabelText('Reasoning effort'), { target: { value: 'deep' } })
     expect(within(rowOf('worker')).getByText('Model: acme / big · deep')).toBeTruthy()
     expect(screen.queryByText('Fix these before saving:')).toBeNull()
@@ -273,9 +273,9 @@ describe('role editor', () => {
     fireEvent.change(preset, { target: { value: 'ptc' } })
     expect(within(rowOf('worker')).getByText('Preset: ptc')).toBeTruthy()
     remote.session.modelCatalog.mockResolvedValue({ ok: true, value: { groups: [], failures: [] } })
-    fireEvent.click(button('Retry'))
-    await waitFor(() => expect(remote.session.modelCatalog).toHaveBeenCalledTimes(2))
+    fireEvent.click(within(rowOf('worker')).getByRole('button', { name: 'Retry' }))
     await settle()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(3)
   })
 
   it('offers the agent presets and explains what a preset changes', async () => {
@@ -300,7 +300,7 @@ describe('saving', () => {
     await saved(fake)
     expect(fake.calls).toHaveLength(1)
     expect(screen.getByRole('status').textContent).toBe(
-      'Saved. Changes apply to new sessions; running sessions keep their roles.',
+      'Saved. Changes apply to new sessions; running sessions keep their roles and workflow default model.',
     )
     expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
   })
@@ -398,5 +398,55 @@ describe('language', () => {
     expect(screen.getByRole('switch', { name: 'Subagents' })).toBeTruthy()
     update(() => controller.setLocale('ja'))
     expect(screen.getByRole('switch', { name: 'サブエージェント' })).toBeTruthy()
+  })
+})
+
+describe('workflow model section', () => {
+  it('loads a model-only picker, selects providers/models, saves and clears', async () => {
+    const { fake, remote } = await mount({ preload: false })
+    await settle()
+    const picker = within(screen.getByText('Workflow model', { selector: 'legend' }).closest('fieldset') as HTMLElement)
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(1)
+    expect(remote.agentPresets.list).not.toHaveBeenCalled()
+    expect(picker.queryByLabelText('Reasoning effort')).toBeNull()
+    expect(picker.queryByLabelText('Agent preset')).toBeNull()
+    expect(picker.getByText(/Explicit workflow model overrides take priority/)).toBeTruthy()
+    fireEvent.change(picker.getByLabelText('Provider'), { target: { value: 'deepseek' } })
+    expect((picker.getByLabelText('Model') as HTMLSelectElement).value).toBe('deepseek-v4-flash')
+    expect(picker.queryByLabelText('Reasoning effort')).toBeNull()
+    fireEvent.change(picker.getByLabelText('Model'), { target: { value: 'deepseek-v4-pro' } })
+    fireEvent.click(button('Save'))
+    await saved(fake)
+    expect(fake.calls[0]?.ops[2]).toMatchObject({ value: { provider: 'deepseek', model: 'deepseek-v4-pro' } })
+    fireEvent.change(picker.getByLabelText('Provider'), { target: { value: 'other' } })
+    expect((picker.getByLabelText('Model') as HTMLSelectElement).value).toBe('o1')
+    fireEvent.change(picker.getByLabelText('Model'), { target: { value: '' } })
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+    expect(picker.getByLabelText('Provider').getAttribute('aria-invalid')).toBe('true')
+    fireEvent.change(picker.getByLabelText('Provider'), { target: { value: '' } })
+    fireEvent.click(button('Save'))
+    await settle()
+    expect(fake.calls).toHaveLength(2)
+    expect(fake.calls[1]?.ops[2]).toMatchObject({ value: null })
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(1)
+  })
+
+  it('supports typed routes, validation, and explicit retry without repeated failed loads', async () => {
+    const remote = fakeRemote()
+    remote.session.modelCatalog.mockRejectedValue(new Error('down'))
+    await mount({ remote, preload: false })
+    await settle()
+    const picker = within(screen.getByText('Workflow model', { selector: 'legend' }).closest('fieldset') as HTMLElement)
+    fireEvent.change(picker.getByLabelText('Provider'), { target: { value: 'custom' } })
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+    expect(picker.getByText(/workflow model needs both/)).toBeTruthy()
+    fireEvent.change(picker.getByLabelText('Model'), { target: { value: 'custom-model' } })
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
+    expect(picker.queryByLabelText('Reasoning effort')).toBeNull()
+    await settle()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(1)
+    fireEvent.click(picker.getByRole('button', { name: 'Retry' }))
+    await settle()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(2)
   })
 })
