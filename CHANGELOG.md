@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Target DSH `0.2.1-rc.2` in development dependencies and the explicit `engines.dsh` compatibility range; retain the native subagent and workflow runtimes.
+- Wait for persisted role state and its writes before releasing an Agent's first turn. Preserve read-only guards on cold resume, roll back incomplete registration, and await storage teardown without reinstalling tools after unload.
+- Fix read-only re-pinning on native DSH Sessions by deferring sandbox appends until synchronous event publication finishes. Coalesce queued changes and deny shell calls at the tool guard while the mode is writable.
+- Stop rewriting every saved session on domain open and release settled write promises instead of retaining them until shutdown.
+- Reject cancelled delegations and providers replaced during model resolution. Fail clearly when a full-history role has a fresh provider or an explicit model cannot be validated. An explicit model's default reasoning effort no longer inherits the parent's effort accidentally.
+- Preserve unsaved settings across temporary namespace loss, detect changed Host values even when restart reuses a revision, and keep submitted edits when an accepted ConfigForm write has not yet reached the mirror. Allow repair-only saves and stop disposed controllers from sending requests.
+- Add manual provider/model entry alongside catalog selection, independent model and preset refresh/retry, stable inputs during late responses, Japanese repair details, and more flexible narrow-screen layout.
+- Preserve native workflow validation and model defaults for cross-realm JSON options, explicit invalid route fields, accessors, and symbols. Fix recursive installed-host module resolution on current Node releases.
+
 ## 0.1.3
 
 - Add a separate workflow default provider/model setting to the Plugins page, with English/Japanese UI, model catalog selection, validation, save/clear, and per-session persistence.

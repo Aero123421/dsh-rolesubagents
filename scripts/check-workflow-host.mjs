@@ -10,18 +10,18 @@
  * process sandbox enforcement or live model credentials.
  */
 import assert from 'node:assert/strict'
-import { createRequire, registerHooks } from 'node:module'
+import { registerHooks } from 'node:module'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const checkout = resolve(process.env.DSH_CHECKOUT || '/usr/lib/node_modules/@deepseek-ai/dsh')
-const hostRequire = createRequire(resolve(checkout, 'package.json'))
+const hostManifest = pathToFileURL(resolve(checkout, 'package.json')).href
 // Resolve host peers from one installation, as DSH does when loading a plugin.
 // This also avoids accidentally testing different dev-dependency service classes.
 const resolutionHook = registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith('@deepseek-ai/')) {
-      return { url: pathToFileURL(hostRequire.resolve(specifier)).href, shortCircuit: true }
+      return next(specifier, { ...context, parentURL: hostManifest })
     }
     return next(specifier, context)
   },
@@ -113,6 +113,18 @@ async function checkNativeWorkflow() {
   assert.deepEqual(test.options, [configured])
   pass('real guest receives configured workflow route')
 
+  test = await run('return await agent("JSON options", args.options);', { args: { options: { label: 'from JSON' } } })
+  assert.equal(test.result.stopReason, 'completed')
+  assert.deepEqual(test.options, [configured])
+  pass('real guest receives defaults when options arrive through host-realm args')
+
+  test = await run(`const options = {
+    get label() { if (this !== options) throw Error('changed receiver'); return 'accessor'; }
+  }; return await agent('getter options', options);`)
+  assert.equal(test.result.stopReason, 'completed')
+  assert.deepEqual(test.options, [configured])
+  pass('native option materialization reads accessors with the original receiver')
+
   test = await run('return await agent("native fallback");', {}, false)
   assert.equal(test.result.stopReason, 'completed')
   assert.deepEqual(test.options, [undefined])
@@ -151,14 +163,26 @@ async function checkNativeWorkflow() {
     '{unexpected: true}',
     '{provider: 42}',
     '{model: 42}',
+    '{provider: undefined}',
+    '{model: undefined}',
+    '{get label() { throw Error("invalid option"); }}',
+    'Object.defineProperty({}, Symbol("invalid"), {value: true})',
+    'new Proxy({}, {getPrototypeOf() { throw Error("invalid prototype"); }})',
+    'new Proxy({}, {ownKeys() { throw Error("invalid keys"); }})',
     'new Date()',
     'new (class Options {})()',
   ]) {
-    test = await run(`return await parallel([() => agent('bad', ${options})]);`)
-    assert.equal(test.result.stopReason, 'error', options)
-    assert.equal(test.starts.length, 0, options)
+    for (const combine of [call => `parallel([() => ${call}])`, call => `pipeline([1], () => ${call})`]) {
+      const script = `return await ${combine(`agent('bad', ${options})`)};`
+      const native = await run(script, {}, false)
+      assert.equal(native.result.stopReason, 'error', options)
+      assert.equal(native.starts.length, 0, options)
+      test = await run(script)
+      assert.equal(test.result.stopReason, 'error', options)
+      assert.equal(test.starts.length, 0, options)
+    }
   }
-  pass('malformed options remain fatal through parallel, before child admission')
+  pass('malformed options retain native fatal errors through parallel and pipeline before child admission')
 
   // Native guest validates string type, not non-emptiness; backend route
   // resolution may reject these later. The adapter must not silently fix them.

@@ -114,8 +114,8 @@ export const STYLES = /* css */ `
 }
 
 .dshrs-badge {
-  display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 6px;
-  font-size: 12px; line-height: 1; white-space: nowrap; background: var(--dshrs-fill-strong); color: var(--dshrs-text2);
+  display: inline-flex; align-items: center; min-height: 20px; max-width: 100%; padding: 2px 7px; border-radius: 6px;
+  font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; background: var(--dshrs-fill-strong); color: var(--dshrs-text2);
 }
 .dshrs-badge--fork { background: var(--dshrs-accent-tint); color: var(--dshrs-accent-ink); }
 .dshrs-badge--ro { background: var(--dshrs-warn-tint); color: var(--dshrs-warn-ink); }
@@ -150,7 +150,7 @@ export const STYLES = /* css */ `
 .dshrs-choice { display: flex; gap: 10px; align-items: flex-start; line-height: 1.55; cursor: pointer; }
 .dshrs-choice input { margin: 4px 0 0; width: 16px; height: 16px; flex: none; accent-color: var(--dshrs-primary); }
 .dshrs-choice input:disabled { cursor: not-allowed; }
-.dshrs-model-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.dshrs-model-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); }
 
 .dshrs-preview { display: grid; gap: 10px; padding: 12px; border-radius: 10px; background: var(--dshrs-field); }
 .dshrs-pre {

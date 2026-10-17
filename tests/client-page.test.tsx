@@ -4,7 +4,7 @@ import { type Controller, createController } from '../src/client/controller.ts'
 import { RolesPage } from '../src/client/RolesPage.tsx'
 import { DEFAULT_ROLES } from '../src/shared/roles.ts'
 import { cleanup, fireEvent, render, screen, settle, update, waitFor, within } from './client-dom.ts'
-import { type FakeForm, fakeForm, fakeRemote, type FakeRemote } from './client-helpers.ts'
+import { CATALOG, type FakeForm, fakeForm, fakeRemote, type FakeRemote, ok } from './client-helpers.ts'
 
 afterEach(cleanup)
 
@@ -273,9 +273,76 @@ describe('role editor', () => {
     fireEvent.change(preset, { target: { value: 'ptc' } })
     expect(within(rowOf('worker')).getByText('Preset: ptc')).toBeTruthy()
     remote.session.modelCatalog.mockResolvedValue({ ok: true, value: { groups: [], failures: [] } })
-    fireEvent.click(within(rowOf('worker')).getByRole('button', { name: 'Retry' }))
+    fireEvent.click(within(rowOf('worker')).getByRole('button', { name: 'Retry models' }))
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(3)
+  })
+
+  it('can enter an unlisted route and retry a partially successful catalog without losing the route', async () => {
+    const remote = fakeRemote()
+    remote.session.modelCatalog.mockResolvedValueOnce(ok({ ...CATALOG, failures: [{ id: 'custom' }] }))
+    const { controller } = await mount({ remote })
+    fireEvent.click(button('Edit role worker'))
+    const row = within(rowOf('worker'))
+    expect(row.getByText(/Some providers could not be listed/)).toBeTruthy()
+    fireEvent.click(row.getByRole('button', { name: 'Enter IDs manually' }))
+    fireEvent.change(row.getByLabelText('Provider'), { target: { value: 'custom' } })
+    fireEvent.change(row.getByLabelText('Model'), { target: { value: 'custom-model' } })
+    fireEvent.change(row.getByLabelText('Reasoning effort'), { target: { value: 'max' } })
+    fireEvent.click(row.getByRole('button', { name: 'Retry models' }))
+    await settle()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(2)
+    expect(row.getByLabelText('Provider').tagName).toBe('INPUT')
+    expect(controller.getSnapshot().draft?.rows.find(entry => entry.role.id === 'worker')?.role.model).toEqual({
+      provider: 'custom',
+      model: 'custom-model',
+      reasoningEffort: 'max',
+    })
+    // Changing the model also clears an effort belonging to the previous model.
+    fireEvent.change(row.getByLabelText('Model'), { target: { value: 'another-model' } })
+    expect((row.getByLabelText('Reasoning effort') as HTMLInputElement).value).toBe('')
+    fireEvent.click(row.getByRole('button', { name: "Parent's model" }))
+    expect(row.getByText("Model: parent's model")).toBeTruthy()
+  })
+
+  it('keeps manual input mounted when the initial catalog arrives during typing', async () => {
+    const remote = fakeRemote()
+    let resolveCatalog: (value: Awaited<ReturnType<typeof remote.session.modelCatalog>>) => void = () => {}
+    remote.session.modelCatalog.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveCatalog = resolve
+        }),
+    )
+    await mount({ remote, preload: false })
+    const picker = within(screen.getByText('Workflow model', { selector: 'legend' }).closest('fieldset') as HTMLElement)
+    const provider = picker.getByLabelText('Provider') as HTMLInputElement
+    fireEvent.change(provider, { target: { value: 'custom' } })
+    update(() => resolveCatalog(ok(CATALOG)))
+    await settle()
+    expect(picker.getByLabelText('Provider')).toBe(provider)
+    expect(provider.value).toBe('custom')
+    fireEvent.change(picker.getByLabelText('Model'), { target: { value: 'custom-model' } })
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('shows a failed preset read and retries it independently of a successful model list', async () => {
+    const remote = fakeRemote()
+    remote.agentPresets.list.mockRejectedValueOnce(new Error('down'))
+    await mount({ remote })
+    fireEvent.click(button('Edit role worker'))
+    await settle()
+    // Opening the editor retries a previous failure; fail the explicit refresh too.
+    remote.agentPresets.list.mockRejectedValueOnce(new Error('down'))
+    fireEvent.click(button('Refresh presets'))
+    await settle()
+    expect(screen.getByText('The agent preset list is unavailable. Type an ID or retry.')).toBeTruthy()
+    const catalogCalls = remote.session.modelCatalog.mock.calls.length
+    fireEvent.click(button('Retry presets'))
+    await settle()
+    expect(screen.queryByText('The agent preset list is unavailable. Type an ID or retry.')).toBeNull()
+    expect(screen.getByRole('option', { name: 'PTC' })).toBeTruthy()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(catalogCalls)
   })
 
   it('offers the agent presets and explains what a preset changes', async () => {
@@ -310,7 +377,7 @@ describe('saving', () => {
     fake.outcome = 'throw'
     fireEvent.click(screen.getByRole('switch', { name: 'Subagents' }))
     fireEvent.click(button('Save'))
-    await screen.findByText('Could not save. Check the connection and try again.')
+    await screen.findByText('Could not confirm the save. Your edits are kept. Check the connection and try again.')
     expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
   })
 
@@ -320,10 +387,12 @@ describe('saving', () => {
     fake.onRefuse = () => fake.set({ revision: 2, value: { enabled: false, roles: DEFAULT_ROLES } })
     fireEvent.click(screen.getByRole('switch', { name: 'Enable role worker' }))
     fireEvent.click(button('Save'))
-    await screen.findByText('The settings changed on the Host after you started editing, so nothing was saved.')
+    await screen.findByText(
+      'The Host settings changed. Your edits are kept. Reloading the latest settings will discard them.',
+    )
     expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
     fireEvent.click(button('Reload latest settings'))
-    expect(screen.queryByText(/nothing was saved/)).toBeNull()
+    expect(screen.queryByText(/The Host settings changed/)).toBeNull()
     expect(screen.getByRole('switch', { name: 'Subagents' }).getAttribute('aria-checked')).toBe('false')
     expect(within(rowOf('worker')).getByRole('switch').getAttribute('aria-checked')).toBe('true')
   })
@@ -393,6 +462,22 @@ describe('language', () => {
     expect(screen.getByRole('status').textContent).toBe('未保存の変更があります')
   })
 
+  it('localizes stored-setting repairs and can save them directly', async () => {
+    const { fake } = await mount({
+      locale: 'ja',
+      form: { value: { enabled: true, roles: [42, { id: 'Bad Id' }, ...DEFAULT_ROLES] } },
+    })
+    expect(screen.getByText('オブジェクトではない不正なロール設定を削除しました。')).toBeTruthy()
+    expect(screen.getByText(/ロールID「Bad Id」は使えません/)).toBeTruthy()
+    expect(screen.getByRole('status').textContent).toBe('修復した設定を保存できます')
+    expect((button('保存') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(button('保存'))
+    await settle()
+    expect(fake.calls).toHaveLength(1)
+    expect(screen.queryByText('オブジェクトではない不正なロール設定を削除しました。')).toBeNull()
+    expect((button('保存') as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it('switches language live and falls back to English for other locales', async () => {
     const { controller } = await mount({ locale: 'fr' })
     expect(screen.getByRole('switch', { name: 'Subagents' })).toBeTruthy()
@@ -445,7 +530,7 @@ describe('workflow model section', () => {
     expect(picker.queryByLabelText('Reasoning effort')).toBeNull()
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(1)
-    fireEvent.click(picker.getByRole('button', { name: 'Retry' }))
+    fireEvent.click(picker.getByRole('button', { name: 'Retry models' }))
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(2)
   })

@@ -7,18 +7,35 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { WorkflowModel } from '../shared/roles.ts'
 
-/** Adapt the documented agent() script binding without changing other hooks. */
+/**
+ * Adapt the documented agent() binding. Native validation still receives
+ * explicit routes and invalid options, including accessors and symbol keys.
+ * Plain input objects may originate in the host realm through `args`.
+ */
 export function workflowScript(script: string, model: WorkflowModel): string {
   const route = JSON.stringify({ provider: model.provider, model: model.model })
   return `return await ((agent) => (async () => {\n${script}\n})())(
     ((original) => (prompt, options) => {
       if (options === undefined) return original(prompt, ${route});
-      if (options !== null && typeof options === 'object'
-          && (Object.getPrototypeOf(options) === Object.prototype || Object.getPrototypeOf(options) === null)
-          && options.provider === undefined && options.model === undefined) {
-        return original(prompt, { ...options, ...${route} });
+      let adapted = options;
+      try {
+        if (options !== null && typeof options === 'object') {
+          const prototype = Object.getPrototypeOf(options);
+          if (prototype === null || Object.getPrototypeOf(prototype) === null) {
+            const descriptors = Object.getOwnPropertyDescriptors(options);
+            if (!Object.hasOwn(descriptors, 'provider') && !Object.hasOwn(descriptors, 'model')) {
+              for (const descriptor of Object.values(descriptors)) {
+                if (descriptor.get !== undefined) descriptor.get = descriptor.get.bind(options);
+              }
+              adapted = Object.defineProperties(Object.create(prototype, descriptors),
+                Object.getOwnPropertyDescriptors(${route}));
+            }
+          }
+        }
+      } catch (error) {
+        // Native validation owns option failures, including throwing proxy traps.
       }
-      return original(prompt, options);
+      return original(prompt, adapted);
     })(agent)
   );`
 }

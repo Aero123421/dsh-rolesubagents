@@ -2,9 +2,8 @@
 /**
  * Builds the two halves DSH loads:
  *
- * - `lib/index.js`: the Host plugin (ESM, Node). Runtime libraries are bundled
- *   so the installed package has no runtime dependencies except the optional
- *   native `@ast-grep/napi`.
+ * - `lib/index.js`: the Host plugin (ESM, Node). Zod is bundled; DSH services
+ *   and Schemastery stay external and resolve through the installed peers.
  * - `lib/client.js`: the browser plugin in DSH's lazy-CJS factory format:
  *   `window.__ModuleLoader__.load({ id, factory: (require) => { ... } })`.
  *   Externals resolve through the module table DSH seeds for every dynamic

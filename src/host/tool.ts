@@ -143,17 +143,13 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const args = rawArgs as unknown as ToolArgs
       const parent = (exec as { agent?: AgentPort }).agent
       if (parent === undefined) throw new Error('subagent tool requires a calling agent')
+      exec.signal.throwIfAborted()
       const role = resolveRole(roles, args.role)
       if (deps.state.readRole(parent.session)?.readOnly === true) {
         const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles)
         if (denial !== undefined) throw new Error(denial)
       }
       const inheritsHistory = forkInheritsHistory(role)
-      if (inheritsHistory) {
-        deps.ctx.logger.warn(
-          `rolesubagents: role "${role.id}" forks the parent conversation; inherited tool results can carry prompt injection`,
-        )
-      }
       const providerName = inheritsHistory ? deps.forkProvider : deps.spawnProvider
       const provider = deps.ctx.subagents.getProvider(providerName)
       if (provider === undefined) throw new Error(`subagent provider "${providerName}" is not available`)
@@ -163,13 +159,11 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           : {
               provider: role.model.provider,
               model: role.model.model,
-              ...(role.model.reasoningEffort === undefined ? {} : { reasoningEffort: role.model.reasoningEffort }),
+              // An explicit undefined clears the same-route parent's effort before DSH resolves the model default.
+              reasoningEffort: role.model.reasoningEffort,
             }
-      if (agentOptions !== undefined) {
-        if (provider.capabilities.agentOptions !== true) {
-          throw new Error(`role "${role.id}": provider "${providerName}" cannot set the child model`)
-        }
-        await deps.ctx.get('llm')?.resolveCallConfig(agentOptions, exec.signal)
+      if (agentOptions !== undefined && provider.capabilities.agentOptions !== true) {
+        throw new Error(`role "${role.id}": provider "${providerName}" cannot set the child model`)
       }
       if (
         role.agentPreset !== undefined &&
@@ -182,7 +176,30 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           `role "${role.id}" must not inherit the parent conversation, but provider "${providerName}" copies it`,
         )
       }
+      if (inheritsHistory && provider.inheritsParentContext !== true) {
+        throw new Error(
+          `role "${role.id}" requires the parent conversation, but provider "${providerName}" does not copy it`,
+        )
+      }
+      if (agentOptions !== undefined) {
+        const llm = deps.ctx.get('llm')
+        if (llm === undefined) {
+          throw new Error('cannot resolve the selected child LLM route because the `llm` service is unavailable')
+        }
+        await llm.resolveCallConfig(agentOptions, exec.signal)
+        exec.signal.throwIfAborted()
+        if (deps.ctx.subagents.getProvider(providerName) !== provider) {
+          throw new Error(
+            `subagent provider "${providerName}" changed while resolving the child LLM route; retry the delegation`,
+          )
+        }
+      }
       const maxDepth = deps.ctx.subagents.resolveMaxDepth(undefined)
+      if (inheritsHistory) {
+        deps.ctx.logger.warn(
+          `rolesubagents: role "${role.id}" forks the parent conversation; inherited tool results can carry prompt injection`,
+        )
+      }
       const childId = randomUUID()
       deps.pending.set(childId, { role, snapshot })
       try {

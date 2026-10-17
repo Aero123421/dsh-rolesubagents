@@ -1,7 +1,8 @@
 /**
- * Structural views of the DSH Host services this plugin uses. Only the members
- * called here are described, so the real Cordis context is assignable and
- * tests can pass small fakes. Verified against DSH 0.2.1-alpha.3.
+ * Handwritten structural views of the DSH Host services this plugin uses.
+ * Only the members called here are described so tests can pass small fakes.
+ * Runtime contracts are checked against DSH 0.2.1-rc.2 by the native host
+ * probes; these ports do not claim full native Context type assignability.
  */
 
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -131,12 +132,12 @@ export interface HostContext {
   get(name: 'sessions'): { get(id: string): SessionPort | undefined } | undefined
   get(name: 'storageDomain'): StorageDomainPort | undefined
   get(name: string): unknown
-  on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
+  on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void | Promise<void>): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown
   on(event: 'tools/change', listener: () => void): unknown
   on(
     event: 'session/event',
     listener: (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void,
   ): unknown
-  effect(execute: () => () => void, label?: string): unknown
+  effect(execute: () => () => void | Promise<void>, label?: string): unknown
 }
