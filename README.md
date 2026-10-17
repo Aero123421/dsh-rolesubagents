@@ -9,13 +9,13 @@ Role-based subagents for DeepSeek Harness (DSH). Define roles such as worker, re
 - **Roles**: edit the id, parent-facing description, child instructions, model, read-only switch, and Agent Preset on the settings page. Each role can be switched on or off.
 - **Built-in roles**: `general` (a fresh child, like the official `subagent`) and `fork` (inherits the parent's conversation, like the official `subagent_fork`) cannot be deleted, only switched off.
 - **Templates**: `worker`, `explorer`, and `reviewer` ship as templates.
-- **Read-only**: pins the child's file sandbox to `read-only` and appends `read-only` again if a later `sandbox/mode` selects a wider mode. While that role is active, write-like tools from MCP and other plugins are refused. Requests for wider sandbox access are still rejected automatically, even when the parent runs in Full access or Auto review.
+- **Read-only**: pins the child's file sandbox to `read-only` and restores it after a later `sandbox/mode` selecting a wider mode has been published. While that role is active, write-like tools from MCP and other plugins are refused. Requests for wider sandbox access are still rejected automatically, even when the parent runs in Full access or Auto review.
 - **Cache-friendly**: role instructions reach the child as runtime context, not as system prompt. A role that keeps the parent's model and preset leaves the child's system prompt and tool definitions identical to the parent's. Fork roles also keep the inherited conversation cached.
 - **Fixed per session**: changes apply to new sessions; a running session keeps the role list it started with.
 
 ## Requirements
 
-- DSH `>=0.2.1-alpha.3 <0.3.0-0` (child Agent Preset selection and the storage-domain service)
+- DSH `>=0.2.1-rc.2 <0.3.0-0`. The package declares this range in `engines.dsh`, which current DSH checks before loading a plugin.
 - The settings page appears on the DSH Web (`dsh web`) Plugins page.
 
 ## Install
@@ -51,9 +51,11 @@ Children run on the official subagent runtime: they start in the background, not
 | Instructions for the child | Added to the child's runtime context; never shown to the parent |
 | Context | Fresh (spawn) or fork |
 | Inherited context | Fork roles only. All completed turns (the default) copies the parent's completed turns, including tool results. Task only starts a fresh child and does not copy that history |
-| Model | Provider, model, and reasoning effort; empty inherits the parent's route. Not available for fork roles |
+| Model | Provider, model, and reasoning effort; no model selection inherits the parent's route and effort. With an explicit model, Model default uses that model's default effort. Not available for fork roles |
 | Agent preset | Starts the child with this preset's system prompt and tools; fresh roles only |
 | Read-only | Keeps the file sandbox at `read-only` and refuses write-like MCP and plugin tools. Tools are classified by name; see Limitations |
+
+Model lists and Agent Presets can be refreshed separately. Choose **Enter IDs manually** when a provider or model is missing from the catalog; an incomplete catalog does not prevent entering a route. Edits remain in the draft through a temporary connection loss. If the Host's settings changed in the meantime, the page keeps the draft and asks you to reload before saving over that change.
 
 ### Workflow default model
 
@@ -94,14 +96,14 @@ Keep the official `send_message`, `list_agents`, and `interrupt_agent` tools on.
 
 ## Limitations
 
-- A read-only role watches `session/event`. When a later `sandbox/mode` is anything other than `read-only`, the plugin appends `read-only` again. The event is published after the wider mode is already committed, so that mode stays in the log and is followed by `read-only`; the plugin cannot veto it. If a nested writer appends a wider mode again during that append, the plugin retries up to 8 times and then logs a warning, leaving the wider mode last. A rejected append is logged the same way. While that latest mode is not `read-only`, `bash`, `pwsh`, and `run_code` are refused.
+- A read-only role watches `session/event`. A wider `sandbox/mode` is already committed when observers receive it, so the plugin cannot veto or remove that event. DSH `0.2.1-rc.2` rejects nested appends during a live Session's synchronous event notification. The plugin therefore queues a microtask to append `read-only` after that notification finishes, coalescing multiple synchronous changes into one re-pin. If the append is rejected, it logs a warning. `bash`, `pwsh`, and `run_code` are refused whenever the latest mode is not `read-only` at the tool guard's check, including while a re-pin is pending. Re-pinning does not retroactively constrain a call that has already passed the guard or begun executing.
 - While the role is read-only, a guard on that agent runs before the tool body and refuses write-like tools from MCP and other plugins. Classification uses the public name:
   - DSH's MCP bridge registers tools as `mcp__<server>__<tool>` and does not copy `readOnlyHint` or `destructiveHint`, so those hints are not consulted.
   - A name is split into tokens. A write-like token (`write`, `delete`, `update`, `create`, and others) refuses the call even when a read-like token is also present. A read-like token (`read`, `get`, `list`, `search`, and others) allows it. A name that is neither is refused.
   - A write tool whose name looks like a read (for example a deleter named `get_user`) is allowed. A read tool with a write-like or unrecognized name is refused.
   - Known external writes are refused even when the name does not look like one, including `plugin_manager`, goal and schedule changes, `stagehand_*`, and terminal control (`terminal_open`, `terminal_send`, `terminal_close`, `terminal_signal`).
-- `bash`, `pwsh`, and `run_code` stay callable only while the latest sandbox mode is `read-only`. `terminal_read` stays callable. A sandbox backend that does not enforce `read-only` can still let an allowed shell change files; that enforcement belongs to DSH. Network access and process visibility are outside this pin. Nested tool calls from `run_code` re-enter the guard; a program that writes without calling a tool is not stopped.
-- Slash commands are not tools. A command that appends `sandbox/mode` is overwritten back to `read-only`. This plugin does not re-assert the child's approval or policy. A one-shot `sandbox_permissions` escalation still depends on DSH denying it for a delegated child.
+- `bash`, `pwsh`, and `run_code` pass the tool guard only when the latest sandbox mode is `read-only`. `terminal_read` stays callable. A sandbox backend that does not enforce `read-only` can still let an allowed shell change files; that enforcement belongs to DSH. Network access and process visibility are outside this pin. Nested tool calls from `run_code` re-enter the guard; the guard does not inspect a program's own file writes.
+- Slash commands are not tools. A command that appends a wider `sandbox/mode` schedules a `read-only` re-pin after event notification. This plugin does not re-assert the child's approval or policy. A one-shot `sandbox_permissions` escalation still depends on DSH denying it for a delegated child.
 - A fork set to all completed turns copies that whole prefix, including tool results. The warnings on the settings page, in the tool description, in the tool result, in the host log, and in the child's runtime context do not filter or rewrite that history. Task only uses the fresh-child provider, so the parent log is never copied. An invalid fork scope is stored as task only. A fresh role and a task-only fork refuse a provider that sets `inheritsParentContext` to true. The official fork provider has no smaller slice, and events already copied cannot be removed.
 - A read-only agent cannot delegate to a role that is not read-only, or to a fork that copies the parent conversation. It can delegate to a read-only fresh role or a task-only fork.
 - Out-of-process children (codex, claude-code, acp) are not supported; roles use the spawn and fork providers.
@@ -110,10 +112,11 @@ Keep the official `send_message`, `list_agents`, and `interrupt_agent` tools on.
 
 ## How it works
 
-- On `agent/created`, the plugin records the session's role list in its `rolesubagents` storage domain and registers `delegate` in that Agent's own scope.
-- For each child it starts, it reserves the child id, records the child's role in the storage domain, and, for read-only roles, appends `sandbox/mode: read-only` before the child's first request. If that first pin fails, the child is not started. Afterwards, `session/event` re-appends `read-only` whenever the mode changes, including after resume when the stored mode is no longer `read-only`. The read-only agent also receives a `tools.guard` that refuses write-like calls.
+- On the awaited `agent/created` event, the plugin first opens the `rolesubagents` storage domain, reads the saved role and role list, and registers `delegate` in that Agent's own scope. New state is flushed before DSH releases the Agent's queued work. Resuming a session cannot replace its saved role list with the current settings while storage is still opening.
+- For each child it starts, it reserves the child id, records the child's role in the storage domain, and, for read-only roles, appends `sandbox/mode: read-only` before the child's first request. If that first pin fails, the child is not started. Later wider mode events schedule a re-pin in a microtask after synchronous `session/event` observers finish. Resume also re-pins a saved wider mode before queued work starts. The read-only agent receives a `tools.guard` that refuses write-like calls and denies `bash`, `pwsh`, and `run_code` if the latest mode is not `read-only` when checked.
 - A fork role set to task only is started on the spawn provider. A fork that inherits history is started on the fork provider, and the host logs that inherited tool results can carry prompt injection.
 - One global runtime-context provider reads the role from the storage domain, so the instructions survive compaction and resume. Role state used to be written as Session-log plugin records; those are still read back, but new state is only written to the storage domain (an exported Session moved without its storage keeps its log, not its role). A full-history fork also receives a warning to treat that history as untrusted.
+- Unloading the plugin removes its scoped registrations and waits for the storage domain to close. Opening a domain reads existing rows without rewriting them; only new writes are persisted.
 
 ## Development
 
@@ -121,10 +124,12 @@ Keep the official `send_message`, `list_agents`, and `interrupt_agent` tools on.
 pnpm install
 pnpm check   # lint, typecheck, test, and committed lib/ matches a fresh build
 pnpm build   # lib/index.js (Host) and lib/client.js (Web)
-pnpm check:host # optional real installed-DSH workflow integration checks
+pnpm check:host # optional installed-DSH workflow and delegation integration checks
 ```
 
 `lib/` is committed. After changing sources, run `pnpm build` and commit `lib/` with them.
+
+For the native checks, set `DSH_CHECKOUT` to the installed `@deepseek-ai/dsh` package directory (for example, `$(npm root -g)/@deepseek-ai/dsh`). These checks use the real workflow/PTC runtime and the real headless launcher, subagent manager, storage, compaction, and follow-up paths. A deterministic adapter replaces external model calls, so no API key is needed. The delegation checker creates an isolated temporary profile and prints its evidence directory. Set `DSH_E2E_ROOT` to a new empty directory to choose where to retain the sessions and trace. The read-only checks verify native tool dispatch and mode restoration; they do not test OS sandbox enforcement or live model-provider APIs.
 
 ## License
 

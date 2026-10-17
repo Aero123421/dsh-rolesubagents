@@ -87,7 +87,10 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   const spawnProvider = config.spawnProvider ?? 'spawn'
   const forkProvider = config.forkProvider ?? 'fork'
   const state = createRoleState(ctx)
+  let active = true
+  let stateReady = false
   void state.ready.then(() => {
+    stateReady = true
     if (state.degraded) {
       ctx.logger.warn(
         `rolesubagents: role state is kept in memory only: ${state.degradedReason ?? 'storage unavailable'}`,
@@ -99,6 +102,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   const sessions = new Map<string, SessionState>()
   /** Sessions whose live role is read-only, including the moment before the role record is written. */
   const readOnlySessions = new WeakSet<SessionPort>()
+  const queuedPins = new WeakSet<SessionPort>()
   let lastProblems = ''
 
   const currentSettings = (): RoleSettings => {
@@ -123,6 +127,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   }
 
   const roleOf = (agent: AgentPort): RoleDefinition | undefined => {
+    // A live Agent may request runtime context while an HMR reload is still
+    // opening storage. Do not cache "no role" before the stored image exists.
+    if (!stateReady) return undefined
     const sessionState = stateOf(agent.session.id)
     if (sessionState.role === undefined) sessionState.role = state.readRole(agent.session) ?? null
     return sessionState.role ?? undefined
@@ -189,16 +196,22 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     if (installed.has(agent)) return
     const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending, state })
     const prepared: Prepared = { snapshot }
-    if (definition !== undefined) {
-      prepared.tool = agent.ctx.tools.register(definition)
-      stateOf(agent.session.id).toolInstalled = true
-    }
-    const role = roleOf(agent)
-    if (role?.readOnly === true) {
-      readOnlySessions.add(agent.session)
-      prepared.guard = agent.ctx.tools.guard(call =>
-        readOnlyCallDenial(call.name, call.arguments, selectableRoles(snapshot), lastSandboxMode(agent.session)),
-      )
+    try {
+      if (definition !== undefined) {
+        prepared.tool = agent.ctx.tools.register(definition)
+        stateOf(agent.session.id).toolInstalled = true
+      }
+      const role = roleOf(agent)
+      if (role?.readOnly === true) {
+        readOnlySessions.add(agent.session)
+        prepared.guard = agent.ctx.tools.guard(call =>
+          readOnlyCallDenial(call.name, call.arguments, selectableRoles(snapshot), lastSandboxMode(agent.session)),
+        )
+      }
+    } catch (error) {
+      disposePrepared(prepared)
+      stateOf(agent.session.id).toolInstalled = false
+      throw error
     }
     installed.set(agent, prepared)
     refreshWorkflow(agent, prepared)
@@ -256,11 +269,14 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   })
 
   const guarded = (agent: AgentPort, _source: string): void => {
+    let readOnly = pending.get(agent.id)?.role.readOnly === true || readOnlySessions.has(agent.session)
     try {
+      readOnly ||= state.readRole(agent.session)?.readOnly === true
       onCreated(agent)
     } catch (error) {
-      // A read-only child must not start writable: abort its creation.
-      if (pending.get(agent.id)?.role.readOnly === true) throw error
+      // Both newly delegated and resumed read-only children must have their
+      // guard and sandbox pin installed before queued work can start.
+      if (readOnly) throw error
       // Anything else only costs this Agent the tool; a throw would abort its creation.
       ctx.logger.warn(
         `rolesubagents: could not prepare agent ${agent.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -268,7 +284,14 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     }
   }
 
-  const stopCreated = ctx.on('agent/created', ({ agent, source }) => guarded(agent, source))
+  const stopCreated = ctx.on('agent/created', async ({ agent, source }) => {
+    // DSH awaits this serial event before releasing the Agent's first turn.
+    // Reading early would overwrite a saved snapshot and cache a missing role.
+    await state.ready
+    if (!active) return
+    guarded(agent, source)
+    await state.flush()
+  })
   const stopTools = ctx.on('tools/change', () => {
     if (!refreshingWorkflow) workflowEpoch++
   })
@@ -280,26 +303,39 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
   })
   const stopSession = ctx.on('session/event', (session, event) => {
     if (event.type !== 'sandbox/mode' || sandboxModeOf(event.data) === 'read-only') return
-    if (!isReadOnlySession(session)) return
-    try {
-      holdReadOnly(session)
-    } catch (error) {
-      ctx.logger.warn(
-        `rolesubagents: could not re-pin read-only on session ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
+    if (!isReadOnlySession(session) || queuedPins.has(session)) return
+    queuedPins.add(session)
+    // Attached Sessions forbid append reentry while notifying observers.
+    // The tool guard refuses shell execution while the latest mode is writable;
+    // restore the mode once this synchronous publication has finished.
+    queueMicrotask(() => {
+      queuedPins.delete(session)
+      if (!active) return
+      try {
+        if (isReadOnlySession(session)) holdReadOnly(session)
+      } catch (error) {
+        ctx.logger.warn(
+          `rolesubagents: could not re-pin read-only on session ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    })
   })
   // Agents that already exist are prepared once the stored state is readable.
-  void state.ready.then(() => {
-    for (const agent of ctx.agents.list()) guarded(agent, 'resume')
-  })
+  void state.ready
+    .then(async () => {
+      if (!active) return
+      for (const agent of ctx.agents.list()) guarded(agent, 'resume')
+      await state.flush()
+    })
+    .catch(error => ctx.logger.warn(`rolesubagents: could not restore active agents: ${String(error)}`))
 
   const unsubscribe = (stop: unknown): void => {
     if (typeof stop === 'function') stop()
   }
 
   ctx.effect(
-    () => () => {
+    () => async () => {
+      active = false
       unsubscribe(stopCreated)
       unsubscribe(stopTools)
       unsubscribe(stopDisposed)
@@ -308,7 +344,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       installed.clear()
       sessions.clear()
       pending.clear()
-      void state.close()
+      await state.close()
     },
     'rolesubagents: scoped tools',
   )

@@ -141,21 +141,28 @@ function roleOf(data: unknown): RoleDefinition | undefined {
 export function createRoleState(ctx: HostContext): RoleState {
   const snapshots = new Map<string, SnapshotRecord>()
   const roles = new Map<string, RoleRecord>()
-  const pending: Promise<void>[] = []
+  const pending = new Set<Promise<void>>()
   let domain: DomainPort | undefined
   let degraded = false
   let degradedReason: string | undefined
+  let writeFailure: { error: unknown } | undefined
+  let closing: Promise<void> | undefined
 
   const persist = (table: string, key: string, value: SnapshotRecord | RoleRecord): void => {
     if (domain === undefined) return
     const target = domain
     const write = target.table(table).put(key, value)
-    pending.push(write)
-    write.catch(error => {
-      ctx.logger.warn(
-        `rolesubagents: could not persist ${table} state for session ${key}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    })
+    pending.add(write)
+    void write.then(
+      () => pending.delete(write),
+      error => {
+        pending.delete(write)
+        writeFailure ??= { error }
+        ctx.logger.warn(
+          `rolesubagents: could not persist ${table} state for session ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      },
+    )
   }
 
   const ready = (async (): Promise<void> => {
@@ -168,14 +175,18 @@ export function createRoleState(ctx: HostContext): RoleState {
     try {
       domain = await facility.open(STATE_DOMAIN)
       // Adopt the stored image, then replay any writes made while opening.
+      // Existing rows are already durable; rewriting them all makes each
+      // startup proportional to every historical Session's saved role list.
+      const openingSnapshots = [...snapshots]
+      const openingRoles = [...roles]
       for (const [key, value] of domain.table(SNAPSHOTS_TABLE).entries()) {
         if (!snapshots.has(key)) snapshots.set(key, value as SnapshotRecord)
       }
       for (const [key, value] of domain.table(ROLES_TABLE).entries()) {
         if (!roles.has(key)) roles.set(key, value as RoleRecord)
       }
-      for (const [key, record] of snapshots) persist(SNAPSHOTS_TABLE, key, record)
-      for (const [key, record] of roles) persist(ROLES_TABLE, key, record)
+      for (const [key, record] of openingSnapshots) persist(SNAPSHOTS_TABLE, key, record)
+      for (const [key, record] of openingRoles) persist(ROLES_TABLE, key, record)
     } catch (error) {
       degraded = true
       degradedReason = `the ${STATE_DOMAIN_NAME} storage domain could not be opened: ${error instanceof Error ? error.message : String(error)}`
@@ -208,12 +219,16 @@ export function createRoleState(ctx: HostContext): RoleState {
     },
     async flush() {
       await ready
-      await Promise.all(pending.splice(0))
+      await Promise.all([...pending])
+      if (writeFailure !== undefined) throw writeFailure.error
     },
-    async close() {
-      await ready
-      await Promise.allSettled(pending.splice(0))
-      await domain?.close()
+    close() {
+      closing ??= (async () => {
+        await ready
+        await Promise.allSettled([...pending])
+        await domain?.close()
+      })()
+      return closing
     },
   }
 }

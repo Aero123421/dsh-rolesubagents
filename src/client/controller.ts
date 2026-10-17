@@ -117,6 +117,10 @@ export interface Controller {
   setWorkflowModel(model: RoleSettings['workflowModel']): void
   /** Load only the workflow model catalog; explicit calls retry failures. */
   loadWorkflowCatalog(): void
+  /** Refresh the catalog after a partial answer or a model change. */
+  refreshCatalog(): void
+  /** Refresh the preset roster, including a failed initial read. */
+  refreshPresets(): void
   patchRole(uid: number, patch: RolePatch): void
   setContext(uid: number, context: RoleContext): void
   setForkScope(uid: number, scope: ForkScope): void
@@ -201,7 +205,7 @@ export function createController(options: ControllerOptions): Controller {
       save,
       expanded,
       canEdit,
-      canSave: canEdit && dirty && issues.length === 0 && !conflict,
+      canSave: canEdit && (dirty || repaired.length > 0) && issues.length === 0 && !conflict,
       canAdd: canEdit && canAddRole(current),
       catalog,
       presets,
@@ -226,15 +230,15 @@ export function createController(options: ControllerOptions): Controller {
   function onForm(): void {
     if (disposed) return
     const snapshot = form.getSnapshot()
-    if (snapshot.status !== 'ready') {
-      draft = undefined
-      conflict = false
-    } else if (save !== 'saving') {
+    // A plugin reload can temporarily remove its namespace. Hide the editor
+    // while unavailable, but keep its draft until an authoritative view returns.
+    if (snapshot.status === 'ready' && save !== 'saving') {
       if (draft === undefined) {
         rebase(snapshot)
         save = 'idle'
-      } else if (snapshot.revision !== draft.revision) {
+      } else if (snapshot.revision !== draft.revision || !sameSettings(draft.base, hostSettings(snapshot).settings)) {
         // The Host moved. Follow it unless the draft holds edits the Host does not already have.
+        // Revisions restart at zero with the Host, so compare values as well.
         if (!isDirty(draft) || sameSettings(draftSettings(draft), hostSettings(snapshot).settings)) {
           rebase(snapshot)
           save = 'idle'
@@ -248,7 +252,7 @@ export function createController(options: ControllerOptions): Controller {
 
   /** Apply a draft edit when editing is allowed; a no-op edit publishes nothing. */
   function edit(change: (current: Draft) => Draft, after?: (next: Draft, previous: Draft) => void): void {
-    if (draft === undefined || !state.canEdit) return
+    if (disposed || draft === undefined || !state.canEdit) return
     const previous = draft
     const next = change(previous)
     if (next === previous) return
@@ -265,6 +269,7 @@ export function createController(options: ControllerOptions): Controller {
   }
 
   async function loadCatalog(): Promise<void> {
+    if (disposed) return
     const run = ++catalogRun
     catalog = { ...catalog, status: 'loading' }
     publish()
@@ -281,6 +286,7 @@ export function createController(options: ControllerOptions): Controller {
   }
 
   async function loadPresets(): Promise<void> {
+    if (disposed) return
     const run = ++presetRun
     presets = { ...presets, status: 'loading' }
     publish()
@@ -334,6 +340,14 @@ export function createController(options: ControllerOptions): Controller {
     setEnabled: enabled => edit(current => setEnabled(current, enabled)),
     setWorkflowModel: model => edit(current => setWorkflowModel(current, model)),
     loadWorkflowCatalog,
+    refreshCatalog() {
+      workflowCatalogWanted = true
+      if (catalog.status !== 'loading') void loadCatalog()
+    },
+    refreshPresets() {
+      referenceWanted = true
+      if (presets.status !== 'loading') void loadPresets()
+    },
     patchRole: (uid, patch) => edit(current => patchRole(current, uid, patch)),
     setContext: (uid, context) => edit(current => setContext(current, uid, context)),
     setForkScope: (uid, scope) => edit(current => setForkScope(current, uid, scope)),
@@ -352,17 +366,22 @@ export function createController(options: ControllerOptions): Controller {
     addRole: () => edit(addBlankRole, openNewRow),
     addTemplate: templateId => edit(current => addTemplateRole(current, templateId), openNewRow),
     toggleEditor(uid) {
-      if (draft === undefined) return
+      if (disposed || draft === undefined) return
       expanded = expanded === uid ? undefined : uid
       if (expanded !== undefined) loadReference()
       publish()
     },
     async save() {
-      if (draft === undefined || !state.canSave) return
+      if (disposed || draft === undefined || !state.canSave) return
       const sent = draft
       const { settings, issues } = analyseDraft(sent)
       if (issues.length > 0) return
-      if (form.getSnapshot().revision !== sent.revision) {
+      const before = form.getSnapshot()
+      if (before.status !== 'ready' || !before.writable) {
+        publish()
+        return
+      }
+      if (before.revision !== sent.revision || !sameSettings(sent.base, hostSettings(before).settings)) {
         conflict = true
         publish()
         return
@@ -384,11 +403,22 @@ export function createController(options: ControllerOptions): Controller {
       }
       if (disposed) return
       const snapshot = form.getSnapshot()
-      if (landed) {
-        if (snapshot.status === 'ready') rebase(snapshot)
+      const held = hostSettings(snapshot)
+      if (
+        landed &&
+        snapshot.status === 'ready' &&
+        sameSettings(settings, held.settings) &&
+        held.problems.length === 0
+      ) {
+        rebase(snapshot)
         save = 'saved'
-      } else if (snapshot.revision !== sent.revision) {
-        // The Host refused because the fence moved: someone else saved first.
+      } else if (
+        snapshot.status === 'ready' &&
+        (landed || snapshot.revision !== sent.revision || !sameSettings(sent.base, held.settings))
+      ) {
+        // A shared ConfigForm may defer this accepted write's mirror update
+        // behind another queued write. Never replace the submitted draft with
+        // an older or competing value just because mutate() returned true.
         conflict = true
         save = 'idle'
       } else {
@@ -397,7 +427,7 @@ export function createController(options: ControllerOptions): Controller {
       publish()
     },
     discard() {
-      if (save === 'saving') return
+      if (disposed || save === 'saving') return
       const snapshot = form.getSnapshot()
       if (snapshot.status === 'ready') rebase(snapshot)
       save = 'idle'

@@ -55,7 +55,9 @@ function Page() {
           <p>{t('state.repaired', { count: state.repaired.length })}</p>
           <ul>
             {state.repaired.map(problem => (
-              <li key={`${problem.code}:${problem.index ?? ''}:${problem.id ?? ''}`}>{problem.message}</li>
+              <li key={`${problem.code}:${problem.index ?? ''}:${problem.id ?? ''}`}>
+                {issueText({ code: problem.code, roleId: problem.id }, t)}
+              </li>
             ))}
           </ul>
         </div>
@@ -151,6 +153,7 @@ function RoleRow(props: { row: DraftRow; index: number; count: number; state: Pa
   const t = useT()
   const { row, state } = props
   const { role, uid } = row
+  const editorId = useId()
   const open = state.expanded === uid
   const fork = role.context === 'fork'
   const route = routeLabel(role.model)
@@ -182,6 +185,7 @@ function RoleRow(props: { row: DraftRow; index: number; count: number; state: Pa
       <div className="dshrs-row-actions">
         <Button
           aria-expanded={open}
+          aria-controls={open ? editorId : undefined}
           aria-label={t(open ? 'row.closeLabel' : 'row.editLabel', { id: role.id })}
           onClick={() => c.toggleEditor(uid)}
         >
@@ -223,7 +227,7 @@ function RoleRow(props: { row: DraftRow; index: number; count: number; state: Pa
         </Button>
       </div>
       {open ? (
-        <div className="dshrs-row-editor">
+        <div className="dshrs-row-editor" id={editorId}>
           <RoleEditor row={row} state={state} />
         </div>
       ) : null}
@@ -245,9 +249,12 @@ function Footer({ state }: { state: PageState }) {
           ? { text: t('foot.failed'), tone: ' dshrs-bad' }
           : state.save === 'saved'
             ? { text: t('foot.saved'), tone: ' dshrs-ok' }
-            : { text: t(state.dirty ? 'foot.unsaved' : 'foot.clean'), tone: '' }
+            : {
+                text: t(state.dirty ? 'foot.unsaved' : state.repaired.length > 0 ? 'foot.repairs' : 'foot.clean'),
+                tone: '',
+              }
   return (
-    <div className="dshrs-footer">
+    <>
       {state.issues.length === 0 ? null : (
         <div className="dshrs-notice dshrs-notice--error" id={issuesId}>
           <p>{t('foot.fix')}</p>
@@ -258,28 +265,32 @@ function Footer({ state }: { state: PageState }) {
           </ul>
         </div>
       )}
-      <div className="dshrs-footer-bar">
-        <p className={`dshrs-status${message.tone}`} role="status" aria-live="polite">
-          {message.text}
-        </p>
-        <div className="dshrs-footer-actions">
-          {state.conflict ? <Button onClick={() => c.discard()}>{t('foot.reload')}</Button> : null}
-          <Button disabled={saving || !(state.dirty || state.conflict)} onClick={() => c.discard()}>
-            {t('foot.discard')}
-          </Button>
-          <Button
-            variant="primary"
-            busy={saving}
-            disabled={!state.canSave}
-            aria-describedby={state.issues.length > 0 ? issuesId : undefined}
-            onClick={() => {
-              void c.save()
-            }}
-          >
-            {t(saving ? 'foot.saving' : 'foot.save')}
-          </Button>
+      <div className="dshrs-footer">
+        <div className="dshrs-footer-bar">
+          <p className={`dshrs-status${message.tone}`} role="status" aria-live="polite">
+            {message.text}
+          </p>
+          <div className="dshrs-footer-actions">
+            {state.conflict ? <Button onClick={() => c.discard()}>{t('foot.reload')}</Button> : null}
+            {!state.conflict ? (
+              <Button disabled={saving || !state.dirty} onClick={() => c.discard()}>
+                {t('foot.discard')}
+              </Button>
+            ) : null}
+            <Button
+              variant="primary"
+              busy={saving}
+              disabled={!state.canSave}
+              aria-describedby={state.issues.length > 0 ? issuesId : undefined}
+              onClick={() => {
+                void c.save()
+              }}
+            >
+              {t(saving ? 'foot.saving' : 'foot.save')}
+            </Button>
+          </div>
         </div>
       </div>
-    </div>
+    </>
   )
 }

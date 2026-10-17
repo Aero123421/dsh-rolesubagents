@@ -246,6 +246,38 @@ describe('save', () => {
     expect(fake.calls).toHaveLength(0)
     expect(controller.getSnapshot().save).toBe('idle')
   })
+
+  it('lets the user persist repaired settings without an unrelated edit', async () => {
+    const { controller, fake } = setup({
+      value: { enabled: true, roles: [{ id: 'Bad Id' }, ...DEFAULT_ROLES] },
+    })
+    expect(controller.getSnapshot()).toMatchObject({ dirty: false, canSave: true })
+    await controller.save()
+    expect(fake.calls).toHaveLength(1)
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', repaired: [], canSave: false })
+  })
+
+  it('keeps submitted edits when an accepted shared-form write has not reached the mirror', async () => {
+    const { controller, fake } = setup()
+    // ConfigForm suppresses this settlement's mirror update while a later shared-form write is queued.
+    fake.form.mutate = async () => true
+    controller.patchRole(uidOf(controller, 'worker'), { instructions: 'Do not lose these instructions.' })
+    await controller.save()
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.instructions).toBe(
+      'Do not lose these instructions.',
+    )
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, canSave: false })
+  })
+
+  it('does not write over changed Host settings when the revision was reused without a notification', async () => {
+    const { controller, fake } = setup({ revision: 0 })
+    controller.patchRole(uidOf(controller, 'worker'), { instructions: 'Local draft.' })
+    fake.listeners.clear()
+    fake.set({ value: { enabled: false, roles: DEFAULT_ROLES } })
+    await controller.save()
+    expect(fake.calls).toHaveLength(0)
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true })
+  })
 })
 
 describe('Host changes', () => {
@@ -278,6 +310,24 @@ describe('Host changes', () => {
     controller.setEnabled(false)
     fake.set({ writable: false })
     expect(controller.getSnapshot()).toMatchObject({ dirty: true, canEdit: false, conflict: false })
+  })
+
+  it('detects changed settings at the same revision after a Host restart', () => {
+    const { controller, fake } = setup({ revision: 0 })
+    controller.patchRole(uidOf(controller, 'worker'), { instructions: 'Local draft.' })
+    fake.set({ value: { enabled: false, roles: DEFAULT_ROLES }, revision: 0 })
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, canSave: false })
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.instructions).toBe('Local draft.')
+  })
+
+  it('preserves a dirty draft across temporary namespace unavailability and checks it when the Host returns', () => {
+    const { controller, fake } = setup()
+    controller.patchRole(uidOf(controller, 'worker'), { instructions: 'Local draft.' })
+    fake.set({ status: 'unavailable' })
+    expect(controller.getSnapshot()).toMatchObject({ status: 'unavailable', draft: undefined, canSave: false })
+    fake.set({ status: 'ready', revision: 2, value: { enabled: false, roles: DEFAULT_ROLES } })
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, canSave: false })
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.instructions).toBe('Local draft.')
   })
 })
 
@@ -393,6 +443,18 @@ describe('model catalog and agent presets', () => {
 })
 
 describe('dispose', () => {
+  it('does not send writes or reference reads from stale UI actions after unloading', async () => {
+    const { controller, fake, remote } = setup()
+    controller.setEnabled(false)
+    controller.dispose()
+    await controller.save()
+    controller.refreshCatalog()
+    controller.refreshPresets()
+    expect(fake.calls).toHaveLength(0)
+    expect(remote.session.modelCatalog).not.toHaveBeenCalled()
+    expect(remote.agentPresets.list).not.toHaveBeenCalled()
+  })
+
   it('stops listening to the form and stops publishing', async () => {
     const { controller, fake, remote } = setup()
     const listener = vi.fn()
