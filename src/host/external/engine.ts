@@ -11,8 +11,13 @@
  * Lifecycle of one run:
  *   start → [files] → [pre-flight] → spawn → session.start → lines… → exit
  *   → stdout drained → session.finish → result → files removed.
- * Cancel (interrupt, dispose, plugin unload) and timeout both call
- * `session.cancel()` when present and terminate after `cancelGraceMs`.
+ * Stop ladder — the same for an aborted signal (interrupt), `dispose()` (DSH's
+ * interrupt also disposes; plugin unload) and the timeout:
+ *   1. graceful cancel: `session.cancel()` when the session has one (e.g. ACP
+ *      `session/cancel` + stdin EOF, which lets OpenCode stop its tool trees);
+ *   2. after `plan.cancelGraceMs`: `terminate()` — SIGTERM, then DSH's KILL after
+ *      {@link SPAWN_GRACE_MS}.
+ * A session without `cancel` is terminated at once (step 2 without the wait).
  *
  * Errors thrown by {@link startExternalRun} reach the parent model verbatim,
  * so every message is built here from fixed text, the CLI's display name and
@@ -526,6 +531,10 @@ function superviseRun(parts: Supervised): SubagentRunPort {
 
   let disposal: Promise<void> | undefined
   const run: SubagentRunPort = {
+    /**
+     * Stop the run (graceful cancel → `cancelGraceMs` → terminate) and resolve once the process
+     * exited and the result settled. Idempotent; a no-op stop after the run settled.
+     */
     id,
     result,
     dispose() {
@@ -533,8 +542,8 @@ function superviseRun(parts: Supervised): SubagentRunPort {
         spec.signal.removeEventListener('abort', onAbort)
         if (!settled) {
           cancelled = true
+          // Graceful cancel, then terminate after cancelGraceMs (immediately without session.cancel).
           stop()
-          handle.terminate()
         }
         await handle.waitForExit().catch(() => false)
         await result

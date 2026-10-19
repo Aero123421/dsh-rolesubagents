@@ -39,15 +39,9 @@ describe('adapter registry', () => {
       task: 't',
       cwd: '/',
     }
-    let plan: ReturnType<(typeof CLI_ADAPTERS)[typeof id]['plan']> | undefined
-    try {
-      plan = CLI_ADAPTERS[id].plan(input, 'n0n0n0n0n0n0')
-    } catch (error) {
-      // An adapter still being implemented refuses with a safe, fixed message.
-      expect(String(error)).toMatch(/runner is not implemented yet/)
-      return
-    }
+    const plan = CLI_ADAPTERS[id].plan(input, 'n0n0n0n0n0n0')
     expect(plan.argv.length).toBeGreaterThan(0)
+    expect(plan.cancelGraceMs).toBeGreaterThanOrEqual(0)
   })
 })
 

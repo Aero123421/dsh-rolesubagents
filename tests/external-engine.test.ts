@@ -367,6 +367,93 @@ describe('startExternalRun: failures, timeout and cancellation', () => {
   })
 })
 
+describe('startExternalRun: dispose ladder (graceful cancel → cancelGraceMs → terminate)', () => {
+  it('cancels first and terminates only after cancelGraceMs', async () => {
+    const t = setup({ subprocess: { onRun: () => {} } })
+    const run = await t.start()
+    vi.useFakeTimers()
+    try {
+      const disposal = run.dispose()
+      expect(t.adapter.sessions[0]?.cancelled).toBe(1)
+      expect(t.subprocess.processes[0]?.terminated).toBe(0)
+      vi.advanceTimersByTime(49)
+      expect(t.subprocess.processes[0]?.terminated).toBe(0)
+      vi.advanceTimersByTime(1)
+      expect(t.subprocess.processes[0]?.terminated).toBe(1)
+      vi.useRealTimers()
+      await disposal
+      expect((await run.result).stopReason).toBe('aborted')
+      expect(t.runs.size).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never terminates a process that exits on the graceful cancel', async () => {
+    const t = setup({
+      subprocess: {
+        onRun: async p => {
+          await p.stdinClosed
+          // A CLI that stops by itself once stdin closes (e.g. opencode acp after session/cancel).
+          setTimeout(() => p.exit(0), 5)
+        },
+      },
+    })
+    const run = await t.start()
+    await run.dispose()
+    expect(t.adapter.sessions[0]?.cancelled).toBe(1)
+    expect(t.subprocess.processes[0]?.terminated).toBe(0)
+    expect((await run.result).stopReason).toBe('aborted')
+    await new Promise(resolve => setTimeout(resolve, 80))
+    expect(t.subprocess.processes[0]?.terminated).toBe(0)
+  })
+
+  it('terminates at once when the session has no graceful cancel', async () => {
+    const t = setup({ cancellable: false, subprocess: { onRun: () => {} } })
+    const run = await t.start()
+    const disposal = run.dispose()
+    expect(t.subprocess.processes[0]?.terminated).toBe(1)
+    await disposal
+    expect((await run.result).stopReason).toBe('aborted')
+  })
+
+  it('does nothing to a run whose process already exited', async () => {
+    const t = setup({ subprocess: { onRun: answering(line({ type: 'text', text: 'ok' }), line({ type: 'done' })) } })
+    const run = await t.start()
+    expect((await run.result).stopReason).toBe('completed')
+    await run.dispose()
+    expect(t.adapter.sessions[0]?.cancelled).toBe(0)
+    expect(t.subprocess.processes[0]?.terminated).toBe(0)
+    expect((await run.result).stopReason).toBe('completed')
+  })
+
+  it('is idempotent and resolves only after the process exited', async () => {
+    let exitNow: (() => void) | undefined
+    const t = setup({
+      subprocess: {
+        ignoreTerminate: true,
+        onRun: p => {
+          exitNow = () => p.exit(null, 'SIGTERM')
+        },
+      },
+    })
+    const run = await t.start()
+    let resolved = false
+    const first = run.dispose().then(() => {
+      resolved = true
+    })
+    expect(run.dispose()).toBe(run.dispose())
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(t.subprocess.processes[0]?.terminated).toBe(1)
+    expect(resolved).toBe(false)
+    exitNow?.()
+    await first
+    expect(resolved).toBe(true)
+    expect(t.adapter.sessions[0]?.cancelled).toBe(1)
+    expect((await run.result).stopReason).toBe('aborted')
+  })
+})
+
 describe('result mapping and probe runner', () => {
   it('maps every outcome status', () => {
     const flags = { cancelled: false, timedOut: false }
