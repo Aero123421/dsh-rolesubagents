@@ -8,12 +8,12 @@
  * - every such CLI follows symbolic links, so a link inside the directory that leads elsewhere lets a
  *   write land outside the workspace;
  * - OpenCode loads project plugins (`.opencode/plugin`) at start even with its project config disabled.
- * The checks only read the filesystem and never follow a symbolic link while walking. Hard links are not
+ * The checks only read the filesystem. Internal directory links are followed once per real path. Hard links are not
  * detected (a hard-linked file inside the directory is the same file as its other names).
  */
 
-import { lstat, readdir, readlink, realpath } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { lstat, readdir, readlink, realpath, stat } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 import { isInside } from './policy.ts'
 
 /** Most directory entries the symbolic-link scan looks at. */
@@ -94,7 +94,10 @@ export async function findStartupCodeDir(
 }
 
 /** Why the symbolic-link scan refuses. */
-export type LinkScanFinding = { readonly kind: 'link'; readonly path: string } | { readonly kind: 'budget' }
+export type LinkScanFinding =
+  | { readonly kind: 'link'; readonly path: string }
+  | { readonly kind: 'budget' }
+  | { readonly kind: 'unreadable'; readonly path: string }
 
 /** Limits of {@link findEscapingLink}; tests pass small ones. */
 export interface LinkScanLimits {
@@ -103,22 +106,39 @@ export interface LinkScanLimits {
   readonly now?: () => number
 }
 
+/** Resolve missing descendants against the nearest existing real ancestor. */
+async function futureRealPath(path: string): Promise<string> {
+  let current = path
+  const missing: string[] = []
+  for (;;) {
+    try {
+      return join(await realpath(current), ...missing)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(current) === current) throw error
+      // Do not treat an unresolved link as an ordinary missing path component.
+      try {
+        if ((await lstat(current)).isSymbolicLink()) throw new Error('unresolved symbolic link')
+      } catch (linkError) {
+        if ((linkError as NodeJS.ErrnoException).code !== 'ENOENT') throw linkError
+      }
+      missing.unshift(basename(current))
+      current = dirname(current)
+    }
+  }
+}
+
 /** Where a symbolic link leads: its real target, or for a dangling link the path it would create. */
 async function linkTarget(path: string): Promise<string> {
   try {
     return await realpath(path)
   } catch {
-    try {
-      const target = resolve(dirname(path), await readlink(path))
-      return join(await realOrResolved(dirname(target)), target.slice(dirname(target).length + 1))
-    } catch {
-      return path
-    }
+    const target = resolve(dirname(path), await readlink(path))
+    return futureRealPath(target)
   }
 }
 
 /**
- * Walk the tree under `cwd` (without following links, skipping `.git`) for a symbolic link whose target is
+ * Walk all reachable directories under `cwd`, including `.git` and internal directory links, for a link whose target is
  * outside `root`. A dangling link counts by the path it would create.
  * @param cwd - the run's directory.
  * @param root - the directory writes must stay in (the parent's workspace root, else `cwd`).
@@ -138,23 +158,37 @@ export async function findEscapingLink(
   const started = now()
   const realRoot = await realOrResolved(root)
   const stack = [await realOrResolved(cwd)]
+  const visited = new Set<string>()
   let entries = 0
   while (stack.length > 0) {
     signal.throwIfAborted()
     const dir = stack.pop() as string
+    if (visited.has(dir)) continue
+    visited.add(dir)
     let children: import('node:fs').Dirent[]
     try {
       children = await readdir(dir, { withFileTypes: true })
     } catch {
-      continue // Unreadable: the CLI cannot list it either.
+      return { kind: 'unreadable', path: dir } // A known child path can still be writable without listing access.
     }
     for (const child of children) {
       entries++
       if (entries > maxEntries || now() - started > maxMs) return { kind: 'budget' }
       const path = join(dir, child.name)
       if (child.isSymbolicLink()) {
-        if (!isInside(realRoot, await linkTarget(path))) return { kind: 'link', path }
-      } else if (child.isDirectory() && child.name !== '.git') stack.push(path)
+        let target: string
+        try {
+          target = await linkTarget(path)
+        } catch {
+          return { kind: 'unreadable', path }
+        }
+        if (!isInside(realRoot, target)) return { kind: 'link', path }
+        try {
+          if ((await stat(target)).isDirectory()) stack.push(target)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return { kind: 'unreadable', path }
+        }
+      } else if (child.isDirectory()) stack.push(path)
     }
   }
   return undefined

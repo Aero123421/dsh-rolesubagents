@@ -234,11 +234,11 @@ only. The checks only read the filesystem (no git binary).
     write/edit for `gpt-*` models) checks only a move's *source* path, so a `*** Move to:` reached a sibling
     directory (verified). Hence a refusal rather than an anchored rule. Claude Code and agy are `cwd`-scoped
     (verified: sibling, repository top-level and outside writes are refused).
-  - **escaping symbolic links**: a bounded walk of the `cwd` tree (no link is followed, `.git` is skipped; budget
+  - **escaping symbolic links**: a bounded walk of the `cwd` tree (including `.git` and internal directory links, with each real directory visited once; budget
     `SCAN_MAX_ENTRIES` = 100 000 entries and `SCAN_MAX_MS` = 2 s, exceeding it refuses — fail closed) for a link
     whose target (for a dangling link: the path it would create) is outside the real path of the parent's workspace
     root (else of `cwd`). Read-only runs and `os-sandbox` presets are not scanned. Residual risk: hard links are
-    not detected.
+    not detected, and another process can change the filesystem after the startup scan.
 
 ## Diagnostics
 

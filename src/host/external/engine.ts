@@ -515,6 +515,12 @@ async function checkWorkspace(options: {
       `${name} cannot edit files in ${cwd}: the directory contains a symbolic link that leads outside the workspace, and ${name}'s file tools would follow it. Remove the link. ${alternatives}`,
     )
   }
+  if (finding?.kind === 'unreadable') {
+    deps.logger.warn(`rolesubagents: ${name} could not inspect ${finding.path}`)
+    throw new Error(
+      `${name} cannot edit files in ${cwd}: part of the workspace could not be checked for symbolic links. ${alternatives}`,
+    )
+  }
   if (finding?.kind === 'budget') {
     throw new Error(
       `${name} cannot edit files in ${cwd}: the directory is too large to check for symbolic links that lead outside the workspace (over ${SCAN_MAX_ENTRIES} entries or ${SCAN_MAX_MS / 1000} s). Use a smaller directory. ${alternatives}`,

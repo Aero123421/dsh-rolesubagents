@@ -211,6 +211,25 @@ export async function cases(h) {
     },
   )
 
+  h.case('edit-files refuses escaping links inside .git before calling the model', async () => {
+    const { env, requests } = await setup(h)
+    const ws = gitWorkspace(h)
+    symlinkSync(h.workspace(), join(ws, '.git', 'escape'))
+    const w = await h.world({ cwd: ws, env, roles: [role(h, 'coder', { permission: 'edit-files' })] })
+    try {
+      await h.assert.rejects(
+        w.delegate({
+          role: 'coder',
+          prompt: 'Write. [[tool:write {"filePath":".git/escape/marker.txt","content":"x"}]]',
+        }),
+        /symbolic link that leads outside the workspace/,
+      )
+      h.assert.equal(requests().length, 0)
+    } finally {
+      await w.close()
+    }
+  })
+
   h.case('edit-files is refused when the directory links outside the workspace', async () => {
     const { env, requests } = await setup(h)
     const ws = gitWorkspace(h)

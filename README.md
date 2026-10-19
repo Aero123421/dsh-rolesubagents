@@ -177,10 +177,10 @@ Below full access, what a CLI may change is enforced in one of two ways:
 
 For the second kind, the plugin checks the working directory before a workspace-write run and **refuses the delegation** (with a short reason the parent sees) when:
 
-- the directory tree contains a symbolic link that leads outside the parent's workspace (or outside the directory when the workspace is unknown); the CLI's file tools would follow it. `.git` is skipped and links are not followed during the check. A directory too large to check (over 100,000 entries or 2 seconds) is refused too;
+- the directory tree contains a symbolic link that leads outside the parent's workspace (or outside the directory when the workspace is unknown); the CLI's file tools would follow it. The check includes `.git` and follows internal directory links once per real path. Unreadable directories are refused. A directory too large to check (over 100,000 entries or 2 seconds) is refused too;
 - OpenCode only: the directory lies below the top-level of a git repository. OpenCode's file tools reach the whole repository, not just the directory (verified: a write to a sibling directory succeeds, and `apply_patch` can move a file anywhere in the repository), so delegate with the repository's top-level as `cwd`.
 
-Claude Code and Antigravity keep their file tools inside the run's directory (verified: writes to a sibling directory, the repository's top-level, or elsewhere are refused). Hard links are not detected: a file hard-linked into the workspace is changed in place. Use a read-only role, or a parent with full access, when a refused directory is intended.
+Claude Code and Antigravity keep their file tools inside the run's directory (verified: writes to a sibling directory, the repository's top-level, or elsewhere are refused). The scan is a startup check; it does not prevent another process changing links during a run. Hard links are not detected: a file hard-linked into the workspace is changed in place. Use a read-only role, or a parent with full access, when a refused directory is intended.
 
 Below full access OpenCode also refuses a project that has `.opencode/plugin` or `.opencode/plugins` code: OpenCode 1.19.3 runs it at start even with the project configuration disabled.
 

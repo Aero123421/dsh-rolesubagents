@@ -12,6 +12,7 @@
   - Antigravity **Edit files** runs with `--mode accept-edits`; without it, headless agy refused writes everywhere except the temp directory.
   - OpenCode below full access does not load the project's configuration (`OPENCODE_DISABLE_PROJECT_CONFIG=1`: no project MCP servers, tool files, agents, or `AGENTS.md`). A run is refused when the project has `.opencode/plugin(s)` code, which OpenCode still runs at start.
   - Presets enforced by the CLI's own tool permissions (Claude Code, Antigravity, OpenCode) are refused for workspace-write runs whose directory contains a symbolic link that leads outside the workspace, and, for OpenCode, whose directory lies below a git repository's top-level (OpenCode's file tools reach the whole repository). The editor shows what enforces each preset.
+- The workspace scan includes `.git` and follows internal directory links once per real path, so links hidden in Git metadata or reached through a sibling directory cannot bypass the startup check. Unreadable directories fail closed.
 - Runner models, providers, and efforts are limited to letters, digits, and `. _ : @ / + - [ ]` (no leading `-`), so they cannot carry OpenCode `{env:…}` / `{file:…}` references or look like options.
 - An explicit `cwd` is refused below full access when the parent's workspace root is unknown (except for read-only runs).
 - Stopping a run also stops background processes the CLI left behind, so a leftover process no longer delays the completion notice or `interrupt_agent`. A plugin unload while a run is still starting no longer leaves it running.

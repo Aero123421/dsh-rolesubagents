@@ -58,7 +58,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire, registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
@@ -110,6 +110,11 @@ async function wait(predicate, ms = 10_000, what = 'condition') {
 function alive(pid) {
   try {
     process.kill(pid, 0)
+    // Container PID 1 may leave reparented zombies unreaped; they have already stopped executing.
+    if (process.platform === 'linux') {
+      const status = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      if (status.slice(status.lastIndexOf(')') + 2).startsWith('Z ')) return false
+    }
     return true
   } catch {
     return false

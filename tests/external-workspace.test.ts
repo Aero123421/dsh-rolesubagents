@@ -73,11 +73,35 @@ describe('findEscapingLink', () => {
     expect(await findEscapingLink(relative, relative, signal)).toMatchObject({ kind: 'link' })
   })
 
-  it('skips .git, never follows links while walking, and fails closed over budget', async () => {
+  it('checks links reached through an internal sibling directory and terminates on cycles', async () => {
+    const root = tree({ 'cwd/': '', 'shared/': '' })
+    symlinkSync(join(root, 'shared'), join(root, 'cwd', 'shared'))
+    symlinkSync(join(root, 'cwd'), join(root, 'shared', 'back'))
+    expect(await findEscapingLink(join(root, 'cwd'), root, signal)).toBeUndefined()
+    const outside = tree()
+    symlinkSync(outside, join(root, 'shared', 'escape'))
+    expect(await findEscapingLink(join(root, 'cwd'), root, signal)).toEqual({
+      kind: 'link',
+      path: join(root, 'shared', 'escape'),
+    })
+  })
+
+  it('resolves missing target descendants through an existing outside ancestor', async () => {
+    const root = tree({ 'cwd/': '', 'shared/': '' })
+    const outside = tree()
+    symlinkSync(outside, join(root, 'shared', 'redirect'))
+    symlinkSync(join(root, 'shared', 'redirect', 'new', 'deep', 'file.txt'), join(root, 'cwd', 'create'))
+    expect(await findEscapingLink(join(root, 'cwd'), root, signal)).toEqual({
+      kind: 'link',
+      path: join(root, 'cwd', 'create'),
+    })
+  })
+
+  it('checks .git and fails closed over budget', async () => {
     const ws = tree({ 'x.txt': '' })
     mkdirSync(join(ws, '.git'))
     symlinkSync('/', join(ws, '.git', 'root'))
-    expect(await findEscapingLink(ws, ws, signal)).toBeUndefined()
+    expect(await findEscapingLink(ws, ws, signal)).toEqual({ kind: 'link', path: join(ws, '.git', 'root') })
     const big = tree(Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`f${i}`, ''])))
     expect(await findEscapingLink(big, big, signal, { maxEntries: 10 })).toEqual({ kind: 'budget' })
     let clock = 0
