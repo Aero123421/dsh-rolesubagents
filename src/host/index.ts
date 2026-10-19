@@ -11,8 +11,16 @@
  * selects anything else. A guard on that agent refuses write-like MCP and
  * plugin tools. The role's instructions reach the child as runtime context, so
  * the child's system prompt and tools stay identical to its parent's.
+ *
+ * Roles with a `runner` run their child once on an external CLI instead
+ * (`external/`): `delegate` starts it through an ephemeral DSH provider, and
+ * this entry owns the live runs so they are disposed when the plugin unloads.
+ * `ctx.subprocess` and `ctx.sandboxPolicy` are read lazily with `ctx.get`;
+ * they are not in `inject` because DSH roles must keep working without them
+ * (this Cordis version has no optional-inject form).
  */
 
+import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
 import {
   DEFAULT_ROLES,
@@ -22,6 +30,9 @@ import {
   roleContextText,
   selectableRoles,
 } from '../shared/roles.ts'
+import type { RunTracker } from './external/engine.ts'
+import { mountProbeService } from './external/probe-service.ts'
+import { type AdapterLookup, CLI_ADAPTERS, defaultAdapterLookup } from './external/registry.ts'
 import type { AgentPort, HostContext, SessionPort } from './ports.ts'
 import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
 import { createRoleState } from './state.ts'
@@ -44,6 +55,8 @@ export interface Config {
   roles: Live<readonly unknown[]>
   /** Model-only default for workflow children; null means inherit. */
   workflowModel: Live<unknown>
+  /** Per-CLI executable and forwarded variable names; normalized on every read. */
+  clis: Live<unknown>
   /** Provider used by fresh roles. */
   spawnProvider: string
   /** Provider used by fork roles. */
@@ -57,6 +70,7 @@ export const Config = z.object({
     .default(DEFAULT_ROLES.map(role => ({ ...role })))
     .volatile(),
   workflowModel: z.any().default(null).volatile(),
+  clis: z.any().default({}).volatile(),
   spawnProvider: z.string().default('spawn'),
   forkProvider: z.string().default('fork'),
 })
@@ -83,17 +97,44 @@ interface Prepared {
   guard?: () => void
 }
 
-export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
+/** Test and integration seams; the Host never passes these. */
+export interface ApplyOptions {
+  /** Replaces the adapter registry (the integration harness uses a test adapter). */
+  readonly adapters?: AdapterLookup
+}
+
+export function apply(ctx: HostContext, config: Partial<Config> = {}, options: ApplyOptions = {}): void {
   const spawnProvider = config.spawnProvider ?? 'spawn'
   const forkProvider = config.forkProvider ?? 'fork'
   const state = createRoleState(ctx)
-  void state.ready.then(() => {
+  /** Set by the effect cleanup: late callbacks (storage opening, probe import) must not touch an inactive context. */
+  let disposed = false
+  /** Run work after the store is ready, unless the plugin was unloaded first; never rejects. */
+  const whenReady = (label: string, task: () => void): void => {
+    state.ready
+      .then(() => {
+        if (disposed) return
+        try {
+          task()
+        } catch (error) {
+          if (!disposed) {
+            ctx.logger.warn(`rolesubagents: ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      })
+      .catch(() => {
+        // `ready` never rejects today; a future rejection must not become an unhandled rejection.
+      })
+  }
+  whenReady('storage check', () => {
     if (state.degraded) {
       ctx.logger.warn(
         `rolesubagents: role state is kept in memory only: ${state.degradedReason ?? 'storage unavailable'}`,
       )
     }
   })
+  /** Live external runs; disposed on unload (DSH does not stop them when a plugin unloads). */
+  const runs: RunTracker = new Set()
   const pending = new Map<string, PendingChild>()
   const installed = new Map<AgentPort, Prepared>()
   const sessions = new Map<string, SessionState>()
@@ -106,6 +147,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
       enabled: read(config.enabled, true),
       roles: read(config.roles, DEFAULT_ROLES as unknown[]),
       workflowModel: read(config.workflowModel, null),
+      clis: read(config.clis, null),
     })
     const summary = problems.map(problem => problem.message).join('; ')
     if (summary !== '' && summary !== lastProblems) ctx.logger.warn(`rolesubagents: settings adjusted: ${summary}`)
@@ -185,9 +227,15 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     }
   }
 
+  const external = {
+    engine: { subprocess: () => ctx.get('subprocess'), logger: ctx.logger, runs },
+    adapters: options.adapters ?? defaultAdapterLookup,
+    cliSettings: () => currentSettings().clis,
+  }
+
   const install = (agent: AgentPort, snapshot: RoleSettings): void => {
     if (installed.has(agent)) return
-    const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending, state })
+    const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending, state, external })
     const prepared: Prepared = { snapshot }
     if (definition !== undefined) {
       prepared.tool = agent.ctx.tools.register(definition)
@@ -290,8 +338,29 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
     }
   })
   // Agents that already exist are prepared once the stored state is readable.
-  void state.ready.then(() => {
+  whenReady('preparing existing agents', () => {
     for (const agent of ctx.agents.list()) guarded(agent, 'resume')
+  })
+
+  // Adapter housekeeping (e.g. stale generated files) runs once per plugin start; failures are only logged.
+  for (const adapter of new Set(Object.values(CLI_ADAPTERS))) {
+    const housekeeping = adapter.housekeeping?.bind(adapter)
+    if (housekeeping === undefined) continue
+    Promise.resolve()
+      .then(() => housekeeping(process.env.HOME ?? homedir()))
+      .catch(error => {
+        if (disposed) return
+        ctx.logger.warn(
+          `rolesubagents: ${adapter.descriptor.displayName} housekeeping failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
+  }
+
+  void mountProbeService(ctx, {
+    subprocess: () => ctx.get('subprocess'),
+    adapters: options.adapters ?? defaultAdapterLookup,
+    cliSettings: () => currentSettings().clis,
+    isDisposed: () => disposed,
   })
 
   const unsubscribe = (stop: unknown): void => {
@@ -300,6 +369,15 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}): void {
 
   ctx.effect(
     () => () => {
+      disposed = true
+      for (const run of [...runs]) {
+        run.dispose().catch(error => {
+          ctx.logger.warn(
+            `rolesubagents: could not stop external run ${run.id}: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        })
+      }
+      runs.clear()
       unsubscribe(stopCreated)
       unsubscribe(stopTools)
       unsubscribe(stopDisposed)

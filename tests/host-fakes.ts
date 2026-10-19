@@ -9,13 +9,17 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { type Mock, vi } from 'vitest'
 import type {
   AgentPort,
+  ExternalProviderPort,
   HostContext,
   LlmPort,
   LoggerPort,
+  SandboxPolicyPort,
   SessionPort,
   StorageDomainPort,
   SubagentProviderPort,
+  SubagentRunPort,
   SubagentsPort,
+  SubprocessPort,
   SystemPromptPort,
   ToolGuardCall,
 } from '../src/host/ports.ts'
@@ -279,12 +283,17 @@ export interface FakeWorld {
     getProvider: Mock<SubagentsPort['getProvider']>
     resolveMaxDepth: Mock<SubagentsPort['resolveMaxDepth']>
     startActivation: Mock<SubagentsPort['startActivation']>
+    registerProvider: Mock<NonNullable<SubagentsPort['registerProvider']>>
   }
+  /** External providers currently registered through `registerProvider`, by name. */
+  readonly externalProviders: Map<string, ExternalProviderPort>
   /** Optional Host services; delete a key to emulate the service being absent. */
   readonly services: {
     llm?: { resolveCallConfig: Mock<LlmPort['resolveCallConfig']> }
     sessions?: SessionsService
     storageDomain?: StorageDomainPort
+    subprocess?: SubprocessPort
+    sandboxPolicy?: SandboxPolicyPort
   }
   /** The fake storage-domain backend every state instance in this world shares. */
   readonly storage: FakeStorage
@@ -300,6 +309,8 @@ export interface FakeWorld {
   agents: AgentPort[]
   /** Children the default `startActivation` created, in order. */
   readonly children: FakeAgent[]
+  /** Runs external providers returned from `start`, in order (the fake does not dispose them). */
+  readonly externalRuns: SubagentRunPort[]
   /** Runtime-context providers registered through `ctx.systemPrompt.context`. */
   readonly contexts: RuntimeContext[]
   /** A new Agent with its own Session, registered with the `sessions` service. Nothing is emitted. */
@@ -333,6 +344,7 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
     ],
   ])
   const sessions = new Map<string, FakeSession>()
+  const externalProviders = new Map<string, ExternalProviderPort>()
   const logger = { info: vi.fn<LoggerPort['info']>(), warn: vi.fn<LoggerPort['warn']>() }
   const storage = sharedStorage ?? fakeStorage()
   const services: FakeWorld['services'] = {
@@ -355,11 +367,35 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
     sessions,
     agents: [],
     children: [],
+    externalRuns: [],
     contexts,
+    externalProviders,
     subagents: {
-      getProvider: vi.fn<SubagentsPort['getProvider']>(name => providers.get(name)),
+      getProvider: vi.fn<SubagentsPort['getProvider']>(name => providers.get(name) ?? externalProviders.get(name)),
+      registerProvider: vi.fn<NonNullable<SubagentsPort['registerProvider']>>(provider => {
+        if (providers.has(provider.name) || externalProviders.has(provider.name)) {
+          throw new Error(`duplicate provider ${provider.name}`)
+        }
+        externalProviders.set(provider.name, provider)
+        return () => {
+          externalProviders.delete(provider.name)
+        }
+      }),
       resolveMaxDepth: vi.fn<SubagentsPort['resolveMaxDepth']>(() => undefined),
       startActivation: vi.fn<SubagentsPort['startActivation']>(async spec => {
+        const external = externalProviders.get(spec.provider)
+        if (external !== undefined) {
+          // Like DSH's startExternal: the provider starts the run; the run id is the child id.
+          const run = await external.start({
+            cwd: spec.request.cwd ?? process.cwd(),
+            label: spec.label,
+            prompt: spec.request.prompt,
+            parent: spec.request.parent,
+            signal: spec.signal,
+          })
+          world.externalRuns.push(run)
+          return { childId: run.id }
+        }
         const parent = spec.request.parent
         const childId = spec.childId ?? `child-${world.children.length + 1}`
         const child = world.newAgent(childId, {
@@ -404,11 +440,15 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
   function get(name: 'llm'): LlmPort | undefined
   function get(name: 'sessions'): SessionsService | undefined
   function get(name: 'storageDomain'): StorageDomainPort | undefined
+  function get(name: 'subprocess'): SubprocessPort | undefined
+  function get(name: 'sandboxPolicy'): SandboxPolicyPort | undefined
   function get(name: string): unknown
   function get(name: string): unknown {
     if (name === 'llm') return services.llm
     if (name === 'sessions') return services.sessions
     if (name === 'storageDomain') return services.storageDomain
+    if (name === 'subprocess') return services.subprocess
+    if (name === 'sandboxPolicy') return services.sandboxPolicy
     return undefined
   }
 

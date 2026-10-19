@@ -301,6 +301,18 @@ const ISSUE_KEYS: Record<SettingsProblem['code'], Key> = {
   'builtin-context-fixed': 'issue.builtin',
   'builtin-missing': 'issue.builtin',
   'builtin-duplicate': 'issue.builtin',
+  // Placeholder mappings so the shared problem codes type-check; the editor work replaces them with dedicated texts.
+  'builtin-runner-ignored': 'issue.builtin',
+  'runner-context-forced': 'issue.forkScope',
+  'runner-model-ignored': 'issue.forkModel',
+  'runner-preset-ignored': 'issue.forkPreset',
+  'invalid-runner': 'issue.model',
+  'invalid-runner-model': 'issue.model',
+  'invalid-runner-effort': 'issue.model',
+  'invalid-runner-permission': 'issue.preset',
+  'runner-readonly-permission': 'issue.preset',
+  'invalid-runner-timeout': 'issue.model',
+  'invalid-cli-settings': 'issue.model',
 }
 
 /**

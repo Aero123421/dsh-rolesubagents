@@ -2,11 +2,35 @@
  * Role settings contract shared by the Host plugin and the browser editor.
  *
  * Settings are stored as the `rolesubagents` row's volatile config
- * (`enabled`, `roles`). Everything that reads them — the Host when it
+ * (`enabled`, `roles`, `workflowModel`, `clis`). Everything that reads them — the Host when it
  * snapshots a Session, the editor when it validates a draft — goes through
  * {@link normalizeSettings}, so a hand-edited profile patch can never produce
  * a role the tool would mis-handle.
+ *
+ * A role with a `runner` runs its child once on an external coding-agent CLI
+ * instead of DSH; the runner rules live in `runner.ts`.
  */
+
+import { cliDescriptor } from './cli/index.ts'
+import {
+  type CliSettingsMap,
+  isRunnerShape,
+  normalizeClis,
+  normalizeRunner,
+  type RoleRunner,
+  type RunnerProblemCode,
+} from './runner.ts'
+
+export {
+  type CliSettings,
+  type CliSettingsMap,
+  DEFAULT_RUNNER_TIMEOUT_MINUTES,
+  ENV_NAME_PATTERN,
+  MAX_ENV_PASSTHROUGH,
+  MAX_RUNNER_TIMEOUT_MINUTES,
+  type RoleRunner,
+  runnerTimeoutMs,
+} from './runner.ts'
 
 /** How a role's child starts. */
 export type RoleContext = 'spawn' | 'fork'
@@ -50,12 +74,23 @@ export interface RoleDefinition {
   model?: RoleModel
   /** Official Agent Preset the child mounts instead of the parent's; spawn only. */
   agentPreset?: string
-  /** Pins the child's file sandbox to `read-only`. */
+  /** Pins the child's file sandbox to `read-only` (for a runner: only read-only presets). */
   readOnly: boolean
+  /** Runs the child once on an external CLI instead of DSH. Never set on built-in roles. */
+  runner?: RoleRunner
 }
 
 /** Model-only default for workflow children; independent of roles. */
 export type WorkflowModel = Pick<RoleModel, 'provider' | 'model'>
+
+/**
+ * Whether a role runs on an external CLI.
+ * @param role - any role.
+ * @returns true when the role has a runner.
+ */
+export function isRunnerRole(role: RoleDefinition): role is RoleDefinition & { runner: RoleRunner } {
+  return role.runner !== undefined
+}
 
 /** The row's editable settings. */
 export interface RoleSettings {
@@ -64,6 +99,8 @@ export interface RoleSettings {
   roles: RoleDefinition[]
   /** Workflow children use this route only when no explicit route is supplied. */
   workflowModel?: WorkflowModel
+  /** Per-CLI executable and forwarded variable names; omitted when nothing is configured. */
+  clis?: CliSettingsMap
 }
 
 export const ROLE_ID_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/
@@ -155,6 +192,11 @@ export interface SettingsProblem {
     | 'builtin-context-fixed'
     | 'builtin-missing'
     | 'builtin-duplicate'
+    | 'builtin-runner-ignored'
+    | 'runner-context-forced'
+    | 'runner-model-ignored'
+    | 'runner-preset-ignored'
+    | RunnerProblemCode
   message: string
 }
 
@@ -191,6 +233,8 @@ function cloneDefault(builtin: BuiltinRole): RoleDefinition {
  * Validate and repair stored settings. Invalid entries are dropped, invalid
  * fields are cleared, fork roles lose model and preset, and the two built-in
  * roles are always present exactly once (re-added switched off when missing).
+ * Runner roles always start fresh and lose DSH-only fields (model, preset,
+ * fork scope); their runner and the `clis` settings follow `runner.ts`.
  * @param input - the raw stored value (any shape).
  * @returns normalized settings and the adjustments made.
  */
@@ -226,7 +270,28 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
       problems.push({ index, id, code: 'too-many-roles', message: `only ${MAX_ROLES} roles are kept` })
       return
     }
+    const hasRunner = raw.runner !== undefined && raw.runner !== null
+    if (hasRunner && builtin !== undefined) {
+      problems.push({
+        index,
+        id,
+        code: 'builtin-runner-ignored',
+        message: `built-in role "${builtin}" always runs on DSH; its runner is ignored`,
+      })
+    }
+    // A runner role with a usable CLI: DSH-only fields below are dropped instead of validated.
+    const external = hasRunner && builtin === undefined && isRunnerShape(raw.runner)
+    const forkScopeSet = raw.forkScope !== undefined && raw.forkScope !== null && raw.forkScope !== ''
     let context: RoleContext = raw.context === 'fork' ? 'fork' : 'spawn'
+    if (external && (context === 'fork' || forkScopeSet)) {
+      problems.push({
+        index,
+        id,
+        code: 'runner-context-forced',
+        message: `role "${id}" runs on an external CLI, which always starts fresh; it does not inherit the parent conversation`,
+      })
+      context = 'spawn'
+    }
     if (builtin !== undefined && context !== BUILTIN_CONTEXT[builtin]) {
       problems.push({
         index,
@@ -278,7 +343,7 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
         })
         role.forkScope = 'task'
       }
-    } else if (raw.forkScope !== undefined && raw.forkScope !== null && raw.forkScope !== '') {
+    } else if (forkScopeSet && !external) {
       problems.push({
         index,
         id,
@@ -286,7 +351,14 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
         message: `role "${id}" is not a fork, so its inherited-context option is ignored`,
       })
     }
-    if (raw.model !== undefined && raw.model !== null) {
+    if (external && raw.model !== undefined && raw.model !== null) {
+      problems.push({
+        index,
+        id,
+        code: 'runner-model-ignored',
+        message: `role "${id}" runs on an external CLI, which has its own model setting; the DSH model is ignored`,
+      })
+    } else if (raw.model !== undefined && raw.model !== null) {
       const model = isRecord(raw.model) ? raw.model : {}
       const provider = nonEmpty(model.provider, MAX_NAME_LENGTH)
       const modelId = nonEmpty(model.model, MAX_NAME_LENGTH)
@@ -316,7 +388,14 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
         role.model = { provider, model: modelId, ...(effort === undefined ? {} : { reasoningEffort: effort }) }
       }
     }
-    if (raw.agentPreset !== undefined && raw.agentPreset !== null && raw.agentPreset !== '') {
+    if (external && raw.agentPreset !== undefined && raw.agentPreset !== null && raw.agentPreset !== '') {
+      problems.push({
+        index,
+        id,
+        code: 'runner-preset-ignored',
+        message: `role "${id}" runs on an external CLI, which cannot mount an agent preset`,
+      })
+    } else if (raw.agentPreset !== undefined && raw.agentPreset !== null && raw.agentPreset !== '') {
       const preset = nonEmpty(raw.agentPreset, MAX_NAME_LENGTH)
       if (preset === undefined) {
         problems.push({ index, id, code: 'invalid-preset', message: `agent preset of "${id}" is not a valid id` })
@@ -330,6 +409,15 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
       } else {
         role.agentPreset = preset
       }
+    }
+    if (hasRunner && builtin === undefined) {
+      const { runner, disable } = normalizeRunner(
+        raw.runner,
+        { id, readOnly: role.readOnly, enabled: role.enabled },
+        (code, message) => problems.push({ index, id, code, message }),
+      )
+      if (runner !== undefined) role.runner = runner
+      if (disable) role.enabled = false
     }
     seen.add(id)
     if (builtin !== undefined) builtins.add(builtin)
@@ -375,7 +463,19 @@ export function normalizeSettings(input: unknown): NormalizedSettings {
       })
     } else workflowModel = { provider, model }
   }
-  return { settings: { enabled, roles, ...(workflowModel === undefined ? {} : { workflowModel }) }, problems }
+  const clis =
+    source.clis === undefined || source.clis === null
+      ? undefined
+      : normalizeClis(source.clis, (code, message) => problems.push({ code, message }))
+  return {
+    settings: {
+      enabled,
+      roles,
+      ...(workflowModel === undefined ? {} : { workflowModel }),
+      ...(clis === undefined ? {} : { clis }),
+    },
+    problems,
+  }
 }
 
 /**
@@ -394,6 +494,15 @@ export function selectableRoles(settings: RoleSettings): RoleDefinition[] {
  * @returns the text appended to the child's runtime context.
  */
 export function roleContextText(role: RoleDefinition): string {
+  if (role.runner !== undefined) {
+    const instructions = role.instructions.trim()
+    return [
+      `Your role: ${role.id}.`,
+      ...(instructions.length > 0 ? [instructions] : []),
+      ...(role.readOnly ? [EXTERNAL_READ_ONLY_CONTEXT] : []),
+      EXTERNAL_ONE_SHOT_CONTEXT,
+    ].join('\n')
+  }
   const lines: string[] = []
   const instructions = role.instructions.trim()
   if (instructions.length > 0 || role.builtin === undefined) lines.push(`Your role: ${role.id}.`)
@@ -407,6 +516,14 @@ export function roleContextText(role: RoleDefinition): string {
 /** Child runtime context for a read-only role. */
 export const READ_ONLY_CONTEXT =
   'This role is read-only: you cannot modify files, and requests for wider sandbox access are rejected. Write-like MCP and plugin tools are refused. Report what should change instead of trying to change it.'
+
+/** Instructions text for a read-only runner role (the CLI's own read-only mode enforces it). */
+export const EXTERNAL_READ_ONLY_CONTEXT =
+  "This role is read-only: you run in your CLI's read-only mode and cannot modify files. Report what should change instead of trying to change it."
+
+/** Instructions text for every runner role: it runs once and cannot be messaged. */
+export const EXTERNAL_ONE_SHOT_CONTEXT =
+  'You were started by a parent agent for this one task. You will not receive follow-up messages; your final message is returned to the parent as your result, so make it a complete answer.'
 
 /** Child runtime context when a fork copies the parent log. */
 export const FORK_INHERIT_WARNING =
@@ -437,12 +554,28 @@ export const FORK_NOTE =
 export const FORK_TASK_NOTE = ' (fork: task only, does not inherit this conversation)'
 
 /**
+ * Note appended to a runner role's line in the parent's tool description.
+ * @param role - a role with a runner.
+ * @returns ` (runs once in <CLI>[, read-only]; cannot receive send_message)`.
+ */
+export function runnerNote(role: RoleDefinition & { runner: RoleRunner }): string {
+  const name = cliDescriptor(role.runner.cli).displayName
+  return ` (runs once in ${name}${role.readOnly ? ', read-only' : ''}; cannot receive send_message)`
+}
+
+/**
  * One role's line in the parent-facing tool description.
  * @param role - a selectable role.
- * @returns `- <id>: <description>`, with the fork note for fork roles.
+ * @returns `- <id>: <description>`, with the fork note for fork roles and the runner note for runner roles.
  */
 export function roleListLine(role: RoleDefinition): string {
   const description = role.description.trim()
-  const note = role.context !== 'fork' ? '' : role.forkScope === 'task' ? FORK_TASK_NOTE : FORK_NOTE
+  const note = isRunnerRole(role)
+    ? runnerNote(role)
+    : role.context !== 'fork'
+      ? ''
+      : role.forkScope === 'task'
+        ? FORK_TASK_NOTE
+        : FORK_NOTE
   return `- ${role.id}${description.length > 0 ? `: ${description}` : ''}${note}`
 }

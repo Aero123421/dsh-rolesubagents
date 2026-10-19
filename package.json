@@ -61,12 +61,19 @@
     "test": "vitest run",
     "check": "pnpm lint && pnpm typecheck && pnpm test && node scripts/check-lib.mjs",
     "check:lib": "node scripts/check-lib.mjs",
-    "check:host": "node scripts/check-workflow-host.mjs"
+    "check:host": "node scripts/check-workflow-host.mjs",
+    "check:cli": "node scripts/check-cli.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-storage-domain": ">=0.2.1-alpha.3 <0.3.0-0",
     "@deepseek-ai/dsh-tools": ">=0.2.1-alpha.3 <0.3.0-0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-alpha.3 <0.3.0-0",
     "@deepseek-ai/schemastery": ">=3.18.5-alpha.2 <4.0.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
@@ -84,7 +91,8 @@
     "typescript": "6.0.3",
     "vitest": "4.1.11",
     "zod": "4.4.3",
-    "@deepseek-ai/dsh-llm": "0.2.1-alpha.3"
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-alpha.3"
   },
   "packageManager": "pnpm@10.28.0",
   "pnpm": {

@@ -7,14 +7,22 @@
 
 import { randomUUID } from 'node:crypto'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { cliDescriptor } from '../shared/cli/index.ts'
 import {
+  type CliSettingsMap,
   FORK_RESULT_WARNING,
   forkInheritsHistory,
+  isRunnerRole,
   type RoleDefinition,
+  type RoleRunner,
   type RoleSettings,
   roleListLine,
   selectableRoles,
 } from '../shared/roles.ts'
+import type { EngineDeps } from './external/engine.ts'
+import { accessCeiling, assertDepth, effectivePermission } from './external/policy.ts'
+import { startExternalDelegation } from './external/provider.ts'
+import type { AdapterLookup } from './external/registry.ts'
 import type { AgentPort, ChildAgentOptions, HostContext } from './ports.ts'
 import { readOnlyCallDenial } from './readonly.ts'
 import type { RoleState } from './state.ts'
@@ -35,7 +43,23 @@ export interface ToolDeps {
   readonly pending: Map<string, PendingChild>
   /** Per-Session role state (child roles and role-list snapshots). */
   readonly state: RoleState
+  /** What runner roles need; without it, a runner role is refused. */
+  readonly external?: ExternalDeps
 }
+
+/** Services for runner roles (external CLIs). */
+export interface ExternalDeps {
+  /** Engine services, including the plugin's run tracker. */
+  readonly engine: EngineDeps
+  /** Adapter per CLI. */
+  readonly adapters: AdapterLookup
+  /** The live per-CLI settings (executable, forwarded variables); read at each delegation. */
+  readonly cliSettings: () => CliSettingsMap | undefined
+}
+
+/** Closing sentence added to the tool description when a runner role is selectable. */
+export const EXTERNAL_ROLES_NOTE =
+  'Roles marked as running in an external CLI run once: their completion notice carries the final answer, they do not accept `send_message`, are not listed by `list_agents`, and can be stopped with `interrupt_agent`.'
 
 /**
  * The parent-facing tool description for one role list.
@@ -48,7 +72,8 @@ export function toolDescription(roles: readonly RoleDefinition[]): string {
     'Delegate a task to a subagent: a separate agent that works in its own context and returns its result, not its intermediate steps. Pick the role that fits the task:',
     ...roles.map(roleListLine),
     general ? 'Omit `role` to use `general`.' : 'A `role` is required.',
-    'The subagent starts in the background and this tool immediately returns its id; the runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes. Start independent delegations together in one assistant message and keep working while they run. When only waiting remains, end your turn instead of sleeping or polling; the next result starts a new turn.',
+    'The subagent starts in the background and this tool immediately returns its id; the runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes. Start independent delegations together in one assistant message and keep working while they run. When only waiting remains, end your turn instead of sleeping or polling; the next result starts a new turn.' +
+      (roles.some(isRunnerRole) ? ` ${EXTERNAL_ROLES_NOTE}` : ''),
   ].join('\n')
 }
 
@@ -130,6 +155,9 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
         if (typeof requested === 'string' || requested === undefined) {
           try {
             const chosen = resolveRole(roles, requested === '' ? undefined : requested)
+            if (isRunnerRole(chosen)) {
+              text = `started ${cliDescriptor(chosen.runner.cli).displayName} subagent ${value.subagentId}`
+            }
             if (forkInheritsHistory(chosen)) text = `${text}\n${FORK_RESULT_WARNING}`
           } catch {
             // A rejected role never renders a successful start.
@@ -144,9 +172,13 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const parent = (exec as { agent?: AgentPort }).agent
       if (parent === undefined) throw new Error('subagent tool requires a calling agent')
       const role = resolveRole(roles, args.role)
-      if (deps.state.readRole(parent.session)?.readOnly === true) {
+      const parentReadOnly = deps.state.readRole(parent.session)?.readOnly === true
+      if (parentReadOnly) {
         const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles)
         if (denial !== undefined) throw new Error(denial)
+      }
+      if (isRunnerRole(role)) {
+        return delegateExternal(role, { args, parent, parentReadOnly, signal: exec.signal, deps })
       }
       const inheritsHistory = forkInheritsHistory(role)
       if (inheritsHistory) {
@@ -207,4 +239,43 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       }
     },
   }) as ToolDefinition
+}
+
+/**
+ * The external path of `delegate`: depth check, access ceiling, then one ephemeral provider.
+ * @param role - a runner role.
+ * @param call - the call's arguments, calling Agent, whether its role is read-only, signal and deps.
+ * @returns the activation result the tool reports.
+ */
+async function delegateExternal(
+  role: RoleDefinition & { runner: RoleRunner },
+  call: { args: ToolArgs; parent: AgentPort; parentReadOnly: boolean; signal: AbortSignal; deps: ToolDeps },
+): Promise<{ kind: 'activation'; subagentId: string }> {
+  const { args, parent, deps } = call
+  const external = deps.external
+  const descriptor = cliDescriptor(role.runner.cli)
+  if (external === undefined) throw new Error(`role "${role.id}": ${descriptor.displayName} roles are not available`)
+  assertDepth(parent, deps.ctx.subagents.resolveMaxDepth(undefined))
+  const ceiling = accessCeiling(parent, call.parentReadOnly, deps.ctx.get('sandboxPolicy'))
+  const permission = effectivePermission(descriptor, role.runner, ceiling.access)
+  if (permission.lowered) {
+    deps.ctx.logger.info(
+      `rolesubagents: role "${role.id}" runs with ${descriptor.displayName}'s ${permission.preset} preset (parent allows ${ceiling.access})`,
+    )
+  }
+  const started = await startExternalDelegation({
+    ctx: deps.ctx,
+    role,
+    adapter: external.adapters(role.runner.cli),
+    settings: external.cliSettings()?.[role.runner.cli] ?? {},
+    permission,
+    ceiling,
+    parent,
+    label: args.description,
+    prompt: args.prompt,
+    ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+    signal: call.signal,
+    engine: external.engine,
+  })
+  return { kind: 'activation', subagentId: started.childId }
 }
