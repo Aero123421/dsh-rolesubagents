@@ -1,14 +1,19 @@
 {
   "name": "dsh-rolesubagents",
-  "version": "0.1.3",
-  "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, and let the parent pick one per delegation.",
+  "version": "0.2.0",
+  "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, run them in DSH or on external coding-agent CLIs (Codex CLI, Claude Code, Antigravity CLI, OpenCode), and let the parent pick one per delegation.",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
     "subagent",
     "multi-agent",
-    "roles"
+    "roles",
+    "external-cli",
+    "codex",
+    "claude-code",
+    "antigravity",
+    "opencode"
   ],
   "license": "MIT",
   "homepage": "https://github.com/Aero123421/dsh-rolesubagents#readme",
@@ -35,6 +40,7 @@
     "README.md",
     "README.ja.md",
     "LICENSE",
+    "docs/external-cli.md",
     "CHANGELOG.md"
   ],
   "dsh": {
