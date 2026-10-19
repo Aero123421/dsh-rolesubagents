@@ -9,6 +9,7 @@ import {
   accessCeiling,
   accessOfSandboxMode,
   assertCwdAllowed,
+  assertExplicitCwdCheckable,
   assertDepth,
   assertUsableCwd,
   effectivePermission,
@@ -121,6 +122,15 @@ describe('working directory checks', () => {
     expect(() => assertCwdAllowed(join(root, 'outside'), 'read-only', workspace)).toThrow(/outside the parent/)
     expect(() => assertCwdAllowed(join(root, 'outside'), 'full-access', workspace)).not.toThrow()
     expect(() => assertCwdAllowed(join(root, 'outside'), 'workspace-write', undefined)).not.toThrow()
+  })
+
+  it('refuses an explicit cwd that cannot be checked (unknown workspace root) unless read-only or full access', () => {
+    const unknown = /the parent's workspace is unknown/
+    expect(() => assertExplicitCwdCheckable('/x', 'workspace-write', undefined)).toThrow(unknown)
+    expect(() => assertExplicitCwdCheckable('/x', 'read-only', undefined)).not.toThrow()
+    expect(() => assertExplicitCwdCheckable('/x', 'full-access', undefined)).not.toThrow()
+    expect(() => assertExplicitCwdCheckable(undefined, 'workspace-write', undefined)).not.toThrow()
+    expect(() => assertExplicitCwdCheckable('/x', 'workspace-write', workspace)).not.toThrow()
   })
 })
 

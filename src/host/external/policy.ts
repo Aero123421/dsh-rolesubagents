@@ -139,7 +139,8 @@ export function isInside(root: string, path: string): boolean {
  * Below full access, the child must stay inside the parent's workspace.
  * @param cwd - the child's validated working directory.
  * @param access - the run's effective access.
- * @param workspaceRoot - the parent's workspace root; unknown skips the check.
+ * @param workspaceRoot - the parent's workspace root; unknown skips the check (an explicit `cwd` was
+ *   already refused by {@link assertExplicitCwdCheckable}, so only DSH's default directory gets here).
  * @throws when the directory is outside the workspace.
  */
 export function assertCwdAllowed(cwd: string, access: AccessLevel, workspaceRoot: string | undefined): void {
@@ -147,4 +148,26 @@ export function assertCwdAllowed(cwd: string, access: AccessLevel, workspaceRoot
   if (!isInside(workspaceRoot, cwd)) {
     throw new Error(`the working directory ${cwd} is outside the parent's workspace ${workspaceRoot}`)
   }
+}
+
+/**
+ * An explicit `cwd` needs a known workspace root to be checked against: when the parent's root is
+ * unknown (no `sandboxPolicy` service, or it failed or named no root), an explicit directory is
+ * refused unless the run cannot write (read-only) or containment does not apply (full access).
+ * Without an explicit `cwd`, DSH's default (the parent's own directory) is kept.
+ * @param explicitCwd - the delegate `cwd` argument, when given.
+ * @param access - the run's effective access.
+ * @param workspaceRoot - the parent's workspace root, when known.
+ * @throws when an explicit directory cannot be checked.
+ */
+export function assertExplicitCwdCheckable(
+  explicitCwd: string | undefined,
+  access: AccessLevel,
+  workspaceRoot: string | undefined,
+): void {
+  if (explicitCwd === undefined || workspaceRoot !== undefined) return
+  if (access === 'read-only' || access === 'full-access') return
+  throw new Error(
+    "a cwd cannot be given here: the parent's workspace is unknown, so the directory cannot be checked (omit cwd to use the parent's directory)",
+  )
 }

@@ -135,6 +135,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   })
   /** Live external runs; disposed on unload (DSH does not stop them when a plugin unloads). */
   const runs: RunTracker = new Set()
+  /** Aborted on unload: a delegation still starting (executable lookup, files, pre-flight) then never spawns. */
+  const lifetime = new AbortController()
   const pending = new Map<string, PendingChild>()
   const installed = new Map<AgentPort, Prepared>()
   const sessions = new Map<string, SessionState>()
@@ -228,7 +230,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   }
 
   const external = {
-    engine: { subprocess: () => ctx.get('subprocess'), logger: ctx.logger, runs },
+    engine: { subprocess: () => ctx.get('subprocess'), logger: ctx.logger, runs, lifetime: lifetime.signal },
     adapters: options.adapters ?? defaultAdapterLookup,
     cliSettings: () => currentSettings().clis,
   }
@@ -370,6 +372,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   ctx.effect(
     () => () => {
       disposed = true
+      lifetime.abort(new Error('the rolesubagents plugin was unloaded'))
       for (const run of [...runs]) {
         run.dispose().catch(error => {
           ctx.logger.warn(

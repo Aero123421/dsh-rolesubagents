@@ -8,6 +8,7 @@
  * is used. Retries are off so failures are immediate.
  */
 
+import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -18,7 +19,7 @@ const SERVER = 'tests/support/fake-models/codex.mjs'
  * Start a fake Responses server for `script` and an isolated Codex home configured for it.
  * @returns the server, its request log reader and the env/clis options for `h.world`.
  */
-async function fakeCodex(h, script, { forwardKey = true } = {}) {
+async function fakeCodex(h, script, { forwardKey = true, extraConfig = [] } = {}) {
   const dir = h.workspace()
   const scriptPath = join(dir, 'script.json')
   const logPath = join(dir, 'requests.jsonl')
@@ -43,6 +44,7 @@ async function fakeCodex(h, script, { forwardKey = true } = {}) {
       '[analytics]',
       'enabled = false',
       '',
+      ...extraConfig,
     ].join('\n'),
   })
   const passthrough = ['CODEX_HOME', 'NO_PROXY', 'no_proxy', ...(forwardKey ? ['FAKE_CODEX_KEY'] : [])]
@@ -169,6 +171,106 @@ export async function cases(h) {
       await w.close()
     }
   })
+
+  h.case('workspace-write from a subdirectory of a git repository cannot write a sibling directory', async () => {
+    const fake = await fakeCodex(h, [
+      { kind: 'tool', name: 'exec_command', arguments: { cmd: 'printf x > ../sibling/from-sub.txt; echo rc=$?' } },
+      { kind: 'complete', text: 'SIBLING_DONE' },
+    ])
+    const ws = h.workspace({ 'sub/a.txt': 'a\n', 'sibling/b.txt': 'b\n' }, { outsideTmp: true })
+    const git = (...args) =>
+      execFileSync('git', ['-C', ws, '-c', 'user.email=a@b', '-c', 'user.name=a', ...args], {
+        env: { PATH: process.env.PATH, HOME: fake.env.HOME },
+      })
+    git('init', '-q')
+    git('add', '.')
+    git('commit', '-q', '-m', 'init')
+    const w = await h.world({
+      cwd: ws,
+      roles: [coder(h, { permission: 'workspace-write' })],
+      clis: fake.clis,
+      env: fake.env,
+    })
+    try {
+      const { childId } = await w.delegate({ role: 'coder', cwd: join(ws, 'sub'), prompt: 'Write the sibling' })
+      const notice = await w.notice(childId, 60_000)
+      h.assert.ok(notice.includes('SIBLING_DONE'), notice)
+      const outputs = functionOutputs(fake.requests()[1]?.body ?? {})
+      h.assert.ok(
+        outputs.some(output => /Read-only file system|Permission denied|rc=[1-9]/.test(output)),
+        `tool output: ${outputs}`,
+      )
+      h.assert.equal(
+        existsSync(join(ws, 'sibling', 'from-sub.txt')),
+        false,
+        'workspace-write wrote a sibling directory',
+      )
+    } finally {
+      await w.close()
+    }
+  })
+
+  h.case(
+    "workspace-write ignores a config's extra writable roots (control run without the override writes)",
+    async () => {
+      const outside = h.workspace({}, { outsideTmp: true })
+      const command = { cmd: `printf x > ${outside}/extra.txt; echo rc=$?` }
+      const fake = await fakeCodex(
+        h,
+        [
+          { kind: 'tool', name: 'exec_command', arguments: command },
+          { kind: 'complete', text: 'ROOTS_DONE' },
+          { kind: 'tool', name: 'exec_command', arguments: command },
+          { kind: 'complete', text: 'CONTROL_DONE' },
+        ],
+        { extraConfig: ['[sandbox_workspace_write]', `writable_roots = [${JSON.stringify(outside)}]`, ''] },
+      )
+      const ws = h.workspace({ 'README.md': 'x\n' }, { outsideTmp: true })
+      const w = await h.world({
+        cwd: ws,
+        roles: [coder(h, { permission: 'workspace-write' })],
+        clis: fake.clis,
+        env: fake.env,
+      })
+      try {
+        const { childId } = await w.delegate({ role: 'coder', prompt: 'Write the extra root' })
+        h.assert.ok((await w.notice(childId, 60_000)).includes('ROOTS_DONE'))
+        h.assert.equal(existsSync(join(outside, 'extra.txt')), false, 'a configured writable root stayed writable')
+        // Control: the same run without `sandbox_workspace_write.writable_roots=[]` can write there.
+        const { codexAdapter } = await import('../../src/host/cli/codex/index.ts')
+        const adapter = {
+          ...codexAdapter,
+          plan(input, nonce) {
+            const plan = codexAdapter.plan(input, nonce)
+            const at = plan.argv.indexOf('sandbox_workspace_write.writable_roots=[]')
+            return { ...plan, argv: plan.argv.filter((_, i) => i !== at && i !== at - 1) }
+          },
+        }
+        const run = await h.engine.startExternalRun(
+          {
+            adapter,
+            input: {
+              runner: { cli: 'codex', permission: 'workspace-write' },
+              preset: 'workspace-write',
+              access: 'workspace-write',
+              instructions: '',
+              task: 'Write the extra root',
+              cwd: ws,
+            },
+            settings: fake.clis.codex,
+            timeoutMs: 60_000,
+            signal: new AbortController().signal,
+          },
+          h.engineDeps(w),
+        )
+        h.assert.equal((await run.result).stopReason, 'completed')
+        await run.dispose()
+        h.assert.equal(existsSync(join(outside, 'extra.txt')), true, 'control: the configured root is writable')
+      } finally {
+        await w.close()
+      }
+    },
+  )
 
   h.case('a read-only parent sandbox lowers a workspace-write role to read-only', async () => {
     const fake = await fakeCodex(h, [

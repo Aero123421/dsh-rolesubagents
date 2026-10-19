@@ -25,9 +25,9 @@ export const CODEX: CliDescriptor = Object.freeze({
   efforts: Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
   effortFreeText: false,
   permissions: Object.freeze([
-    Object.freeze({ id: 'read-only', access: 'read-only' }),
-    Object.freeze({ id: 'workspace-write', access: 'workspace-write' }),
-    Object.freeze({ id: 'danger-full-access', access: 'full-access' }),
+    Object.freeze({ id: 'read-only', access: 'read-only', confinement: 'os-sandbox' }),
+    Object.freeze({ id: 'workspace-write', access: 'workspace-write', confinement: 'os-sandbox' }),
+    Object.freeze({ id: 'danger-full-access', access: 'full-access', confinement: 'none' }),
   ]),
   defaultPermission: 'workspace-write',
   presetForAccess: Object.freeze({
@@ -36,4 +36,5 @@ export const CODEX: CliDescriptor = Object.freeze({
     'full-access': 'danger-full-access',
   }),
   instructionsChannel: 'system',
+  toolScope: 'cwd',
 } satisfies CliDescriptor)

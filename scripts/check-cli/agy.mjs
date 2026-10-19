@@ -11,7 +11,8 @@
  * scripted 5xx errors fail at once.
  */
 
-import { existsSync, readdirSync, readFileSync, utimesSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, readdirSync, readFileSync, symlinkSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 
 const FAKE_SERVER = 'tests/support/fake-models/agy.mjs'
@@ -57,8 +58,11 @@ export async function cases(h) {
    * One case: a workspace, the fake server, an isolated HOME + env and a world with `roles`.
    * `body({ w, ws, home, requests, main, baseUrlEntry })` does the checks.
    */
-  async function withAgy({ roles, files = {}, forwardKey = true, homeFiles = {}, beforeWorld, world = {} }, body) {
-    const ws = h.workspace({ 'README.md': '# test\nhello test\n', ...files })
+  async function withAgy(
+    { roles, files = {}, forwardKey = true, homeFiles = {}, beforeWorld, world = {}, outsideTmp = false },
+    body,
+  ) {
+    const ws = h.workspace({ 'README.md': '# test\nhello test\n', ...files }, { outsideTmp })
     const home = h.workspace({
       '.gemini/antigravity-cli/settings.json': '{"modelProvider":"gemini"}\n',
       ...homeFiles,
@@ -134,8 +138,9 @@ export async function cases(h) {
     })
   })
 
-  h.case('edit-files (default) writes and edits inside the workspace without a soft-deny', async () => {
-    await withAgy({ roles: [role('worker')] }, async x => {
+  h.case('edit-files (default) writes and edits inside a workspace outside /tmp without a soft-deny', async () => {
+    // Outside /tmp: agy always allows writes under the temp dir, which would hide a missing accept-edits.
+    await withAgy({ roles: [role('worker')], outsideTmp: true }, async x => {
       const write = await run(x.w, 'worker', 'write [[scenario:write]]')
       h.assert.match(write.notice, /finished/)
       h.assert.match(write.notice, /FAKE_DONE tool=write_to_file/)
@@ -161,6 +166,48 @@ export async function cases(h) {
       h.assert.match(outside.notice, /failed before it finished/)
       h.assert.match(outside.notice, /category: permission/)
       h.assert.match(outside.notice, /denied actions: 1/)
+    })
+  })
+
+  h.case('edit-files from a subdirectory of a git repository cannot write a sibling directory', async () => {
+    const files = { 'sub/a.txt': 'a\n', 'sibling/b.txt': 'b\n' }
+    await withAgy({ roles: [role('worker')], files, outsideTmp: true }, async x => {
+      const git = (...args) =>
+        execFileSync('git', ['-C', x.ws, '-c', 'user.email=a@b', '-c', 'user.name=a', ...args], {
+          env: { PATH: process.env.PATH, HOME: x.home },
+        })
+      git('init', '-q')
+      git('add', '.')
+      git('commit', '-q', '-m', 'init')
+      const sibling = join(x.ws, 'sibling', 'from-sub.txt')
+      const { childId } = await x.w.delegate({
+        role: 'worker',
+        cwd: join(x.ws, 'sub'),
+        prompt: `write [[scenario:write]] [[target:${sibling}]]`,
+      })
+      const notice = await x.w.notice(childId, 90_000)
+      h.assert.match(notice, /category: permission/)
+      h.assert.equal(existsSync(sibling), false, 'edit-files wrote a sibling directory of its cwd')
+      const inside = join(x.ws, 'sub', 'inside.txt')
+      const ok = await x.w.delegate({
+        role: 'worker',
+        cwd: join(x.ws, 'sub'),
+        prompt: `write [[scenario:write]] [[target:${inside}]]`,
+      })
+      const okNotice = await x.w.notice(ok.childId, 90_000)
+      h.assert.match(okNotice, /FAKE_DONE tool=write_to_file/)
+      h.assert.equal(existsSync(inside), true)
+    })
+  })
+
+  h.case('edit-files is refused when the directory links outside the workspace', async () => {
+    await withAgy({ roles: [role('worker')] }, async x => {
+      symlinkSync(h.workspace(), join(x.ws, 'escape'))
+      await h.assert.rejects(
+        x.w.delegate({ role: 'worker', prompt: 'write [[scenario:write]]' }),
+        /Antigravity cannot edit files in .*: the directory contains a symbolic link that leads outside the workspace/,
+      )
+      h.assert.equal((await x.main()).length, 0, 'no model request was made')
     })
   })
 

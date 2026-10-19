@@ -25,6 +25,10 @@ export interface FakeProcess {
   fail(error: Error): void
   readonly terminated: number
   readonly exited: boolean
+  /** Leave a daemon/background child in the managed range: it outlives the CLI until `terminate()`. */
+  leaveChild(): void
+  /** True while a leftover child is alive in the range. */
+  readonly childAlive: boolean
   /** Resolves when stdin is closed by the session. */
   readonly stdinClosed: Promise<string>
 }
@@ -40,6 +44,10 @@ export interface FakeSubprocessOptions {
   readonly ignoreTerminate?: boolean
   /** Throw synchronously from `spawn` for pipe-mode processes. */
   readonly spawnThrows?: boolean
+  /** Every pipe-mode process leaves a background child in its range (see {@link FakeProcess.leaveChild}). */
+  readonly leftoverChild?: boolean
+  /** `terminate()` throws once the CLI process has exited. */
+  readonly terminateThrowsAfterExit?: boolean
 }
 
 export interface FakeSubprocess extends SubprocessPort {
@@ -114,6 +122,19 @@ export function fakeSubprocess(options: FakeSubprocessOptions = {}): FakeSubproc
         stdout.end()
         stderr.end()
       }
+      // The managed range (DSH: systemd scope or process group): `waitForExit` resolves only once the
+      // CLI exited AND no leftover child remains; `terminate()` kills the whole range, leftovers included.
+      let childAlive = options.leftoverChild === true
+      let rangeEmptied!: () => void
+      const rangeEmpty = new Promise<void>(resolve => {
+        rangeEmptied = resolve
+      })
+      const killChild = (): void => {
+        childAlive = false
+        rangeEmptied()
+      }
+      if (!childAlive) rangeEmptied()
+      let rangeWait = rangeEmpty
       const process: FakeProcess = {
         spec,
         stdinText: () => input,
@@ -144,6 +165,17 @@ export function fakeSubprocess(options: FakeSubprocessOptions = {}): FakeSubproc
         get exited() {
           return exited
         },
+        leaveChild() {
+          if (childAlive) return
+          childAlive = true
+          // A fresh, pending range promise: replace the resolved one.
+          rangeWait = new Promise<void>(resolve => {
+            rangeEmptied = resolve
+          })
+        },
+        get childAlive() {
+          return childAlive
+        },
         stdinClosed,
       }
       processes.push(process)
@@ -154,11 +186,16 @@ export function fakeSubprocess(options: FakeSubprocessOptions = {}): FakeSubproc
         collected: {},
         done,
         terminate() {
+          if (options.terminateThrowsAfterExit === true && exited) throw new Error('range gone')
           terminated++
-          if (options.ignoreTerminate !== true) process.exit(null, 'SIGTERM')
+          if (options.ignoreTerminate !== true) {
+            process.exit(null, 'SIGTERM')
+            killChild()
+          }
         },
         async waitForExit() {
           await done.catch(() => {})
+          await rangeWait
           return true
         },
       }

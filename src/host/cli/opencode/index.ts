@@ -1,8 +1,9 @@
 /**
  * OpenCode adapter: one `opencode acp` process per delegation (DESIGN §5.4).
  *
- * Everything per run is injected through `OPENCODE_CONFIG_CONTENT`, which OpenCode
- * merges over the user's global and project config without touching any file:
+ * Everything per run is injected through `OPENCODE_CONFIG_CONTENT` (the engine's
+ * `envJson` channel), which OpenCode merges over the user's global config without
+ * touching any file (below full access the project config is not loaded at all):
  * the model (also as the default, so nothing falls back to OpenCode's free remote
  * model), a uniquely named primary agent `dsh-<nonce>` carrying the preset's
  * permission profile (no user config can merge into a fresh name), the role
@@ -110,15 +111,16 @@ export function qualifiedModel(input: PlanInput): string {
 }
 
 /**
- * The `OPENCODE_CONFIG_CONTENT` value of a run. Every `$` from the data is written as the JSON
- * escape `$` so the engine's placeholder substitution (which applies to env values) can only
- * touch the instructions path this function places on purpose.
+ * The `OPENCODE_CONFIG_CONTENT` value of a run, as a JSON object for the engine's `envJson` channel. The
+ * engine substitutes the `${RUN_DIR}` instructions path (a string leaf that starts with the placeholder) and
+ * serializes it with `$`, `{` and `}` inside strings escaped, so no value can form one of OpenCode's
+ * `{env:…}` / `{file:…}` references (runner names are also limited to a safe character set).
  * @param input - the plan input.
  * @param nonce - the engine's per-run nonce.
- * @returns JSON text.
+ * @returns the config object.
  */
-export function configContent(input: PlanInput, nonce: string): string {
-  const config = {
+export function configObject(input: PlanInput, nonce: string): Record<string, unknown> {
+  return {
     $schema: 'https://opencode.ai/config.json',
     autoupdate: false,
     share: 'disabled',
@@ -134,10 +136,19 @@ export function configContent(input: PlanInput, nonce: string): string {
       },
     },
   }
-  const escaped = JSON.stringify(config).replaceAll('$', '\\u0024')
-  // Restore the one placeholder (structure-only text: data strings cannot contain an unescaped `"instructions":["`).
-  const placed = JSON.stringify({ instructions: [INSTRUCTIONS_FILE] }).slice(1, -1)
-  return escaped.replace(placed.replaceAll('$', '\\u0024'), placed)
+}
+
+/**
+ * Whether a run loads the repository's own OpenCode configuration. Below full access it does not
+ * (`OPENCODE_DISABLE_PROJECT_CONFIG=1`): a project `opencode.json` can start local MCP servers and
+ * `.opencode/tool` files are imported at start, i.e. repository code would run under a preset that allows
+ * no shell. This also skips the project's AGENTS.md / CLAUDE.md. Project plugins under `.opencode/plugin(s)`
+ * still load in 1.19.3, so the engine refuses such workspaces (`startupCodeDirs`).
+ * @param input - the plan input.
+ * @returns true only for the full-access preset at full access.
+ */
+export function loadsProjectConfig(input: Pick<PlanInput, 'preset' | 'access'>): boolean {
+  return input.preset === 'full-access' && input.access === 'full-access'
 }
 
 export const opencodeAdapter: CliAdapter = {
@@ -147,8 +158,10 @@ export const opencodeAdapter: CliAdapter = {
     const hasInstructions = input.instructions.trim() !== ''
     return {
       argv: ['acp', '--cwd', input.cwd, '--print-logs', '--log-level', 'WARN'],
+      envJson: { OPENCODE_CONFIG_CONTENT: configObject(input, nonce) },
       env: {
-        OPENCODE_CONFIG_CONTENT: configContent(input, nonce),
+        // Full access leaves an inherited value alone (the user's own choice).
+        ...(loadsProjectConfig(input) ? {} : { OPENCODE_DISABLE_PROJECT_CONFIG: '1' }),
         // No session rows in the user's opencode.db; no migration race between parallel runs.
         OPENCODE_DB: ':memory:',
         OPENCODE_DISABLE_AUTOUPDATE: '1',

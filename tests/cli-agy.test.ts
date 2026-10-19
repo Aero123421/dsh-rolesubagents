@@ -61,7 +61,8 @@ const LOG = ['--log-file', '${RUN_DIR}/agy.log']
 describe('agy plan', () => {
   it('edit-files (default): generated agent with read + edit tools, no skip-permissions', () => {
     const plan = agyAdapter.plan(input(), NONCE)
-    expect(plan.argv).toEqual([...BASE, '--agent', AGENT, ...LOG])
+    // accept-edits: without it headless agy denies workspace writes outside the temp dir.
+    expect(plan.argv).toEqual([...BASE, '--agent', AGENT, '--mode', 'accept-edits', ...LOG])
     expect(plan.env).toEqual({ AGY_CLI_DISABLE_AUTO_UPDATE: 'true' })
     expect(plan.preflight).toEqual({ argv: ['--output-format', 'json', 'models'], timeoutMs: 15_000, category: 'auth' })
     expect(plan.cancelGraceMs).toBe(0)

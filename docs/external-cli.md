@@ -36,6 +36,7 @@ src/host/
     types.ts            the adapter contract (PlanInput, RunPlan, RunSession, RunOutcome, ProbeRunner, CliAdapter)
     registry.ts         CLI_ADAPTERS registry, AdapterLookup
     policy.ts           access ceiling, effective preset, depth check, cwd checks
+    workspace.ts        workspace integrity checks before tool-scope runs (git top-level, escaping links, startup code)
     provider.ts         one ephemeral DSH provider per delegation
     engine.ts           startExternalRun, createProbeRunner, toSubagentResult
     env.ts              child environment composition
@@ -53,13 +54,22 @@ src/host/
 `CliDescriptor` is pure data: `id`, `displayName`, default `executable` (PATH name), `needsProvider` (OpenCode:
 model is provider + model, both required), `modelSuggestions` (static fallback for the editor), `efforts` (allowed
 ids, or `[]`), `effortFreeText` (any non-empty effort accepted, OpenCode), `permissions` (presets in display order,
-each with an `AccessLevel`), `defaultPermission`, `presetForAccess` (one preset per access level, used to lower a
-preset to the ceiling and to switch a read-only role), and `instructionsChannel` (documentation only).
+each with an `AccessLevel` and a `confinement`), `defaultPermission`, `presetForAccess` (one preset per access level,
+used to lower a preset to the ceiling and to switch a read-only role), `instructionsChannel` (documentation only),
+`toolScope` and the optional `startupCodeDirs` (see [Workspace checks](#workspace-checks)).
+
+`confinement` says what enforces a preset: `os-sandbox` (Codex: an OS sandbox that also covers shell commands and
+resolves symbolic links), `tool-scope` (the CLI's own tool permissions: Claude Code, Antigravity, OpenCode), or
+`none` (full access). The editor shows it in the permission field's help. `toolScope` is how far a `tool-scope`
+preset's file tools reach: `cwd`, or `git-worktree` (OpenCode: the whole worktree around the directory).
 
 Access levels are ordered `read-only < workspace-write < full-access`. Normalization (`runner.ts`) relies on the
 descriptor: unknown permission → `defaultPermission`; read-only role with a wider preset →
 `presetForAccess['read-only']`; effort not in `efforts` (unless free text) → cleared; `needsProvider` with a missing
-half → cleared and the role switched off. Every rule is idempotent.
+half → cleared and the role switched off; `model`, `provider` and `effort` must match `RUNNER_NAME_PATTERN` (letters,
+digits, `. _ : @ / + - [ ]`, no leading `-`, at most 128 characters), otherwise `invalid-runner-model` /
+`invalid-runner-effort` (this keeps OpenCode `{env:…}` / `{file:…}` references and option-like values out). Every rule
+is idempotent.
 
 ### Adapter (`src/host/external/types.ts`)
 
@@ -84,13 +94,14 @@ read-only roles, and the one-shot sentence), the `task` (the delegate prompt) an
 |---|---|
 | `argv` | Arguments without the executable; never shell-interpreted |
 | `env` | Overlay; `undefined` removes a variable (unless the user forwards it by name) |
+| `envJson` | Variables whose value is JSON built by the engine (OpenCode's `OPENCODE_CONFIG_CONTENT`): string leaves that start with a placeholder are substituted, then the value is serialized with `$`, `{`, `}` inside strings as `\u` escapes. A temp path with backslashes cannot corrupt it, and no data can form a placeholder or an `{env:…}` reference |
 | `envRemovePrefixes` | Inherited names with these prefixes are removed (Claude Code: `CLAUDE_CODE_`), unless forwarded |
 | `files` | Files created before spawn and removed after exit (also on failure or cancel). Keys start with `${RUN_DIR}/` or `${HOME}/` |
 | `preflight` | Optional cheap command; a non-zero exit or timeout refuses the start with its `category` |
 | `cancelGraceMs` | Wait between `session.cancel()` and the engine's terminate |
 
-Placeholders, substituted by the engine only in argv elements that *start* with a placeholder, in env values, and
-in file keys (never in file contents or the task):
+Placeholders, substituted by the engine only in argv elements and `envJson` string leaves that *start* with a
+placeholder, in env values, and in file keys (never in file contents or the task):
 
 - `${RUN_DIR}`: a private 0700 temp directory per run, created only when the plan mentions it, removed afterwards;
 - `${HOME}`: the child's HOME (the overlay's `HOME`, else the Host's);
@@ -136,23 +147,28 @@ write the CLI's state.
      else the parent's sandbox mode (`read-only` → read-only, `danger-full-access` → full-access, anything else or
      no service → workspace-write), plus the parent's `workspaceRoot`;
    - `effectivePermission(descriptor, runner, ceiling)`: the role's preset when its level fits, else
-     `presetForAccess[ceiling]` (logged). Never widened.
+     `presetForAccess[ceiling]` (logged). Never widened;
+   - `assertExplicitCwdCheckable(args.cwd, access, workspaceRoot)`: an explicit `cwd` cannot be checked when the
+     workspace root is unknown (no `sandboxPolicy`, a throwing one, or no root), so it is refused unless the run is
+     read-only or full access (where containment does not apply). Without `cwd`, DSH's default is kept.
 3. `startExternalDelegation` (`provider.ts`) registers an ephemeral provider
    `rolesubagents:<cli>:<roleId>:<uuid>` with all start capabilities false and `inheritsParentContext: false`,
    calls `ctx.subagents.startActivation({ provider, label, request: { prompt, parent, cwd? }, signal, delivery:
    'parent' })` without `childId`, `maxDepth`, `agentOptions` or `agentPreset`, and unregisters in `finally`
-   (the started run continues). The CLI settings are read live at this point; roles are the session's snapshot.
+   (the started run continues; the disposer's result is awaited in the background and a failure is only logged,
+   since a registry may return a promise). The CLI settings are read live at this point; roles are the session's
+   snapshot.
 4. The provider's `start(request)` validates `request.cwd` (absolute, an enterable directory), enforces cwd
    containment below full access (`assertCwdAllowed`, symlinks resolved; skipped when the workspace root is
-   unknown), and calls `startExternalRun`.
+   unknown, which only DSH's default directory can reach), and calls `startExternalRun` with the workspace root.
 5. DSH owns the run from here: it notifies the parent with the result, aborts `request.signal` on
    `interrupt_agent`, and disposes the run. The plugin also tracks live runs and disposes them on unload.
 
 ## Engine lifecycle (`engine.ts`)
 
 ```
-startExternalRun
-  subprocess service? → cwd check → plan + session (nonce)
+startExternalRun                       (every await checks the delegation signal and the plugin lifetime)
+  subprocess service? → cwd check → workspace checks → plan + session (nonce)
   → placeholders (${SECRET}, ${HOME}, ${RUN_DIR} if mentioned) → env (composeEnv) → argv
   → resolveExecutable (settings path or descriptor name; not found → "<CLI> was not found …")
   → write files → pre-flight → spawn
@@ -175,6 +191,10 @@ superviseRun
 - **Lines** (`lines.ts`): UTF-8 safe across chunks, `\n` and `\r\n`; a line over 8 MiB is dropped whole (logged
   once) and the splitter resynchronizes. The last 16 KiB of stderr are kept for `finish` and the Host log only.
 - **Timeout**: `runnerTimeoutMs(runner)` (default 30 minutes) → `timedOut` → stop ladder → category `timeout`.
+- **Plugin lifetime**: `EngineDeps.lifetime` is aborted in the plugin's effect cleanup. It is combined with the
+  delegation's signal from the start of `startExternalRun` and checked after every await and right before spawn,
+  so a delegation still resolving its executable, writing files or running its pre-flight when the plugin unloads
+  never spawns (its files are removed). From spawn on, the run is tracked and the cleanup disposes it.
 - **Stop ladder** (same for an aborted signal, `dispose()` and the timeout):
   1. graceful cancel: `session.cancel()` if the session has one;
   2. after `plan.cancelGraceMs`: `handle.terminate()` (SIGTERM), then DSH sends KILL after the 3 s spawn grace.
@@ -186,9 +206,39 @@ superviseRun
   `max-tokens` with a diagnostic; `refusal` → `refusal`; otherwise `error` with the category's diagnostic. Partial
   answer text is kept as output. `exit code` is added to the facts. A non-completed, non-aborted run logs a warning
   with the diagnostic head and the stderr tail.
-- **Dispose**: idempotent; stops the run, waits for exit and settlement, untracks it.
+- **Dispose**: idempotent. If the run has not settled: cancelled, stop ladder. Then it waits for the result, sends
+  one more `handle.terminate()` and waits for `handle.waitForExit()`, then untracks the run. The extra terminate
+  is required: DSH's `waitForExit` resolves only when the whole managed range (systemd scope or process group) is
+  empty, and a CLI that exits normally (or within the cancel grace, which clears the terminate timer) may leave a
+  daemon or background child behind; without it the disposal — and with it DSH's completion notice, its slot and
+  `interrupt_agent` — would hang. Once the range is empty, terminate is cheap. A terminate that throws is logged.
+  DSH awaits `run.dispose()` after the result in `finishDisposal`, so this runs for every external run.
 - Nothing is rolled back: file changes made before a stop stay. A Host restart stops in-flight runs and their
   completion notices are lost.
+
+## Workspace checks
+
+`workspace.ts`, called by the engine before `plan` (`checkWorkspace`). Refusals are thrown with fixed text, the CLI's
+display name and the working directory (the parent sees them as the tool error); a link's path goes to the Host log
+only. The checks only read the filesystem (no git binary).
+
+- **Startup code** (below full access, `descriptor.startupCodeDirs`): OpenCode 1.19.3 imports
+  `.opencode/plugin(s)/*.{js,ts}` at start even with `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `--pure` (verified), so
+  a run is refused when such a directory exists in the run's directory or a parent up to the git top-level (to `/`
+  outside git; the home directory itself is skipped: that is the user's own config).
+- For a **workspace-write run of a `tool-scope` preset** only:
+  - **git top-level above the directory** when `toolScope` is `git-worktree` (OpenCode): a `.git` directory or file
+    found walking up from the real path of `cwd`, strictly above it. OpenCode's `edit` permission patterns are
+    relative to the worktree and `external_directory` only fires outside the worktree; an anchored `edit` rule
+    (`{"*": "deny", "<sub>/*": "allow"}`) does stop `write`/`edit` (verified), but `apply_patch` (offered instead of
+    write/edit for `gpt-*` models) checks only a move's *source* path, so a `*** Move to:` reached a sibling
+    directory (verified). Hence a refusal rather than an anchored rule. Claude Code and agy are `cwd`-scoped
+    (verified: sibling, repository top-level and outside writes are refused).
+  - **escaping symbolic links**: a bounded walk of the `cwd` tree (no link is followed, `.git` is skipped; budget
+    `SCAN_MAX_ENTRIES` = 100 000 entries and `SCAN_MAX_MS` = 2 s, exceeding it refuses — fail closed) for a link
+    whose target (for a dangling link: the path it would create) is outside the real path of the parent's workspace
+    root (else of `cwd`). Read-only runs and `os-sandbox` presets are not scanned. Residual risk: hard links are
+    not detected.
 
 ## Diagnostics
 
@@ -212,7 +262,9 @@ answers.
 ## Probe service
 
 - `probe.ts` `probeCli(request, deps, signal)`: validates the CLI id, composes the environment with the forwarded
-  names, resolves the executable from the *saved* settings, then calls `adapter.probe`. `message` is a fixed word:
+  names, resolves the executable from the *saved* settings, then calls `adapter.probe` with the settings'
+  `envPassthrough` reduced to the names actually set (non-empty) in the Host environment (`probeSettings`), so an
+  adapter never reports a sign-in from a merely listed variable. `message` is a fixed word:
   `subprocess-unavailable`, `not-found`, `probe-failed` (adapters may add their own, such as `version-timeout`).
 - `probe-service.ts` mounts a Typert Remote service `rolesubagentsCli` with `probe(request, signal)`, called from
   the browser as `ctx.connection.rpc.call('/api', 'rolesubagentsCli/probe', { args: { request } }, signal)`.
@@ -226,10 +278,19 @@ answers.
 
 | CLI | Protocol | Instructions channel | Presets (read-only / workspace-write / full-access) | Pre-flight | Graceful cancel |
 |---|---|---|---|---|---|
-| Codex | `codex exec --json`, task on stdin | `-c developer_instructions=…` | `read-only` / `workspace-write` / `danger-full-access` (`-s`) | none | no |
-| Claude Code | `claude -p --output-format stream-json --verbose`, task on stdin | `--append-system-prompt` | `read-only` (dontAsk + no setting sources + no write tools) / `acceptEdits`, `auto` / `bypassPermissions` | none | no |
-| Antigravity | stream-json in and out, one user event on stdin | generated agent body; full-access: task prefix | `read-only` / `edit-files` (generated agent tool allowlists) / `full-access` (default agent + skip permissions) | `--output-format json models` → `auth` | no (SIGTERM is handled) |
-| OpenCode | `opencode acp` (ACP JSON-RPC) | `instructions` file in `${RUN_DIR}` | `read-only` / `edit-files` / `full-access` (permission profiles on agent `dsh-<nonce>`) | none | `session/cancel` + EOF |
+| Codex | `codex exec --json`, task on stdin | `-c developer_instructions=…` | `read-only` / `workspace-write` (+ `writable_roots=[]`) / `danger-full-access` (`-s`); OS sandbox | none | no |
+| Claude Code | `claude -p --output-format stream-json --verbose`, task on stdin | `--append-system-prompt` | `read-only` (dontAsk + `--tools` read tools + no setting sources) / `acceptEdits` ("Edit files (no shell)": `--tools` read tools + Edit/Write/NotebookEdit, no setting sources) / `auto`, `bypassPermissions` | none | no |
+| Antigravity | stream-json in and out, one user event on stdin | generated agent body; full-access: task prefix | `read-only` / `edit-files` (generated agent tool allowlists; edit-files adds `--mode accept-edits`) / `full-access` (default agent + skip permissions) | `--output-format json models` → `auth` | no (SIGTERM is handled) |
+| OpenCode | `opencode acp` (ACP JSON-RPC) | `instructions` file in `${RUN_DIR}` | `read-only` / `edit-files` / `full-access` (permission profiles on agent `dsh-<nonce>`; below full access `OPENCODE_DISABLE_PROJECT_CONFIG=1`) | none | `session/cancel` + EOF |
+
+What each preset loads from the project: Codex reads `AGENTS.md` and, for a trusted project, `.codex/config.toml`
+(`-s` and `writable_roots=[]` still win). Claude Code's `read-only` and `acceptEdits` load no setting sources (no
+user/project/local settings, hooks, allow rules, `additionalDirectories`, `CLAUDE.md`; verified: user and project
+hooks and allow rules have no effect, while a control run with default sources runs them); `auto` and
+`bypassPermissions` load the defaults. OpenCode below full access loads only the user's global config (no project
+`opencode.json` MCP servers, `.opencode` agents/commands/tools, `AGENTS.md`/`CLAUDE.md` — a trade-off: project
+instructions are not seen; verified that a project MCP server and tool file do not run), at full access everything;
+project plugins are refused (above). Antigravity reads the project's `AGENTS.md`.
 
 The adapters' header comments hold the exact flags and the evidence for each choice; keep them current.
 
@@ -259,6 +320,13 @@ The adapters' header comments hold the exact flags and the evidence for each cho
    to the parent notice, read-only blocks a write, the default preset writes in the workspace, cancellation ends
    as aborted with no leftover process, an auth/upstream error gives a safe diagnostic, and model + effort reach
    the CLI. `pnpm check:cli self` checks the harness with `tests/support/fake-cli/fake-cli.mjs`.
+   `CHECK_CLI_CASE=<text>` runs only cases whose name contains the text. Write boundaries must be checked in a
+   workspace outside `/tmp` (`h.workspace(files, { outsideTmp: true })`, default `/var/tmp`, override with
+   `CHECK_CLI_OUTSIDE_TMP`): Codex and agy always allow writes under the temp dir, which hides a wrong preset. DSH
+   removes credential-shaped names such as `GIT_CONFIG_KEY_<n>` from children; an inherited `GIT_CONFIG_COUNT` then
+   breaks every git command in the child (OpenCode would not see the worktree), so the OpenCode suite sets
+   `GIT_CONFIG_COUNT=0`. The `@deepseek-ai/*` resolve hook (`scripts/host-resolve-hook.mjs`) guards against
+   re-entry, since on Node 24 `require.resolve` runs the registered hooks again.
 
 ## Adding a new CLI
 
@@ -303,21 +371,26 @@ The adapters' header comments hold the exact flags and the evidence for each cho
 
 What to watch for:
 
-- **Codex**: the `exec --json` events (`item.completed` with `agent_message`, `turn.completed`, `turn.failed`,
+- **Codex**: whether `-c sandbox_workspace_write.writable_roots=[]` still clears configured roots (the check-cli case
+  has a control run without it); the `exec --json` events (`item.completed` with `agent_message`, `turn.completed`, `turn.failed`,
   `error`); the error texts the parser classifies; `-c` keys (`developer_instructions`, `model_reasoning_effort`,
   `shell_environment_policy.ignore_default_excludes`, `analytics.enabled`, `notify`) and the `--disable` feature
   names; the effort list (`ultra` stays excluded because it also turns on automatic delegation); what
   `workspace-write` makes writable; the `codex debug models` JSON shape and `login status` exit codes.
-- **Claude Code**: the final `result` line (`subtype`, `is_error`, `result`, `api_error_status`,
+- **Claude Code**: the `--tools` names (`Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Edit`, `Write`,
+  `NotebookEdit`; `Glob`/`Grep` exist only when named) and that neither restricted preset offers `Bash`; the final `result` line (`subtype`, `is_error`, `result`, `api_error_status`,
   `terminal_reason`, `permission_denials`, `usage`, `total_cost_usd`); permission mode names; whether
   `--setting-sources ""` still disables settings, hooks and `CLAUDE.md`; the root refusal message for
   `bypassPermissions`; the static model list in `CLAUDE_CODE_MODELS` and the effort list.
-- **Antigravity**: stream-json event shapes (`text_delta`, `step_index`, `step_type: agent_response`, the
+- **Antigravity**: whether headless agy still needs `--mode accept-edits` to write in the workspace (test outside
+  `/tmp`: the temp dir is always writable) and still refuses writes outside the run's directory; stream-json event shapes (`text_delta`, `step_index`, `step_type: agent_response`, the
   terminal `result` with `status`, `denied_actions`, `error`); the `AGY_ERROR:` stderr line; tool names in
   `READ_TOOLS` / `EDIT_TOOLS` and the custom-agent frontmatter keys; whether a custom agent still drops the
   default tools and prompt sections (the reason full access uses the default agent); the `models` JSON shape;
   the default write policy (workspace and temp directory) and where runs are recorded.
-- **OpenCode**: the ACP protocol version and flow (`initialize`, `session/new`, `session/set_config_option` ids
+- **OpenCode**: whether `OPENCODE_DISABLE_PROJECT_CONFIG` still skips project config and whether project plugins
+  still load despite it (`startupCodeDirs`); whether file tools still reach the whole git worktree (`toolScope`); the
+  ACP protocol version and flow (`initialize`, `session/new`, `session/set_config_option` ids
   `model` / `mode` / `effort`, `session/prompt`, `session/request_permission` options, `session/cancel`); permission
   keys (`edit`, `bash`, `external_directory`, `doom_loop`, `question`, `plan_enter`, `plan_exit`); how
   `OPENCODE_CONFIG_CONTENT` merges; `error.data.errorName` values; the `opencode models --verbose` format; whether

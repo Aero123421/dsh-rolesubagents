@@ -11,10 +11,14 @@
  * Behaviour is chosen by words in the task:
  * - `SLOW`: print the pid line, then wait (up to 10 minutes) until killed.
  * - `FAIL`: write a noisy stderr line and exit 3 without a terminal event.
+ * - `LEFTOVER`: start a background `sleep` that outlives this process (same process group), answer
+ *   `leftover-child: <pid>` and exit 0.
  * - `CWD`: answer with the working directory.
  * - `ENV:<NAME>`: answer with the value of that environment variable (or `<unset>`).
  * - anything else: answer `echo: <task>`.
  */
+
+import { spawn } from 'node:child_process'
 
 process.stdout.write(`${JSON.stringify({ type: 'pid', pid: process.pid })}\n`)
 let task = ''
@@ -27,6 +31,13 @@ process.stdin.on('end', () => {
   if (task.includes('SLOW')) {
     setTimeout(() => process.exit(0), 600_000)
     return
+  }
+  if (task.includes('LEFTOVER')) {
+    const child = spawn('sleep', ['600'], { stdio: 'ignore' })
+    child.unref()
+    emit({ type: 'text', text: `leftover-child: ${child.pid}` })
+    emit({ type: 'done' })
+    process.exit(0)
   }
   if (task.includes('FAIL')) {
     process.stderr.write('fatal: request to https://api.example failed with key sk-test-123\n')

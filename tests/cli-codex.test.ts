@@ -74,6 +74,8 @@ describe('codex plan', () => {
       'notify=[]',
       '-c',
       'shell_environment_policy.ignore_default_excludes=false',
+      '-c',
+      'sandbox_workspace_write.writable_roots=[]',
       '-C',
       '/work/space',
       '-s',

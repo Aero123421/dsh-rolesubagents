@@ -4,7 +4,9 @@ import { describe, expect, it } from 'vitest'
 import {
   CLAUDE_CODE_MODELS,
   claudeCodeAdapter,
+  EDIT_TOOLS,
   permissionArgs,
+  READ_ONLY_TOOLS,
   READ_ONLY_DISALLOWED_TOOLS,
 } from '../src/host/cli/claude-code/index.ts'
 import { ClaudeStreamParser, resultCategory } from '../src/host/cli/claude-code/parser.ts'
@@ -68,10 +70,19 @@ describe('claude-code plan', () => {
       'dontAsk',
       '--setting-sources',
       '',
+      '--tools',
+      'Read,Glob,Grep,WebFetch,WebSearch',
       '--disallowedTools',
       'Write,Edit,NotebookEdit',
     ],
-    acceptEdits: ['--permission-mode', 'acceptEdits'],
+    acceptEdits: [
+      '--permission-mode',
+      'acceptEdits',
+      '--setting-sources',
+      '',
+      '--tools',
+      'Read,Glob,Grep,WebFetch,WebSearch,Edit,Write,NotebookEdit',
+    ],
     auto: ['--permission-mode', 'auto'],
     bypassPermissions: ['--permission-mode', 'bypassPermissions'],
   }
@@ -138,16 +149,22 @@ describe('claude-code plan', () => {
       'dontAsk',
       '--setting-sources',
       '',
+      '--tools',
+      READ_ONLY_TOOLS,
       '--disallowedTools',
       READ_ONLY_DISALLOWED_TOOLS,
     ]
     expect(permissionArgs({ preset: 'bypassPermissions', access: 'read-only' })).toEqual(readOnly)
-    expect(permissionArgs({ preset: 'plan', access: 'workspace-write' })).toEqual(['--permission-mode', 'acceptEdits'])
+    const acceptEdits = ['--permission-mode', 'acceptEdits', '--setting-sources', '', '--tools', EDIT_TOOLS]
+    // Neither restricted preset offers Bash.
+    expect(READ_ONLY_TOOLS.split(',')).not.toContain('Bash')
+    expect(EDIT_TOOLS.split(',')).not.toContain('Bash')
+    expect(permissionArgs({ preset: 'plan', access: 'workspace-write' })).toEqual(acceptEdits)
     // A preset whose own level differs from the effective access is replaced by the access level's preset.
-    expect(permissionArgs({ preset: 'bypassPermissions', access: 'workspace-write' })).toEqual([
-      '--permission-mode',
-      'acceptEdits',
-    ])
+    expect(permissionArgs({ preset: 'bypassPermissions', access: 'workspace-write' })).toEqual(acceptEdits)
+    // `auto` is full access (its classifier can approve any unsandboxed command): below that it becomes acceptEdits.
+    expect(permissionArgs({ preset: 'auto', access: 'workspace-write' })).toEqual(acceptEdits)
+    expect(permissionArgs({ preset: 'auto', access: 'full-access' })).toEqual(['--permission-mode', 'auto'])
     for (const access of ['read-only', 'workspace-write', 'full-access'] as AccessLevel[]) {
       expect(permissionArgs({ preset: 'nonsense', access })).toEqual(
         permissionArgs({ preset: CLAUDE_CODE.presetForAccess[access], access }),

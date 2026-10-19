@@ -10,7 +10,7 @@
 
 import { homedir } from 'node:os'
 import { cliDescriptor, isCliId } from '../../shared/cli/index.ts'
-import type { CliSettingsMap } from '../../shared/runner.ts'
+import type { CliSettings, CliSettingsMap } from '../../shared/runner.ts'
 import type { SubprocessPort } from '../ports.ts'
 import { createProbeRunner } from './engine.ts'
 import { composeEnv, definedEntries } from './env.ts'
@@ -68,10 +68,29 @@ export async function probeCli(request: unknown, deps: ProbeDeps, signal: AbortS
   if (adapter.probe === undefined) return { cli, found: true, path }
   const run = createProbeRunner(deps.subprocess, path, env, deps.cwd ?? hostEnv.HOME ?? homedir())
   try {
-    const result = await adapter.probe(path, run, signal, settings)
+    const result = await adapter.probe(path, run, signal, probeSettings(settings, hostEnv))
     return { ...result, cli, found: true, path }
   } catch {
     signal.throwIfAborted()
     return { cli, found: true, path, message: 'probe-failed' }
   }
+}
+
+/**
+ * The settings an adapter's probe sees: `envPassthrough` lists only the names that are actually set
+ * (non-empty) in the Host environment, so a probe never reports a sign-in from a merely listed variable.
+ * @param settings - the CLI's saved settings.
+ * @param hostEnv - the Host environment.
+ * @returns the settings with the filtered list.
+ */
+export function probeSettings(
+  settings: CliSettings,
+  hostEnv: Readonly<Record<string, string | undefined>>,
+): CliSettings {
+  if (settings.envPassthrough === undefined) return settings
+  const envPassthrough = settings.envPassthrough.filter(name => {
+    const value = hostEnv[name]
+    return value !== undefined && value !== ''
+  })
+  return { ...settings, envPassthrough }
 }

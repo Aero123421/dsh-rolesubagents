@@ -3,12 +3,22 @@
  *
  * One process per delegation. The task goes to stdin, which is closed right
  * away (an open stdin costs a 3 s wait); the role's instructions are appended
- * to Claude Code's own system prompt with `--append-system-prompt`. Presets are
- * permission modes, except `read-only`, which is `dontAsk` (everything that
- * needs approval is denied in print mode) with no setting sources (user and
- * project allow rules, hooks and MCP files cannot widen it) and without the
- * file-writing tools. `--strict-mcp-config` keeps project `.mcp.json` servers
- * out of every preset.
+ * to Claude Code's own system prompt with `--append-system-prompt`.
+ *
+ * Presets (verified against 2.1.303 through scripts/check-cli/claude-code.mjs):
+ * - `read-only`: `--tools` limited to the read tools (no Bash: `dontAsk` alone does not make the
+ *   filesystem read-only — a read-only-looking command such as `git diff` can run a repository's
+ *   `diff.external` helper), `--permission-mode dontAsk`, no setting sources, and the write tools
+ *   disallowed as well.
+ * - `acceptEdits` (workspace write, "Edit files (no shell)"): `--tools` limited to the read tools plus
+ *   Edit/Write/NotebookEdit — no Bash, because a user allow rule for Bash would otherwise let commands
+ *   write anywhere — and no setting sources, so user or project allow rules, `additionalDirectories` and
+ *   hooks cannot widen it (print mode has no trust dialog). Edits outside the working directory need
+ *   approval, which print mode refuses.
+ * - `auto` and `bypassPermissions`: full access (the `auto` classifier can approve any unsandboxed
+ *   command), Claude Code's default tools and setting sources.
+ * `--strict-mcp-config` keeps project `.mcp.json` servers out of every preset. With no setting sources,
+ * CLAUDE.md files and a model, environment or `apiKeyHelper` from settings are not loaded either.
  *
  * Environment: nested-agent markers and inherited `CLAUDE_CODE_*` variables
  * are removed (variables the user forwards by name win), non-essential traffic
@@ -24,8 +34,14 @@ import { CLAUDE_CODE } from '../../../shared/cli/claude-code.ts'
 import type { CliAdapter, PlanInput, ProbeModel, ProbeResult, RunPlan, RunSession } from '../../external/types.ts'
 import { ClaudeStreamParser } from './parser.ts'
 
-/** Tools removed from the read-only preset (Bash stays: `dontAsk` denies mutating commands). */
+/** Tools removed from the read-only preset (belt and braces: `--tools` already leaves them out). */
 export const READ_ONLY_DISALLOWED_TOOLS = 'Write,Edit,NotebookEdit'
+
+/** The tools of the read-only preset: no Bash, no file writes. */
+export const READ_ONLY_TOOLS = 'Read,Glob,Grep,WebFetch,WebSearch'
+
+/** The tools of the workspace-write preset: the read tools plus file edits, no Bash. */
+export const EDIT_TOOLS = `${READ_ONLY_TOOLS},Edit,Write,NotebookEdit`
 
 /** Permission arguments of each preset id. */
 const PRESET_ARGS: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -34,10 +50,12 @@ const PRESET_ARGS: Readonly<Record<string, readonly string[]>> = Object.freeze({
     'dontAsk',
     '--setting-sources',
     '',
+    '--tools',
+    READ_ONLY_TOOLS,
     '--disallowedTools',
     READ_ONLY_DISALLOWED_TOOLS,
   ]),
-  acceptEdits: Object.freeze(['--permission-mode', 'acceptEdits']),
+  acceptEdits: Object.freeze(['--permission-mode', 'acceptEdits', '--setting-sources', '', '--tools', EDIT_TOOLS]),
   auto: Object.freeze(['--permission-mode', 'auto']),
   bypassPermissions: Object.freeze(['--permission-mode', 'bypassPermissions']),
 })

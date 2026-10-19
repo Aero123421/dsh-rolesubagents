@@ -18,6 +18,9 @@
  *   2. after `plan.cancelGraceMs`: `terminate()` — SIGTERM, then DSH's KILL after
  *      {@link SPAWN_GRACE_MS}.
  * A session without `cancel` is terminated at once (step 2 without the wait).
+ * `dispose()` then waits for the result, sends one more `terminate()` to the managed
+ * range (it kills a daemon/background child the CLI left behind; cheap when the
+ * range is already empty) and waits until the range is empty.
  *
  * Errors thrown by {@link startExternalRun} reach the parent model verbatim,
  * so every message is built here from fixed text, the CLI's display name and
@@ -28,12 +31,14 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, normalize, sep } from 'node:path'
+import { permissionPreset } from '../../shared/cli/index.ts'
 import type { CliSettings } from '../../shared/runner.ts'
 import type { LoggerPort, SubagentResultPort, SubagentRunPort, SubprocessHandlePort, SubprocessPort } from '../ports.ts'
 import { formatDiagnostic } from './diagnostic.ts'
 import { composeEnv, definedEntries } from './env.ts'
 import { ByteTail, LineSplitter } from './lines.ts'
 import { assertUsableCwd } from './policy.ts'
+import { findEscapingLink, findStartupCodeDir, gitTopLevelAbove, SCAN_MAX_ENTRIES, SCAN_MAX_MS } from './workspace.ts'
 import {
   type CliAdapter,
   FAILURE_CATEGORIES,
@@ -86,6 +91,8 @@ export interface EngineDeps {
   /** Where `${RUN_DIR}` directories are created; defaults to the OS temp dir. */
   readonly tmpDir?: string
   readonly random?: EngineRandom
+  /** The plugin's lifetime: aborted on unload, so a run still starting then never spawns. */
+  readonly lifetime?: AbortSignal
 }
 
 /** One run to start. */
@@ -99,6 +106,8 @@ export interface ExternalRunSpec {
   readonly timeoutMs: number
   /** DSH's manager-owned signal: interrupt_agent and disposal abort it. */
   readonly signal: AbortSignal
+  /** The parent's workspace root, when known: the bound of the symbolic-link check (else `input.cwd`). */
+  readonly workspaceRoot?: string
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -121,6 +130,50 @@ function substitute(text: string, values: Placeholders): string {
 /** Substitute an argv element only when it starts with a placeholder (user text is never rewritten). */
 function substituteArg(arg: string, values: Placeholders): string {
   return /^\$\{(RUN_DIR|HOME|SECRET)\}/.test(arg) ? substitute(arg, values) : arg
+}
+
+/**
+ * Substitute placeholders in the string leaves of a JSON value that start with a placeholder.
+ * @param value - a JSON-compatible value.
+ * @param values - placeholder values.
+ * @returns a copy with substituted leaves.
+ */
+export function substituteLeaves(value: unknown, values: Placeholders): unknown {
+  if (typeof value === 'string') return substituteArg(value, values)
+  if (Array.isArray(value)) return value.map(item => substituteLeaves(item, values))
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substituteLeaves(item, values)]))
+  }
+  return value
+}
+
+/**
+ * Serialize a JSON value for an environment variable, writing `$`, `{` and `}` inside strings as
+ * `\u` escapes (structural braces stay as they are).
+ * @param value - a JSON-compatible value.
+ * @returns JSON text.
+ */
+export function jsonEnvText(value: unknown): string {
+  const text = JSON.stringify(value)
+  let out = ''
+  let inString = false
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i] as string
+    if (inString) {
+      if (char === '\\') {
+        out += char + (text[i + 1] ?? '')
+        i++
+        continue
+      }
+      if (char === '"') inString = false
+      else if (char === '$' || char === '{' || char === '}') {
+        out += `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+        continue
+      }
+    } else if (char === '"') inString = true
+    out += char
+  }
+  return out
 }
 
 /**
@@ -311,13 +364,17 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
   const name = adapter.descriptor.displayName
   const random = deps.random ?? defaultRandom
   const hostEnv = deps.hostEnv ?? process.env
-  spec.signal.throwIfAborted()
+  // The delegation's signal and the plugin's lifetime: an unload during startup must not spawn afterwards.
+  const signal = deps.lifetime === undefined ? spec.signal : AbortSignal.any([spec.signal, deps.lifetime])
+  signal.throwIfAborted()
   const subprocess = deps.subprocess()
   if (subprocess === undefined) {
     throw new Error(`${name} roles need the Host's subprocess service, which is not available`)
   }
   const cwd = assertUsableCwd(spec.input.cwd)
   const input: PlanInput = { ...spec.input, cwd }
+  await checkWorkspace({ adapter, input, workspaceRoot: spec.workspaceRoot, home: hostEnv.HOME, signal, deps })
+  signal.throwIfAborted()
   const nonce = random.nonce()
   const plan: RunPlan = adapter.plan(input, nonce)
   const session: RunSession = adapter.createSession(input, nonce)
@@ -328,12 +385,21 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
     // HOME: the plan's own override (rare), else the Host's.
     const planHome = plan.env.HOME
     const home = typeof planHome === 'string' ? planHome : (hostEnv.HOME ?? homedir())
-    const needsRunDir = JSON.stringify([plan.argv, plan.env, Object.keys(plan.files ?? {})]).includes(RUN_DIR_TOKEN)
+    const needsRunDir = JSON.stringify([
+      plan.argv,
+      plan.env,
+      plan.envJson ?? {},
+      Object.keys(plan.files ?? {}),
+    ]).includes(RUN_DIR_TOKEN)
     const runDir = needsRunDir ? await files.createRunDir(deps.tmpDir ?? tmpdir()) : ''
+    signal.throwIfAborted()
     const values: Placeholders = { ...placeholdersBase, RUN_DIR: runDir, HOME: home }
     const overlay: Record<string, string | undefined> = {}
     for (const [key, value] of Object.entries(plan.env)) {
       overlay[key] = value === undefined ? undefined : substitute(value, values)
+    }
+    for (const [key, value] of Object.entries(plan.envJson ?? {})) {
+      overlay[key] = jsonEnvText(substituteLeaves(value, values))
     }
     const env = composeEnv({
       overlay,
@@ -346,11 +412,12 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
     const command = settings.executable ?? adapter.descriptor.executable
     let executable: string
     try {
-      executable = await subprocess.resolveExecutable(command, definedEntries(env), spec.signal)
+      executable = await subprocess.resolveExecutable(command, definedEntries(env), signal)
     } catch {
-      spec.signal.throwIfAborted()
+      signal.throwIfAborted()
       throw new Error(`${name} was not found (set its path in the plugin settings)`)
     }
+    signal.throwIfAborted()
     if (plan.files !== undefined) {
       try {
         await files.write(plan.files, values)
@@ -358,6 +425,7 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
         deps.logger.warn(`rolesubagents: could not prepare ${name} run files: ${message(error)}`)
         throw new Error(`${name} run files could not be prepared`)
       }
+      signal.throwIfAborted()
     }
     if (plan.preflight !== undefined) {
       const check = await createProbeRunner(
@@ -365,14 +433,16 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
         executable,
         env,
         cwd,
-      )(plan.preflight.argv, { timeoutMs: plan.preflight.timeoutMs }, spec.signal)
+      )(plan.preflight.argv, { timeoutMs: plan.preflight.timeoutMs }, signal)
+      signal.throwIfAborted()
       if (check.code !== 0) {
         throw new Error(
           formatDiagnostic(name, plan.preflight.category, check.timedOut ? { 'pre-flight': 'timeout' } : {}),
         )
       }
     }
-    spec.signal.throwIfAborted()
+    // Nothing is awaited from here until the run is tracked, so an unload cannot slip in between.
+    signal.throwIfAborted()
     let handle: SubprocessHandlePort
     try {
       handle = subprocess.spawn({
@@ -390,6 +460,65 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
   } catch (error) {
     await files.remove()
     throw error
+  }
+}
+
+/**
+ * Refuse a run whose CLI could reach outside the workspace (see `workspace.ts`). Messages are fixed text
+ * with the CLI's name and the working directory; details (a link's path) go to the Host log only.
+ * - below full access: project startup code the CLI would run (`descriptor.startupCodeDirs`);
+ * - a workspace-write run of a `tool-scope` preset: a git top-level above the directory when the CLI's tool
+ *   scope is the git worktree, and any symbolic link in the directory that leads outside the workspace root.
+ * @throws the refusal.
+ */
+async function checkWorkspace(options: {
+  adapter: CliAdapter
+  input: PlanInput
+  workspaceRoot: string | undefined
+  home: string | undefined
+  signal: AbortSignal
+  deps: EngineDeps
+}): Promise<void> {
+  const { adapter, input, signal, deps } = options
+  const descriptor = adapter.descriptor
+  const name = descriptor.displayName
+  const { cwd } = input
+  const alternatives = 'Use a read-only role, or delegate from a parent with full access.'
+  if (input.access !== 'full-access' && descriptor.startupCodeDirs !== undefined) {
+    const found = await findStartupCodeDir(cwd, descriptor.startupCodeDirs, options.home)
+    if (found !== undefined) {
+      deps.logger.warn(`rolesubagents: ${name} refused in ${cwd}: project startup code at ${found}`)
+      throw new Error(
+        `${name} cannot run in ${cwd}: the project has ${descriptor.startupCodeDirs.join(' or ')} code that ${name} would run at start below full access. Delegate from a parent with full access, or use another CLI.`,
+      )
+    }
+  }
+  if (input.access !== 'workspace-write') return
+  const confinement = permissionPreset(descriptor, input.preset)?.confinement ?? 'tool-scope'
+  if (confinement !== 'tool-scope') return
+  if (descriptor.toolScope === 'git-worktree') {
+    const top = await gitTopLevelAbove(cwd)
+    if (top !== undefined) {
+      deps.logger.info(`rolesubagents: ${name} refused in ${cwd}: git top-level ${top} is above it`)
+      throw new Error(
+        `${name} cannot edit files in ${cwd}: it is below the top-level of a git repository, and ${name}'s file tools would reach the whole repository. Delegate with the repository's top-level directory as cwd. ${alternatives}`,
+      )
+    }
+  }
+  signal.throwIfAborted()
+  const finding = await findEscapingLink(cwd, options.workspaceRoot ?? cwd, signal)
+  if (finding?.kind === 'link') {
+    deps.logger.warn(
+      `rolesubagents: ${name} refused in ${cwd}: symbolic link ${finding.path} leads outside the workspace`,
+    )
+    throw new Error(
+      `${name} cannot edit files in ${cwd}: the directory contains a symbolic link that leads outside the workspace, and ${name}'s file tools would follow it. Remove the link. ${alternatives}`,
+    )
+  }
+  if (finding?.kind === 'budget') {
+    throw new Error(
+      `${name} cannot edit files in ${cwd}: the directory is too large to check for symbolic links that lead outside the workspace (over ${SCAN_MAX_ENTRIES} entries or ${SCAN_MAX_MS / 1000} s). Use a smaller directory. ${alternatives}`,
+    )
   }
 }
 
@@ -531,12 +660,16 @@ function superviseRun(parts: Supervised): SubagentRunPort {
 
   let disposal: Promise<void> | undefined
   const run: SubagentRunPort = {
-    /**
-     * Stop the run (graceful cancel → `cancelGraceMs` → terminate) and resolve once the process
-     * exited and the result settled. Idempotent; a no-op stop after the run settled.
-     */
     id,
     result,
+    /**
+     * Stop the run if it is still live (graceful cancel → `cancelGraceMs` → terminate), wait for the
+     * result, then terminate the managed process range once more and wait until it is empty.
+     * The final terminate is what ends a daemon or background child the CLI left behind after its own
+     * exit: DSH's `waitForExit` resolves only when the whole range (systemd scope or process group) is
+     * empty, so without it a leftover would hang the disposal (and DSH's completion notice) forever. It
+     * is cheap when the range is already empty. Idempotent.
+     */
     dispose() {
       disposal ??= (async () => {
         spec.signal.removeEventListener('abort', onAbort)
@@ -545,8 +678,13 @@ function superviseRun(parts: Supervised): SubagentRunPort {
           // Graceful cancel, then terminate after cancelGraceMs (immediately without session.cancel).
           stop()
         }
-        await handle.waitForExit().catch(() => false)
         await result
+        try {
+          handle.terminate()
+        } catch (error) {
+          deps.logger.warn(`rolesubagents: could not terminate ${name} run ${id}: ${message(error)}`)
+        }
+        await handle.waitForExit().catch(() => false)
         deps.runs.delete(run)
       })()
       return disposal

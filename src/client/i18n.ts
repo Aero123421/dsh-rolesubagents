@@ -127,6 +127,13 @@ const en = {
     'What {cli} may do without asking; a delegated run never stops to ask. A delegation never gets more access than the parent session has.',
   'ed.permissionReadOnly': 'Read-only roles can use only a read-only preset.',
   'ed.permissionOption': '{name} — {access}',
+  'confinement.os-sandbox': "Enforced by {cli}'s sandbox, which also covers its shell commands.",
+  'confinement.tool-scope': "Enforced by {cli}'s own tool permissions (no operating-system sandbox).",
+  'confinement.tool-scope-write':
+    "Enforced by {cli}'s own tool permissions (no operating-system sandbox), so a delegation is refused when its working directory contains a symbolic link that leads outside the workspace.",
+  'confinement.tool-scope-write-git':
+    "Enforced by {cli}'s own tool permissions (no operating-system sandbox), so a delegation is refused when its working directory contains a symbolic link that leads outside the workspace, or lies below the top-level of a git repository.",
+  'confinement.none': 'No limits: {cli} may change anything the DSH host user can.',
   'ed.timeout': 'Timeout (minutes)',
   'ed.timeoutHelp': 'The run is stopped after this many minutes (1–{max}). Leave empty for {default}.',
   'ed.cliLimits': 'A CLI role works differently from a DSH role:',
@@ -138,7 +145,7 @@ const en = {
   'ed.cliLimitCancel': 'Stopping it does not undo file changes it already made.',
   'ed.readOnlyHelp.codex': 'Runs Codex in its read-only sandbox, so it cannot change files.',
   'ed.readOnlyHelp.claude-code':
-    'Runs Claude Code without its write tools (Write, Edit, NotebookEdit) and in dontAsk mode, so anything that would need approval is refused.',
+    'Gives Claude Code only its read tools (Read, Glob, Grep, WebFetch, WebSearch), with no shell, in dontAsk mode, so anything that would need approval is refused. Your Claude Code settings are not loaded.',
   'ed.readOnlyHelp.agy': 'Gives Antigravity only its read tools: view files, search, and list folders.',
   'ed.readOnlyHelp.opencode':
     'Denies every OpenCode tool except reading, searching and listing files; .env files stay unreadable.',
@@ -146,7 +153,7 @@ const en = {
   'preset.read-only': 'Read-only',
   'preset.workspace-write': 'Workspace write',
   'preset.danger-full-access': 'Full access (no sandbox)',
-  'preset.acceptEdits': 'Accept edits',
+  'preset.acceptEdits': 'Edit files (no shell)',
   'preset.auto': 'Auto (classifier)',
   'preset.bypassPermissions': 'Bypass permissions',
   'preset.edit-files': 'Edit files (no shell)',
@@ -220,9 +227,12 @@ const en = {
   'issue.runnerContext': 'Role "{id}" runs on {cli}, which always starts fresh, so it cannot be a fork.',
   'issue.runnerDshModel': 'Role "{id}" runs on {cli}, which has its own model setting; the DSH model is removed.',
   'issue.runnerPreset': 'Role "{id}" runs on {cli}, which cannot use an agent preset.',
-  'issue.runnerModel': 'The model of "{id}" must be 1–{max} characters, or empty for the CLI default.',
-  'issue.runnerProviderModel': 'Role "{id}" on {cli} needs both a provider and a model.',
-  'issue.runnerEffort': 'The reasoning effort of "{id}" is not one {cli} accepts.',
+  'issue.runnerModel':
+    'The model of "{id}" must be 1–{max} letters, digits or . _ : @ / + - [ ] (not starting with -), or empty for the CLI default.',
+  'issue.runnerProviderModel':
+    'Role "{id}" on {cli} needs both a provider and a model, each made of letters, digits or . _ : @ / + - [ ].',
+  'issue.runnerEffort':
+    'The reasoning effort of "{id}" is not one {cli} accepts (letters, digits or . _ : @ / + - [ ] only).',
   'issue.runnerPermission': 'The permission of "{id}" is not one of the {cli} presets.',
   'issue.runnerReadOnly': 'Role "{id}" is read-only, so it needs a read-only permission.',
   'issue.runnerTimeout': 'The timeout of "{id}" must be a whole number of minutes from 1 to {max}.',
@@ -343,6 +353,13 @@ const ja: Record<Key, string> = {
     '{cli} が確認なしで行えることです。委譲した実行中に確認を求めることはありません。親のセッションより強い権限で動くこともありません。',
   'ed.permissionReadOnly': '読み取り専用のロールでは、読み取り専用のプリセットだけを選べます。',
   'ed.permissionOption': '{name} — {access}',
+  'confinement.os-sandbox': '{cli} のサンドボックスで制限します（シェルコマンドも対象です）。',
+  'confinement.tool-scope': '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。',
+  'confinement.tool-scope-write':
+    '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。そのため、作業ディレクトリにワークスペースの外を指すシンボリックリンクがあると、委譲を拒否します。',
+  'confinement.tool-scope-write-git':
+    '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。そのため、作業ディレクトリにワークスペースの外を指すシンボリックリンクがある場合や、作業ディレクトリが git リポジトリの最上位より下にある場合は、委譲を拒否します。',
+  'confinement.none': '制限はありません。{cli} は DSH ホストのユーザーが変更できるものを何でも変更できます。',
   'ed.timeout': 'タイムアウト（分）',
   'ed.timeoutHelp': 'この時間（1〜{max}分）を過ぎると実行を止めます。空欄なら{default}分です。',
   'ed.cliLimits': 'CLI のロールは、DSH のロールと次の点が異なります:',
@@ -354,7 +371,7 @@ const ja: Record<Key, string> = {
   'ed.cliLimitCancel': '途中で止めても、すでに変更されたファイルは元に戻りません。',
   'ed.readOnlyHelp.codex': 'Codex を読み取り専用のサンドボックスで実行し、ファイルを変更できないようにします。',
   'ed.readOnlyHelp.claude-code':
-    'Claude Code を書き込み系ツール（Write・Edit・NotebookEdit）なしの dontAsk モードで実行し、承認が必要な操作はすべて拒否します。',
+    'Claude Code に読み取り系のツール（Read・Glob・Grep・WebFetch・WebSearch）だけを渡し、シェルなしの dontAsk モードで実行します。承認が必要な操作はすべて拒否します。Claude Code の設定ファイルは読み込みません。',
   'ed.readOnlyHelp.agy': 'Antigravity には読み取り系のツール（ファイルの表示・検索・フォルダーの一覧）だけを渡します。',
   'ed.readOnlyHelp.opencode':
     'ファイルの読み取り・検索・一覧以外の OpenCode のツールをすべて拒否します。.env ファイルも読めません。',
@@ -362,7 +379,7 @@ const ja: Record<Key, string> = {
   'preset.read-only': '読み取り専用',
   'preset.workspace-write': 'ワークスペースへの書き込み',
   'preset.danger-full-access': 'フルアクセス（サンドボックスなし）',
-  'preset.acceptEdits': '編集を自動承認',
+  'preset.acceptEdits': 'ファイル編集のみ（シェルなし）',
   'preset.auto': '自動判定',
   'preset.bypassPermissions': '権限確認をすべて省略',
   'preset.edit-files': 'ファイル編集のみ（シェルなし）',
@@ -437,9 +454,11 @@ const ja: Record<Key, string> = {
   'issue.runnerDshModel':
     'ロール「{id}」は {cli} で動き、モデルは {cli} 側で指定するため、DSH のモデル指定は外します。',
   'issue.runnerPreset': 'ロール「{id}」は {cli} で動くため、エージェントプリセットは使えません。',
-  'issue.runnerModel': '「{id}」のモデルは1〜{max}文字で指定するか、空欄にして CLI の既定を使ってください。',
-  'issue.runnerProviderModel': '{cli} で動く「{id}」には、プロバイダーとモデルの両方が必要です。',
-  'issue.runnerEffort': '「{id}」の推論の強さは、{cli} で使えない値です。',
+  'issue.runnerModel':
+    '「{id}」のモデルは、英数字と . _ : @ / + - [ ] からなる1〜{max}文字（先頭に - は不可）で指定するか、空欄にして CLI の既定を使ってください。',
+  'issue.runnerProviderModel':
+    '{cli} で動く「{id}」には、プロバイダーとモデルの両方が必要です（英数字と . _ : @ / + - [ ] のみ使えます）。',
+  'issue.runnerEffort': '「{id}」の推論の強さは、{cli} で使えない値です（英数字と . _ : @ / + - [ ] のみ使えます）。',
   'issue.runnerPermission': '「{id}」の権限は、{cli} のプリセットにない値です。',
   'issue.runnerReadOnly': 'ロール「{id}」は読み取り専用なので、読み取り専用の権限を選んでください。',
   'issue.runnerTimeout': '「{id}」のタイムアウトは、1〜{max}の整数（分）で指定してください。',
@@ -567,6 +586,25 @@ export function accessName(t: Translator, access: AccessLevel): string {
  */
 export function readOnlyHelp(t: Translator, cli: CliId): string {
   return t(`ed.readOnlyHelp.${cli}`)
+}
+
+/**
+ * What enforces a preset, for the permission field's help.
+ * @param t - the translator.
+ * @param cli - the CLI.
+ * @param preset - a preset id.
+ * @returns the translated sentence, or '' for an unknown preset.
+ */
+export function confinementHelp(t: Translator, cli: CliId, preset: string): string {
+  const descriptor = cliDescriptor(cli)
+  const found = descriptor.permissions.find(entry => entry.id === preset)
+  if (found === undefined) return ''
+  const name = descriptor.displayName
+  if (found.confinement !== 'tool-scope') return t(`confinement.${found.confinement}`, { cli: name })
+  if (found.access !== 'workspace-write') return t('confinement.tool-scope', { cli: name })
+  const key =
+    descriptor.toolScope === 'git-worktree' ? 'confinement.tool-scope-write-git' : 'confinement.tool-scope-write'
+  return t(key, { cli: name })
 }
 
 /** Timeout limits for the editor's help text. */

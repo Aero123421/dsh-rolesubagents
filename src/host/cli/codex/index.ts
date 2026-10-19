@@ -4,7 +4,9 @@
  * The task goes to stdin (which must be closed, or Codex waits for more input);
  * the role's instructions go to `developer_instructions`, which Codex adds as a
  * developer message next to its own base prompt. `-s <preset>` is always passed
- * so a trusted project's `.codex/config.toml` can never widen the sandbox. The
+ * so a trusted project's `.codex/config.toml` can never widen the sandbox, and
+ * `sandbox_workspace_write.writable_roots=[]` drops extra writable roots a user
+ * or project config adds to `workspace-write` (verified with 0.163.0). The
  * remaining flags keep the run hermetic: no rollout files, no plugin sync, no
  * analytics, no user `notify` program, no sub-agents, and tool commands do not
  * inherit credential-shaped variables.
@@ -43,6 +45,9 @@ export const CODEX_BASE_ARGS: readonly string[] = Object.freeze([
   'notify=[]',
   '-c',
   'shell_environment_policy.ignore_default_excludes=false',
+  // `-s workspace-write` keeps a loaded config's extra writable roots; a run may write only its own workspace.
+  '-c',
+  'sandbox_workspace_write.writable_roots=[]',
 ])
 
 /** The API-key variable Codex's built-in OpenAI provider reads. */

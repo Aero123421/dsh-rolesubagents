@@ -97,7 +97,7 @@ dsh plugin --profile web add github:Aero123421/dsh-rolesubagents
    | 項目 | 内容 |
    |---|---|
    | プロバイダー | OpenCode のみ。モデルと一緒に必須です |
-   | モデル | CLI 側のモデルID。空欄なら CLI に設定済みの既定のモデルを使います（OpenCode では空欄にできません）。候補は「接続をテスト」の結果か組み込みの一覧から表示されます。CLI が受け付けるIDなら何でも指定できます |
+   | モデル | CLI 側のモデルID。空欄なら CLI に設定済みの既定のモデルを使います（OpenCode では空欄にできません）。候補は「接続をテスト」の結果か組み込みの一覧から表示されます。英数字と `. _ : @ / + - [ ]` だけからなり、`-` で始まらないIDなら、CLI が受け付けるものを何でも指定できます（プロバイダーと推論の強さも同じです） |
    | 推論の強さ | 「モデルの既定」か、CLI の推論レベルのいずれか。OpenCode ではモデルのバリアント名（自由入力） |
    | 権限 | CLI の権限プリセット（下記）のいずれか。委譲した実行は途中で承認を求めないので、ここで決めた範囲がそのまま適用されます |
    | タイムアウト（分） | この時間を過ぎると実行を止めます。1〜1440。空欄なら30分 |
@@ -115,8 +115,8 @@ dsh plugin --profile web add github:Aero123421/dsh-rolesubagents
 
 | | |
 |---|---|
-| 起動のしかた | `codex exec --json --ephemeral --skip-git-repo-check --color never --disable plugins --disable multi_agent -c analytics.enabled=false -c notify=[] -c shell_environment_policy.ignore_default_excludes=false -C <cwd> -s <プリセット> [-m <モデル>] [-c model_reasoning_effort=…] [-c developer_instructions=…] -`。タスクは stdin で渡します。セッションファイルは残りません |
-| プリセット | **読み取り専用** → `-s read-only`、**ワークスペースへの書き込み**（既定）→ `-s workspace-write`、**フルアクセス（サンドボックスなし）** → `-s danger-full-access`。`-s` は常に指定するので、プロジェクトの `.codex/config.toml` で広げることはできません |
+| 起動のしかた | `codex exec --json --ephemeral --skip-git-repo-check --color never --disable plugins --disable multi_agent -c analytics.enabled=false -c notify=[] -c shell_environment_policy.ignore_default_excludes=false -c sandbox_workspace_write.writable_roots=[] -C <cwd> -s <プリセット> [-m <モデル>] [-c model_reasoning_effort=…] [-c developer_instructions=…] -`。タスクは stdin で渡します。セッションファイルは残りません |
+| プリセット | **読み取り専用** → `-s read-only`、**ワークスペースへの書き込み**（既定）→ `-s workspace-write`、**フルアクセス（サンドボックスなし）** → `-s danger-full-access`。Codex のサンドボックスで制限するので、シェルコマンドも対象です。`-s` は常に指定し、Codex の設定で追加された書き込み可能なディレクトリも空にするので、ご自身の設定でもプロジェクトの `.codex/config.toml` でも広げることはできません |
 | 指示の渡し方 | `developer_instructions`（Codex 自身のプロンプトに並ぶ developer メッセージ） |
 | 認証 | ホストで `codex login` するか、`CODEX_API_KEY` を引き渡します（Codex の組み込みプロバイダーは素の `OPENAI_API_KEY` を読みません）。Codex の設定にあるカスタムプロバイダーを使う場合は、そのキーの変数を引き渡します。Codex のシェルツールからは、名前に `KEY`・`SECRET`・`TOKEN` を含む変数は見えません |
 | モデルと推論の強さ | モデルが空欄なら、Codex の設定（モデル、プロバイダー）がそのまま使われます。推論の強さ：none、minimal、low、medium、high、xhigh、max |
@@ -127,10 +127,10 @@ dsh plugin --profile web add github:Aero123421/dsh-rolesubagents
 | | |
 |---|---|
 | 起動のしかた | `claude -p --output-format stream-json --verbose --no-session-persistence --strict-mcp-config [--model <モデル>] [--effort <強さ>] <プリセットのフラグ> [--append-system-prompt <指示>]`。タスクは stdin で渡します。セッションは保存せず、設定ファイルの MCP サーバーも読み込みません |
-| プリセット | **読み取り専用** → `--permission-mode dontAsk --setting-sources "" --disallowedTools Write,Edit,NotebookEdit`、**編集を自動承認**（既定）→ `--permission-mode acceptEdits`、**自動判定** → `--permission-mode auto`（判定のために追加のモデル呼び出しが発生します）、**権限確認をすべて省略**（フルアクセス）→ `--permission-mode bypassPermissions` |
+| プリセット | **読み取り専用** → `--permission-mode dontAsk --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch --disallowedTools Write,Edit,NotebookEdit`、**ファイル編集のみ（シェルなし）**（既定、`acceptEdits`）→ `--permission-mode acceptEdits --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch,Edit,Write,NotebookEdit`、**自動判定**（フルアクセス）→ `--permission-mode auto`（判定のために追加のモデル呼び出しが発生し、どんなコマンドでも承認され得ます）、**権限確認をすべて省略**（フルアクセス）→ `--permission-mode bypassPermissions`。読み取り専用とファイル編集のみにはシェルがなく、設定ファイルも読み込みません（「[CLI での読み取り専用](#cli-での読み取り専用)」と「[ワークスペースの閉じ込め](#ワークスペースの閉じ込め)」を参照） |
 | 指示の渡し方 | `--append-system-prompt`（Claude Code のシステムプロンプトに追加） |
 | 環境変数 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` と `DISABLE_AUTOUPDATER=1` を設定し、`CLAUDECODE` と、継承した `CLAUDE_CODE_*` をすべて外します（名前を指定して引き渡したものは残ります） |
-| 認証 | ホストでの Claude Code 自身のサインイン。`ANTHROPIC_API_KEY` は自動では渡しません（print モードではサブスクリプションのサインインより優先されてしまうため）。キーで認証したい場合は、名前を指定して引き渡してください |
+| 認証 | ホストでの Claude Code 自身のサインイン。`ANTHROPIC_API_KEY` は自動では渡しません（print モードではサブスクリプションのサインインより優先されてしまうため）。キーで認証したい場合は、名前を指定して引き渡してください。読み取り専用とファイル編集のみは設定ファイルを読み込まないので、そこに書いた `apiKeyHelper`・モデル・`env` が効くのはフルアクセスのプリセットだけです |
 | モデルと推論の強さ | モデルの別名か完全なモデルID。空欄なら Claude Code の既定です。推論の強さ：low、medium、high、xhigh、max |
 | 接続テスト | バージョンと組み込みのモデル一覧。サインイン状態は「不明」と表示されます（副作用なしに確認する方法がないため）。サインインの問題は最初の実行で報告されます |
 
@@ -138,8 +138,8 @@ dsh plugin --profile web add github:Aero123421/dsh-rolesubagents
 
 | | |
 |---|---|
-| 起動のしかた | `agy --input-format stream-json --output-format stream-json --disable-slash-commands [--model <モデル>] [--effort <強さ>] [--agent dsh-rolesubagents-<nonce>] [--dangerously-skip-permissions] --log-file <専用の一時ディレクトリ>/agy.log`。stdin には stream-json のユーザーメッセージを1つ渡し、`AGY_CLI_DISABLE_AUTO_UPDATE=true` を設定します。実行前に `agy --output-format json models` でサインインを確認します（サインインのコード入力を待たず、約0.5秒で失敗します） |
-| プリセット | **読み取り専用** → `view_file`、`grep_search`、`list_dir`、`find_by_name` だけを持つ生成エージェント、**ファイル編集のみ（シェルなし）**（既定）→ それに `write_to_file` と `replace_file_content` を加えたもの、**フルアクセス** → agy の既定のエージェントと `--dangerously-skip-permissions` |
+| 起動のしかた | `agy --input-format stream-json --output-format stream-json --disable-slash-commands [--model <モデル>] [--effort <強さ>] [--agent dsh-rolesubagents-<nonce> [--mode accept-edits]] [--dangerously-skip-permissions] --log-file <専用の一時ディレクトリ>/agy.log`。stdin には stream-json のユーザーメッセージを1つ渡し、`AGY_CLI_DISABLE_AUTO_UPDATE=true` を設定します。実行前に `agy --output-format json models` でサインインを確認します（サインインのコード入力を待たず、約0.5秒で失敗します） |
+| プリセット | **読み取り専用** → `view_file`、`grep_search`、`list_dir`、`find_by_name` だけを持つ生成エージェント、**ファイル編集のみ（シェルなし）**（既定）→ それに `write_to_file` と `replace_file_content` を加え、`--mode accept-edits` を指定したもの（指定しないと、ヘッドレスの agy は一時ディレクトリ以外への書き込みをすべて拒否します）。実行ディレクトリの外への書き込みは拒否されたままです。**フルアクセス** → agy の既定のエージェントと `--dangerously-skip-permissions` |
 | 指示の渡し方 | 読み取り専用とファイル編集のみ：生成エージェント `~/.gemini/config/agents/dsh-rolesubagents-<nonce>.md` の本文（システムプロンプト）。このファイルは実行後に削除し、24時間より古い残りはプラグインの起動時に削除します。フルアクセス：タスクの前に `# Role instructions` / `# Task` として付けます（カスタムエージェントにすると agy の既定のツールとプロンプトが失われるため） |
 | 認証 | agy 自身の Google サインイン。または `GEMINI_API_KEY` を引き渡し、agy の `settings.json` に `"modelProvider": "gemini"` を設定します |
 | モデルと推論の強さ | 推論の強さ：low、medium、high、xhigh、max。モデルごとに使える値は一部だけで、合わない組み合わせは agy が起動時に拒否します（設定エラーとして報告） |
@@ -149,8 +149,8 @@ dsh plugin --profile web add github:Aero123421/dsh-rolesubagents
 
 | | |
 |---|---|
-| 起動のしかた | `opencode acp --cwd <cwd> --print-logs --log-level WARN` を Agent Client Protocol（stdin/stdout 上の JSON-RPC）で操作します。実行ごとの設定は `OPENCODE_CONFIG_CONTENT` で渡し、ファイルを書かずに OpenCode の設定に重ねます：モデル、プリセットを持つ一意な名前のエージェント `dsh-<nonce>`、自動更新・共有・スナップショット・タイトル生成の無効化。`OPENCODE_DB=:memory:` でセッションは保存せず、OpenCode が開くローカルサーバーにはランダムなパスワードを設定します |
-| プリセット | **読み取り専用** → read（`.env` を除く）、grep、glob、list、lsp、todowrite 以外のツールをすべて拒否、**ファイル編集のみ（シェルなし）**（既定）→ それにワークスペース内のファイル編集を加え、シェル・ワークスペース外のディレクトリ・質問は拒否、**フルアクセス** → ワークスペース外のディレクトリ・質問・プランモードの切り替え以外はすべて許可（`.env` は読めないまま） |
+| 起動のしかた | `opencode acp --cwd <cwd> --print-logs --log-level WARN` を Agent Client Protocol（stdin/stdout 上の JSON-RPC）で操作します。実行ごとの設定は `OPENCODE_CONFIG_CONTENT` で渡し、ファイルを書かずに OpenCode の設定に重ねます（フルアクセス未満では、プロジェクト自身の `opencode.json`、`.opencode` のエージェント・コマンド・ツール、`AGENTS.md` は読み込みません：`OPENCODE_DISABLE_PROJECT_CONFIG=1`）：モデル、プリセットを持つ一意な名前のエージェント `dsh-<nonce>`、自動更新・共有・スナップショット・タイトル生成の無効化。`OPENCODE_DB=:memory:` でセッションは保存せず、OpenCode が開くローカルサーバーにはランダムなパスワードを設定します |
+| プリセット | **読み取り専用** → read（`.env` を除く）、grep、glob、list、lsp、todowrite 以外のツールをすべて拒否、**ファイル編集のみ（シェルなし）**（既定）→ それにファイル編集を加え、シェル・ワークスペース外のディレクトリ・質問は拒否。OpenCode のファイルツールは実行ディレクトリを含む git リポジトリ全体に届くので、リポジトリの最上位より下のディレクトリではファイル編集のみを拒否します（「[ワークスペースの閉じ込め](#ワークスペースの閉じ込め)」を参照）。**フルアクセス** → ワークスペース外のディレクトリ・質問・プランモードの切り替え以外はすべて許可（`.env` は読めないまま） |
 | 指示の渡し方 | 専用の一時ディレクトリに置いた追加の `instructions` ファイル（`AGENTS.md` の後ろに続くシステムプロンプトの一部） |
 | 認証 | OpenCode 自身のプロバイダーへのサインイン（`opencode auth login`）。またはプロバイダーのキーの変数（例：`OPENAI_API_KEY`）を引き渡します |
 | モデルと推論の強さ | **プロバイダーとモデルの両方が必須**です。どちらかが欠けたロールは、OpenCode 自身の既定モデルに頼らず、オフに切り替わります。推論の強さはモデルのバリアント名（例：`high`）です。権限の確認には常に「拒否」で答え、拒否のあと回答なしで終わったターンは権限エラーとして報告します |
@@ -162,25 +162,43 @@ DSH のサンドボックスや承認は CLI の中には届かないので、�
 
 - 呼び出し元のエージェントのロールが読み取り専用なら、上限は**読み取り専用**です。それ以外は親のセッションのサンドボックスモードに従います：`read-only` → 読み取り専用、`danger-full-access` → フルアクセス、それ以外（Auto review などの承認モードや、サンドボックスサービスがない場合を含む）→ ワークスペースへの書き込み。
 - ロールのプリセットが上限を超える場合は、その CLI の上限レベルのプリセットで実行します（ホストのログに残ります）。プリセットを広げることはありません。
-- フルアクセス未満では、子の作業ディレクトリは親のワークスペースのルート内でなければなりません。外側の `cwd` は拒否します。
+- フルアクセス未満では、子の作業ディレクトリは親のワークスペースのルート内でなければなりません。外側の `cwd` は拒否します。親のワークスペースのルートが分からない場合（サンドボックスサービスがない場合）は、読み取り専用の実行を除き、`cwd` の指定を拒否します。`cwd` を指定しなければ、これまでどおり親のディレクトリで動きます。
 - 読み取り専用のエージェントが委譲できるのは、CLI のロールを含め、読み取り専用のロールだけです。
 - DSH は外部の子を深さの上限に数えないため、次の深さが DSH の上限を超える委譲は、プラグイン自身が拒否します。CLI 自身のサブエージェントは数えません。
+
+### ワークスペースの閉じ込め
+
+フルアクセス未満で CLI が変更できる範囲は、次のどちらかの仕組みで制限されます。
+
+| プリセット | 制限する仕組み |
+|---|---|
+| Codex の **読み取り専用**、**ワークスペースへの書き込み** | Codex の OS レベルのサンドボックス。シェルコマンドも対象で、シンボリックリンクも解決します |
+| Claude Code の **読み取り専用**、**ファイル編集のみ（シェルなし）**、Antigravity の **読み取り専用**、**ファイル編集のみ**、OpenCode の **読み取り専用**、**ファイル編集のみ** | CLI 自身のツール権限。使えるツール（シェルなし）と、ファイルツールが書き込めるパスで制限します。OS のサンドボックスはありません |
+
+後者のプリセットでワークスペースに書き込む実行の前に、プラグインは作業ディレクトリを確認し、次の場合は**委譲を拒否します**（親には短い理由が届きます）。
+
+- ディレクトリの中に、親のワークスペース（ワークスペースが分からない場合は作業ディレクトリ）の外を指すシンボリックリンクがある場合。CLI のファイルツールはリンクをたどってしまいます。確認では `.git` を飛ばし、リンクはたどりません。大きすぎて確認しきれないディレクトリ（10万項目または2秒を超えるもの）も拒否します。
+- OpenCode のみ：ディレクトリが git リポジトリの最上位より下にある場合。OpenCode のファイルツールはディレクトリだけでなくリポジトリ全体に届きます（実際に、隣のディレクトリへの書き込みが成功し、`apply_patch` ではファイルをリポジトリ内のどこへでも移動できました）。リポジトリの最上位を `cwd` にして委譲してください。
+
+Claude Code と Antigravity のファイルツールは実行ディレクトリの中にとどまります（隣のディレクトリ、リポジトリの最上位、その他の場所への書き込みが拒否されることを確認済みです）。ハードリンクは検出しません。ワークスペースにハードリンクされたファイルは、その場で変更されます。拒否されたディレクトリで意図して実行したい場合は、読み取り専用のロールか、フルアクセスの親を使ってください。
+
+また、フルアクセス未満の OpenCode は、`.opencode/plugin` または `.opencode/plugins` にコードがあるプロジェクトでの実行を拒否します。OpenCode 1.19.3 は、プロジェクトの設定を無効にしてもこのコードを起動時に実行するためです。
 
 ### CLI での読み取り専用
 
 | CLI | 読み取り専用で行うこと |
 |---|---|
 | Codex | Codex の `read-only` サンドボックスで実行します |
-| Claude Code | `Write`・`Edit`・`NotebookEdit` を外した `dontAsk` モードで実行し、承認が必要な操作はすべて拒否します。設定ソース（ユーザーとプロジェクトの設定、許可ルール、フック、`CLAUDE.md`）は読み込まないので、それらで広げることはできません。そのため、それらの設定にあるモデル・環境変数・`apiKeyHelper` も使われません。Claude Code 自身が読み取りのみと判断するシェルコマンドは実行できます。ほかのプリセットでは、許可ルールやフックを含め、設定を通常どおり読み込みます |
+| Claude Code | 読み取り系のツール（`Read`・`Glob`・`Grep`・`WebFetch`・`WebSearch`）だけを渡し、シェルなしの `dontAsk` モードで実行します。承認が必要な操作はすべて拒否します。設定ソース（ユーザー・プロジェクト・ローカルの設定、許可ルール、フック、`CLAUDE.md`）は読み込まないので、それらで広げることはできません。そのため、それらの設定にあるモデル・環境変数・`apiKeyHelper` も使われません |
 | Antigravity | 読み取り系のツール（ファイルの表示・検索・フォルダーの一覧）だけを渡します。シェルはありません |
-| OpenCode | ファイルの読み取り・検索・一覧以外のツールをすべて拒否します。`.env` ファイルも読めません |
+| OpenCode | ファイルの読み取り・検索・一覧以外のツールをすべて拒否します。`.env` ファイルも読めません。プロジェクトの OpenCode の設定と `AGENTS.md` は読み込みません。`.opencode/plugin(s)` にコードがあるプロジェクトでは実行を拒否します |
 
 ### 外部 CLI の設定
 
 プラグイン画面の「外部 CLI」には CLI ごとのカードがあり、その CLI で動くすべてのロールに共通です。
 
 - **実行ファイル**：絶対パス、またはホストの `PATH` から探すコマンド名。空欄なら `codex`、`claude`、`agy`、`opencode` を使います。
-- **引き渡す環境変数**：変数の名前だけを、カンマかスペースで区切って入力します。値は CLI の起動時に DSH のホストプロセスの環境から読み取り、保存はしません。32個まで指定できます。
+- **引き渡す環境変数**：変数の名前だけを、カンマかスペースで区切って入力します。値は CLI の起動時に DSH のホストプロセスの環境から読み取り、保存はしません。32個まで指定できます。「接続をテスト」では、ホストで実際に値が設定されている変数だけを数えます。
 - **接続をテスト**：保存済みの設定で、実行ファイルが見つかるか、そのバージョン、（CLI が手軽に返せる場合は）サインイン状態、CLI が一覧するモデル（ロールの編集画面で候補として使います）を確認します。モデルは呼び出しません。このテストが使う RPC の経路（DSH の公開 API ではありません）をホストが提供していない場合はボタンを隠し、組み込みの候補を使います。
 
 これらの設定は、実行中のセッションでも次の委譲から反映されます。
@@ -191,13 +209,14 @@ DSH のサンドボックスや承認は CLI の中には届かないので、�
 - **常に空の会話から**：親の会話のフォークや Agent Preset は使えません。
 - **元に戻さない**：キャンセルやタイムアウトの前に変更されたファイルは、そのまま残ります。
 - **ホストの再起動**：DSH が止まると実行中の CLI も止まり、その完了通知は失われます。
-- **タイムアウト**はロールごと（既定30分）。止めるときは、対応している CLI（OpenCode）にはまずキャンセルを依頼し、その後プロセスを終了させます。短い猶予のあと DSH が強制終了します。
+- **タイムアウト**はロールごと（既定30分）。止めるときは、対応している CLI（OpenCode）にはまずキャンセルを依頼し、その後プロセスを終了させます。短い猶予のあと DSH が強制終了します。実行が終わると、CLI が残したバックグラウンドのプロセスも止めます。
 - **CLI 自身の副作用**は残ります。
   - Antigravity は実行を自身の履歴に記録します（`~/.gemini` 以下に1回あたり約0.4 MB）。そのため、委譲した実行がそのディレクトリでの `agy --continue` の対象になります。また agy は常に Google の機能フラグとテレメトリのホストに接続します。
   - OpenCode はリポジトリに `<repo>/.git/opencode` を作ることがあります。また、レート制限やサーバーエラーは約1分間リトライしてから失敗します。
   - Claude Code は、DSH が root で動いていると **権限確認をすべて省略** を拒否します（`bypass-refused-as-root` 付きの設定エラーとして報告）。
-  - Antigravity の **ファイル編集のみ** は、OS の一時ディレクトリへの書き込みも許可します（agy 自身のポリシー）。それ以外のワークスペース外への書き込みは拒否され、権限エラーとして報告します。
+  - Antigravity の **ファイル編集のみ** は、OS の一時ディレクトリへの書き込みも許可します（agy 自身のポリシー）。それ以外の、実行ディレクトリの外への書き込みは拒否され、権限エラーとして報告します。
   - Codex の **ワークスペースへの書き込み** は、`/tmp` と `$TMPDIR` への書き込みも許可します。`.git`（と `.codex`、`.agents`）は読み取り専用のままなので worker はコミットできず、ネットワークも使えません。
+  - プロジェクトから読み込むもの：Codex はプロジェクトの `AGENTS.md` と、Codex で信頼したプロジェクトなら `.codex/config.toml` を読みます（上のサンドボックスのフラグが優先されます）。Claude Code の読み取り専用とファイル編集のみは、設定ファイルも `CLAUDE.md` も読み込みません。フルアクセスのプリセットでは、フックを含め、ユーザー・プロジェクト・ローカルの設定を読み込みます。OpenCode はフルアクセス未満ではご自身のグローバル設定だけを読み込み（プロジェクトの `opencode.json`、`.opencode` のファイル、`AGENTS.md` は読みません）、フルアクセスではプロジェクトの設定も読み込みます。Antigravity はプロジェクトの `AGENTS.md` を読みます。
 - 失敗した実行は、`Subagent failure (CLI: Codex; category: auth; exit code: 1)` のような決まった文言の短い診断と1行のヒントとして親に届きます。CLI 自身のエラー文はホストのログにだけ残します。
 
 ### セキュリティ

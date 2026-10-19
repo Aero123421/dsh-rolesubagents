@@ -10,7 +10,8 @@
  * case asserts that the fake actually received the model requests with that key.
  */
 
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const FAKE_SERVER = 'tests/support/fake-models/claude-code.mjs'
@@ -50,9 +51,9 @@ export async function cases(h) {
    * One case: a workspace, a fake server scripted with `steps(ws)`, an isolated env and a world
    * with `roles`. `body({ w, ws, mainRequests, baseUrlEntry })` does the checks.
    */
-  async function withClaude({ steps, roles, files = {}, world = {} }, body) {
-    const ws = h.workspace(files)
-    const home = h.workspace()
+  async function withClaude({ steps, roles, files = {}, homeFiles = {}, world = {}, outsideTmp = false }, body) {
+    const ws = h.workspace(files, { outsideTmp })
+    const home = h.workspace(typeof homeFiles === 'function' ? homeFiles(ws) : homeFiles)
     const scratch = h.workspace()
     const script = join(scratch, 'steps.json')
     const log = join(scratch, 'requests.jsonl')
@@ -87,7 +88,7 @@ export async function cases(h) {
             },
           })
           try {
-            await body({ w, ws, mainRequests, baseUrlEntry: `ANTHROPIC_BASE_URL=${fake.url}` })
+            await body({ w, ws, home, mainRequests, baseUrlEntry: `ANTHROPIC_BASE_URL=${fake.url}` })
           } finally {
             await w.close()
           }
@@ -156,8 +157,8 @@ export async function cases(h) {
       h.assert.equal(existsSync(join(x.ws, 'denied-bash.txt')), false)
       assertOnlyFake(x.mainRequests)
       h.assert.equal(x.mainRequests().length, 3, 'the scripted turns all ran')
-      const tools = (x.mainRequests()[0].body.tools ?? []).map(t => t.name)
-      h.assert.ok(!tools.includes('Write') && !tools.includes('Edit'), `no write tools offered: ${tools.join(',')}`)
+      const tools = (x.mainRequests()[0].body.tools ?? []).map(t => t.name).sort()
+      h.assert.deepEqual(tools, ['Glob', 'Grep', 'Read', 'WebFetch', 'WebSearch'], 'only read tools, no Bash')
     })
   })
 
@@ -172,6 +173,97 @@ export async function cases(h) {
       h.assert.ok(notice.includes('WROTE_IT'), notice)
       h.assert.equal(readFileSync(join(x.ws, 'out.txt'), 'utf8'), 'written\n')
       assertOnlyFake(x.mainRequests)
+    })
+  })
+
+  h.case(
+    'acceptEdits: no shell, no settings (user allow rules, extra directories, hooks), writes stay in cwd',
+    async () => {
+      const outside = h.workspace({}, { outsideTmp: true })
+      const marker = name => join(outside, name)
+      const hooks = name => ({
+        PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: `touch ${marker(name)}` }] }],
+        SessionStart: [{ hooks: [{ type: 'command', command: `touch ${marker(name)}-start` }] }],
+      })
+      const userSettings = {
+        permissions: { allow: ['Bash', 'Write', 'Edit'], additionalDirectories: [outside] },
+        hooks: hooks('user-hook'),
+      }
+      const files = {
+        'sub/a.txt': 'a\n',
+        'sibling/b.txt': 'b\n',
+        '.claude/settings.json': JSON.stringify({ permissions: { allow: ['Bash'] }, hooks: hooks('project-hook') }),
+        'sub/.claude/settings.json': JSON.stringify({ hooks: hooks('cwd-hook') }),
+      }
+      const steps = ws => [
+        { tool_use: { name: 'Write', input: { file_path: join(outside, 'extra-dir.txt'), content: 'x\n' } } },
+        { tool_use: { name: 'Write', input: { file_path: join(ws, 'sibling', 'from-sub.txt'), content: 'x\n' } } },
+        { tool_use: { name: 'Bash', input: { command: `touch ${marker('bash')}` } } },
+        { tool_use: { name: 'Write', input: { file_path: join(ws, 'sub', 'inside.txt'), content: 'in\n' } } },
+        { text: 'EDITS_DONE' },
+        // Control run (default setting sources): the project hook runs.
+        { tool_use: { name: 'Write', input: { file_path: join(ws, 'sub', 'control.txt'), content: 'c\n' } } },
+        { text: 'CONTROL_DONE' },
+      ]
+      const homeFiles = { '.claude/settings.json': JSON.stringify(userSettings) }
+      await withClaude({ steps, roles: [coder()], files, homeFiles, outsideTmp: true }, async x => {
+        execFileSync('git', ['init', '-q', x.ws])
+        const { childId } = await x.w.delegate({ role: 'coder', cwd: join(x.ws, 'sub'), prompt: 'Edit files.' })
+        const notice = await x.w.notice(childId, 90_000)
+        h.assert.ok(notice.includes('EDITS_DONE'), notice)
+        h.assert.equal(readFileSync(join(x.ws, 'sub', 'inside.txt'), 'utf8'), 'in\n')
+        h.assert.equal(existsSync(join(outside, 'extra-dir.txt')), false, "the user's additionalDirectories applied")
+        h.assert.equal(existsSync(join(x.ws, 'sibling', 'from-sub.txt')), false, 'a sibling of cwd was written')
+        for (const name of ['bash', 'user-hook', 'user-hook-start', 'project-hook', 'project-hook-start', 'cwd-hook']) {
+          h.assert.equal(existsSync(marker(name)), false, `${name} ran`)
+        }
+        const tools = (x.mainRequests()[0].body.tools ?? []).map(t => t.name).sort()
+        h.assert.deepEqual(tools, ['Edit', 'Glob', 'Grep', 'NotebookEdit', 'Read', 'WebFetch', 'WebSearch', 'Write'])
+        assertOnlyFake(x.mainRequests)
+        // Control: the same preset with Claude Code's default setting sources runs the hooks.
+        const { claudeCodeAdapter } = await import('../../src/host/cli/claude-code/index.ts')
+        const adapter = {
+          ...claudeCodeAdapter,
+          plan(input, nonce) {
+            const plan = claudeCodeAdapter.plan(input, nonce)
+            const at = plan.argv.indexOf('--setting-sources')
+            return { ...plan, argv: plan.argv.filter((_, i) => i !== at && i !== at + 1) }
+          },
+        }
+        const run = await h.engine.startExternalRun(
+          {
+            adapter,
+            input: {
+              runner: { cli: 'claude-code', permission: 'acceptEdits' },
+              preset: 'acceptEdits',
+              access: 'workspace-write',
+              instructions: '',
+              task: 'Control.',
+              cwd: join(x.ws, 'sub'),
+            },
+            settings: { envPassthrough: ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_MAX_RETRIES'] },
+            timeoutMs: 90_000,
+            signal: new AbortController().signal,
+          },
+          h.engineDeps(x.w),
+        )
+        h.assert.equal((await run.result).stopReason, 'completed')
+        await run.dispose()
+        const ran = readdirSync(outside).sort()
+        console.log(`    control run (default setting sources) ran: ${ran.join(', ')}`)
+        h.assert.ok(ran.includes('cwd-hook') && ran.includes('user-hook'), 'control: project and user hooks run')
+      })
+    },
+  )
+
+  h.case('acceptEdits is refused when the directory links outside the workspace', async () => {
+    await withClaude({ steps: () => [{ text: 'NEVER' }], roles: [coder()] }, async x => {
+      symlinkSync(h.workspace(), join(x.ws, 'escape'))
+      await h.assert.rejects(
+        x.w.delegate({ role: 'coder', prompt: 'Edit.' }),
+        /Claude Code cannot edit files in .*: the directory contains a symbolic link that leads outside the workspace/,
+      )
+      h.assert.equal(x.mainRequests().length, 0, 'no model request was made')
     })
   })
 

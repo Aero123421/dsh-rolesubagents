@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Issue } from '../src/client/draft.ts'
 import {
   accessName,
+  confinementHelp,
   DICTIONARIES,
   issueText,
   languageOf,
@@ -103,15 +104,17 @@ describe('issueText', () => {
   it('names the CLI and the limits of external-CLI problems', () => {
     const t = translator('en')
     expect(issueText({ code: 'invalid-runner-model', roleId: 'w', cli: 'opencode' }, t)).toBe(
-      'Role "w" on OpenCode needs both a provider and a model.',
+      'Role "w" on OpenCode needs both a provider and a model, each made of letters, digits or . _ : @ / + - [ ].',
     )
-    expect(issueText({ code: 'invalid-runner-model', roleId: 'w', cli: 'codex' }, t)).toContain('1–128 characters')
+    expect(issueText({ code: 'invalid-runner-model', roleId: 'w', cli: 'codex' }, t)).toContain(
+      '1–128 letters, digits or . _ : @ / + - [ ] (not starting with -)',
+    )
     expect(issueText({ code: 'invalid-runner-timeout', roleId: 'w', cli: 'codex' }, t)).toContain('1 to 1440')
     expect(issueText({ code: 'runner-context-forced', roleId: 'w', cli: 'claude-code' }, t)).toContain('Claude Code')
     expect(issueText({ code: 'invalid-cli-settings', field: 'executable', cli: 'agy' }, t)).toContain('Antigravity')
     expect(issueText({ code: 'invalid-cli-settings', field: 'env', cli: 'codex' }, t)).toContain('at most 32 names')
     expect(issueText({ code: 'invalid-runner-model', roleId: 'w', cli: 'opencode' }, translator('ja'))).toBe(
-      'OpenCode で動く「w」には、プロバイダーとモデルの両方が必要です。',
+      'OpenCode で動く「w」には、プロバイダーとモデルの両方が必要です（英数字と . _ : @ / + - [ ] のみ使えます）。',
     )
   })
 
@@ -141,6 +144,7 @@ describe('dictionaries', () => {
         expect(readOnlyHelp(t, id).length).toBeGreaterThan(20)
         for (const preset of CLI_DESCRIPTORS[id].permissions) {
           expect(presetName(t, preset.id)).not.toBe(preset.id)
+          expect(confinementHelp(t, id, preset.id)).toContain(CLI_DESCRIPTORS[id].displayName)
           expect(accessName(t, preset.access).length).toBeGreaterThan(0)
         }
       }
@@ -149,8 +153,8 @@ describe('dictionaries', () => {
     const ja = translator('ja')
     expect(presetName(en, 'workspace-write')).toBe('Workspace write')
     expect(presetName(ja, 'workspace-write')).toBe('ワークスペースへの書き込み')
-    expect(presetName(en, 'acceptEdits')).toBe('Accept edits')
-    expect(presetName(ja, 'acceptEdits')).toBe('編集を自動承認')
+    expect(presetName(en, 'acceptEdits')).toBe('Edit files (no shell)')
+    expect(presetName(ja, 'acceptEdits')).toBe('ファイル編集のみ（シェルなし）')
     expect(presetName(ja, 'auto')).toBe('自動判定')
     expect(presetName(ja, 'bypassPermissions')).toBe('権限確認をすべて省略')
     expect(presetName(en, 'edit-files')).toBe('Edit files (no shell)')
@@ -160,5 +164,20 @@ describe('dictionaries', () => {
     expect(presetName(ja, 'danger-full-access')).toBe('フルアクセス（サンドボックスなし）')
     expect(presetName(en, 'custom-mode')).toBe('custom-mode')
     expect(readOnlyHelp(en, 'claude-code')).toContain('dontAsk')
+    expect(confinementHelp(en, 'codex', 'workspace-write')).toBe(
+      "Enforced by Codex's sandbox, which also covers its shell commands.",
+    )
+    expect(confinementHelp(en, 'opencode', 'edit-files')).toMatch(
+      /symbolic link .* below the top-level of a git repository/,
+    )
+    expect(confinementHelp(en, 'agy', 'edit-files')).not.toMatch(/git repository/)
+    expect(confinementHelp(ja, 'claude-code', 'acceptEdits')).toContain('シンボリックリンク')
+    expect(confinementHelp(en, 'claude-code', 'read-only')).toBe(
+      "Enforced by Claude Code's own tool permissions (no operating-system sandbox).",
+    )
+    expect(confinementHelp(en, 'claude-code', 'auto')).toBe(
+      'No limits: Claude Code may change anything the DSH host user can.',
+    )
+    expect(confinementHelp(en, 'codex', 'nope')).toBe('')
   })
 })

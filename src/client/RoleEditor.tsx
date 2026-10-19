@@ -13,7 +13,15 @@ import {
 import { useController, useT } from './context.tsx'
 import { cliSuggestions, type PageState } from './controller.ts'
 import { childText, type DraftRow, ID_MAX_LENGTH, type IssueField, parentLine, permissionAllowed } from './draft.ts'
-import { accessName, issueText, presetName, readOnlyHelp, TIMEOUT_TEXT, type Translator } from './i18n.ts'
+import {
+  accessName,
+  confinementHelp,
+  issueText,
+  presetName,
+  readOnlyHelp,
+  TIMEOUT_TEXT,
+  type Translator,
+} from './i18n.ts'
 import { Button, Field, TextInput } from './ui.tsx'
 
 interface EditorProps {
@@ -296,7 +304,13 @@ function RunnerFields(props: {
       <div className="dshrs-model-grid">
         <Field
           label={t('ed.permission')}
-          help={`${t('ed.permissionHelp', { cli })}${role.readOnly ? ` ${t('ed.permissionReadOnly')}` : ''}`}
+          help={[
+            t('ed.permissionHelp', { cli }),
+            confinementHelp(t, runner.cli, runner.permission),
+            role.readOnly ? t('ed.permissionReadOnly') : '',
+          ]
+            .filter(text => text !== '')
+            .join(' ')}
           error={errorOf('permission')}
         >
           {a11y => (

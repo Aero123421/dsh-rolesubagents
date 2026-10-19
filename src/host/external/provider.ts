@@ -90,6 +90,7 @@ export async function startExternalDelegation(delegation: ExternalDelegation): P
           settings,
           timeoutMs: runnerTimeoutMs(role.runner),
           signal: request.signal,
+          ...(ceiling.workspaceRoot === undefined ? {} : { workspaceRoot: ceiling.workspaceRoot }),
         },
         delegation.engine,
       )
@@ -109,6 +110,17 @@ export async function startExternalDelegation(delegation: ExternalDelegation): P
       delivery: 'parent',
     })
   } finally {
-    unregister()
+    // The disposer may be asynchronous (Cordis effects); a failure must not mask the start's outcome.
+    try {
+      void Promise.resolve(unregister()).catch(error => logUnregisterFailure(ctx, name, error))
+    } catch (error) {
+      logUnregisterFailure(ctx, name, error)
+    }
   }
+}
+
+function logUnregisterFailure(ctx: HostContext, name: string, error: unknown): void {
+  ctx.logger.warn(
+    `rolesubagents: could not remove provider ${name}: ${error instanceof Error ? error.message : String(error)}`,
+  )
 }

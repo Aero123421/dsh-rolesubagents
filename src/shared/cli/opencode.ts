@@ -15,9 +15,9 @@ export const OPENCODE: CliDescriptor = Object.freeze({
   efforts: Object.freeze([]),
   effortFreeText: true,
   permissions: Object.freeze([
-    Object.freeze({ id: 'read-only', access: 'read-only' }),
-    Object.freeze({ id: 'edit-files', access: 'workspace-write' }),
-    Object.freeze({ id: 'full-access', access: 'full-access' }),
+    Object.freeze({ id: 'read-only', access: 'read-only', confinement: 'tool-scope' }),
+    Object.freeze({ id: 'edit-files', access: 'workspace-write', confinement: 'tool-scope' }),
+    Object.freeze({ id: 'full-access', access: 'full-access', confinement: 'none' }),
   ]),
   defaultPermission: 'edit-files',
   presetForAccess: Object.freeze({
@@ -26,4 +26,7 @@ export const OPENCODE: CliDescriptor = Object.freeze({
     'full-access': 'full-access',
   }),
   instructionsChannel: 'system',
+  toolScope: 'git-worktree',
+  // Plugins here run at start even with OPENCODE_DISABLE_PROJECT_CONFIG=1 and --pure (verified with 1.19.3).
+  startupCodeDirs: Object.freeze(['.opencode/plugin', '.opencode/plugins']),
 } satisfies CliDescriptor)

@@ -194,6 +194,70 @@ describe('delegate: external roles', () => {
     await full.call({ role: 'coder', cwd: join(full.root, 'elsewhere') })
   })
 
+  it.each([
+    ['no sandboxPolicy service', undefined],
+    ['a throwing sandboxPolicy service', 'throws'],
+    ['a policy without a workspace root', 'no-root'],
+  ] as const)(
+    'refuses an explicit cwd below full access when the workspace root is unknown (%s)',
+    async (_name, kind) => {
+      const { world, call, ws, adapter, parent } = boot({ mode: 'workspace-write' })
+      if (kind === undefined) delete world.services.sandboxPolicy
+      else if (kind === 'throws')
+        world.services.sandboxPolicy = {
+          resolve: () => {
+            throw new Error('boom')
+          },
+        }
+      else world.services.sandboxPolicy = { resolve: () => ({ mode: 'workspace-write' }) }
+      await expect(call({ role: 'coder', cwd: join(ws, 'sub') })).rejects.toThrow(
+        /a cwd cannot be given here: the parent's workspace is unknown/,
+      )
+      expect(world.subagents.registerProvider).not.toHaveBeenCalled()
+      // Without an explicit cwd, DSH's default (the parent's directory) is kept.
+      await registeredTool(parent).execute({ description: 'd', prompt: 'p', role: 'coder' }, execContext(parent))
+      expect((adapter as ReturnType<typeof testAdapter>).inputs.at(-1)).toMatchObject({ access: 'workspace-write' })
+      // A read-only run may still name a directory.
+      await call({ role: 'scout', cwd: join(ws, 'sub') })
+      expect((adapter as ReturnType<typeof testAdapter>).inputs.at(-1)).toMatchObject({
+        access: 'read-only',
+        cwd: join(ws, 'sub'),
+      })
+    },
+  )
+
+  it('keeps an explicit cwd at full access when the policy names no workspace root', async () => {
+    const { world, call, root, adapter } = boot()
+    world.services.sandboxPolicy = { resolve: () => ({ mode: 'danger-full-access' }) }
+    await call({ role: 'coder', cwd: join(root, 'elsewhere') })
+    expect((adapter as ReturnType<typeof testAdapter>).inputs.at(-1)).toMatchObject({ access: 'full-access' })
+  })
+
+  it('handles an asynchronous or failing provider disposer without failing the delegation', async () => {
+    const cases: [() => unknown, RegExp | undefined][] = [
+      [() => Promise.reject(new Error('async removal failed')), /could not remove provider .*: async removal failed/],
+      [
+        () => {
+          throw new Error('sync removal failed')
+        },
+        /could not remove provider .*: sync removal failed/,
+      ],
+      [() => Promise.resolve(), undefined],
+    ]
+    for (const [disposer, warning] of cases) {
+      const { world, call } = boot()
+      world.subagents.registerProvider.mockImplementation(provider => {
+        world.externalProviders.set(provider.name, provider)
+        return disposer
+      })
+      await expect(call({ role: 'coder' })).resolves.toBeDefined()
+      await world.settle()
+      const warned = world.logger.warn.mock.calls.map(([text]) => text).filter(t => /could not remove provider/.test(t))
+      if (warning === undefined) expect(warned).toEqual([])
+      else expect(warned).toEqual([expect.stringMatching(warning)])
+    }
+  })
+
   it('reports failing adapters, missing CLIs and a missing subprocess service safely', async () => {
     const failing: CliAdapter = {
       descriptor: CODEX,
@@ -235,6 +299,25 @@ describe('delegate: external roles', () => {
     if (run === undefined) throw new Error('no run')
     world.teardown()
     expect((await run.result).stopReason).toBe('aborted')
+  })
+
+  it('never spawns a run that was still starting when the plugin unloaded', async () => {
+    const { world, call, subprocess } = boot({ onRun: () => {} })
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const original = subprocess.resolveExecutable.bind(subprocess)
+    subprocess.resolveExecutable = async (command, env, sig) => {
+      await gate
+      return original(command, env, sig)
+    }
+    const pending = call({ role: 'coder' })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    world.teardown()
+    release()
+    await expect(pending).rejects.toThrow(/unloaded/)
+    expect(subprocess.processes).toHaveLength(0)
   })
 
   it('aborts a run when DSH aborts its signal (interrupt_agent)', async () => {
@@ -352,6 +435,15 @@ describe('probe', () => {
     expect(probe.mock.calls[0]?.[0]).toBe('/opt/codex')
     expect(probe.mock.calls[0]?.[3]).toEqual(settings.codex)
     expect(subprocess.collected[0]).toMatchObject({ argv: ['/opt/codex', '--version'], cwd: '/w', env: { KEY: 'v' } })
+    // The probe sees only forwarded names that are actually set in the Host environment.
+    probe.mockClear()
+    const listed = { codex: { envPassthrough: ['CODEX_API_KEY', 'EMPTY', 'KEY'] } }
+    await probeCli(
+      { cli: 'codex' },
+      { subprocess, adapters: () => adapter, settings: listed, hostEnv: { KEY: 'v', EMPTY: '' }, cwd: '/w' },
+      signal,
+    )
+    expect(probe.mock.calls[0]?.[3]).toEqual({ envPassthrough: ['KEY'] })
     const failing: CliAdapter = {
       ...testAdapter(),
       probe: async () => {
@@ -366,6 +458,21 @@ describe('probe', () => {
       path: '/bin/codex',
       message: 'probe-failed',
     })
+  })
+
+  it('Codex: a listed but unset CODEX_API_KEY does not count as signed in', async () => {
+    const subprocess = fakeSubprocess({
+      onCollect: spec => (spec.argv.includes('login') ? { code: 1, stderr: 'Not logged in\n' } : { code: 1 }),
+    })
+    const deps = (hostEnv: Record<string, string>) => ({
+      subprocess,
+      adapters: () => CLI_ADAPTERS.codex,
+      settings: { codex: { envPassthrough: ['CODEX_API_KEY'] } },
+      hostEnv,
+      cwd: '/w',
+    })
+    expect((await probeCli({ cli: 'codex' }, deps({}), signal)).auth).toBe('missing')
+    expect((await probeCli({ cli: 'codex' }, deps({ CODEX_API_KEY: 'sk-x' }), signal)).auth).toBe('ok')
   })
 
   function fakeTypert() {

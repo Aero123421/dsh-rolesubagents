@@ -8,9 +8,9 @@
  * side effect: executable lookup, files, spawning, stdio plumbing, line
  * framing, timeouts, cancellation and settlement.
  *
- * Placeholders: argv elements that START with `${RUN_DIR}`, `${HOME}` or
- * `${SECRET}`, every occurrence of them in env values, and file keys are
- * substituted by the engine. File contents, the task text and every other argv
+ * Placeholders: argv elements and `envJson` string leaves that START with
+ * `${RUN_DIR}`, `${HOME}` or `${SECRET}`, every occurrence of them in env
+ * values, and file keys are substituted by the engine. File contents, the task text and every other argv
  * element are passed verbatim, so user text can never be rewritten by a
  * placeholder. Adapters must not put free user text into env values.
  * - `${RUN_DIR}`: a private (0700) temp directory created per run and removed after it.
@@ -53,6 +53,13 @@ export interface RunPlan {
   readonly argv: readonly string[]
   /** Environment overlay; `undefined` removes a variable (unless the user forwards it by name). */
   readonly env: Readonly<Record<string, string | undefined>>
+  /**
+   * Variables whose value is JSON built by the engine (e.g. OpenCode's `OPENCODE_CONFIG_CONTENT`): string
+   * leaves that START with a placeholder are substituted (like argv elements), then the value is serialized
+   * with `$`, `{` and `}` inside strings written as `\u` escapes, so no data can form a placeholder or a
+   * config-variable reference such as OpenCode's `{env:…}` / `{file:…}`. A key must not also be in `env`.
+   */
+  readonly envJson?: Readonly<Record<string, unknown>>
   /**
    * Inherited variables starting with one of these prefixes are removed (e.g. Claude Code's
    * `CLAUDE_CODE_`), unless the user forwards them by name. Needed because `plan` is pure and

@@ -12,20 +12,13 @@
 import assert from 'node:assert/strict'
 import { createRequire, registerHooks } from 'node:module'
 import { resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { hostResolveHook } from './host-resolve-hook.mjs'
 
 const checkout = resolve(process.env.DSH_CHECKOUT || '/usr/lib/node_modules/@deepseek-ai/dsh')
 const hostRequire = createRequire(resolve(checkout, 'package.json'))
 // Resolve host peers from one installation, as DSH does when loading a plugin.
 // This also avoids accidentally testing different dev-dependency service classes.
-const resolutionHook = registerHooks({
-  resolve(specifier, context, next) {
-    if (specifier.startsWith('@deepseek-ai/')) {
-      return { url: pathToFileURL(hostRequire.resolve(specifier)).href, shortCircuit: true }
-    }
-    return next(specifier, context)
-  },
-})
+const resolutionHook = registerHooks(hostResolveHook(hostRequire))
 
 const { Context } = await import('@deepseek-ai/cordis')
 const { default: ToolRuntime } = await import('@deepseek-ai/dsh-tools')

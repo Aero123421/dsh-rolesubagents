@@ -85,7 +85,7 @@ describe('CLI descriptors', () => {
     expect(presets('claude-code')).toEqual([
       'read-only:read-only',
       'acceptEdits:workspace-write',
-      'auto:workspace-write',
+      'auto:full-access',
       'bypassPermissions:full-access',
     ])
     expect(presets('agy')).toEqual(['read-only:read-only', 'edit-files:workspace-write', 'full-access:full-access'])
@@ -175,12 +175,50 @@ describe('normalizeSettings: runners', () => {
     ['a too long model', { model: 'x'.repeat(129) }],
     ['a non-string model', { model: 42 }],
     ['a provider on a CLI without providers', { model: 'opus', provider: 'anthropic' }],
+    ['a model with an OpenCode file reference', { model: '{file:~/.ssh/id_rsa}' }],
+    ['a model with an env reference', { model: '{env:HOME}' }],
+    ['a model with whitespace inside', { model: 'claude opus' }],
+    ['a model with a dollar sign', { model: '$HOME' }],
+    ['a model with quotes', { model: 'a"b' }],
+    ['a model with a backslash', { model: 'a\\b' }],
+    ['a model that looks like an option', { model: '--dangerously-skip-permissions' }],
   ])('clears %s', (_label, fields) => {
     const { role, problems } = one({ runner: { cli: 'claude-code', permission: 'acceptEdits', ...fields } })
     expect(codes(problems)).toEqual(['invalid-runner-model'])
     expect(role?.runner?.model).toBeUndefined()
     expect(role?.runner?.provider).toBeUndefined()
     expect(role?.enabled).toBe(true)
+  })
+
+  it.each([
+    'sonnet[1m]',
+    'claude-opus-5-5',
+    'gpt-5.5',
+    'us.anthropic.claude-sonnet-5:0',
+    'qwen2.5:7b-instruct-q4_K_M',
+    'org@v1+beta',
+  ])('keeps the model id %s', model => {
+    const { role, problems } = one({ runner: { cli: 'claude-code', permission: 'acceptEdits', model } })
+    expect(problems).toEqual([])
+    expect(role?.runner?.model).toBe(model)
+  })
+
+  it('refuses OpenCode config substitutions in provider, model and effort', () => {
+    const base = { cli: 'opencode', provider: 'p', model: 'm', permission: 'edit-files' }
+    for (const field of ['provider', 'model'] as const) {
+      const { role, problems } = one({ runner: { ...base, [field]: '{file:~/.ssh/id_rsa}' } })
+      expect(codes(problems)).toEqual(['invalid-runner-model'])
+      expect(role?.enabled).toBe(false)
+      expect(role?.runner?.model).toBeUndefined()
+      expect(role?.runner?.provider).toBeUndefined()
+    }
+    for (const effort of ['{env:OPENAI_API_KEY}', 'high max', '-x']) {
+      const { role, problems } = one({ runner: { ...base, effort } })
+      expect(codes(problems)).toEqual(['invalid-runner-effort'])
+      expect(role?.runner?.effort).toBeUndefined()
+      expect(role?.enabled).toBe(true)
+    }
+    expectIdempotent({ roles: [GENERAL, FORK, custom({ runner: { ...base, model: '{file:/etc/passwd}' } })] })
   })
 
   it('requires provider and model together for OpenCode and switches the role off otherwise', () => {

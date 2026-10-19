@@ -20,7 +20,7 @@ import {
   selectableRoles,
 } from '../shared/roles.ts'
 import type { EngineDeps } from './external/engine.ts'
-import { accessCeiling, assertDepth, effectivePermission } from './external/policy.ts'
+import { accessCeiling, assertDepth, assertExplicitCwdCheckable, effectivePermission } from './external/policy.ts'
 import { startExternalDelegation } from './external/provider.ts'
 import type { AdapterLookup } from './external/registry.ts'
 import type { AgentPort, ChildAgentOptions, HostContext } from './ports.ts'
@@ -263,6 +263,7 @@ async function delegateExternal(
       `rolesubagents: role "${role.id}" runs with ${descriptor.displayName}'s ${permission.preset} preset (parent allows ${ceiling.access})`,
     )
   }
+  assertExplicitCwdCheckable(args.cwd, permission.access, ceiling.workspaceRoot)
   const started = await startExternalDelegation({
     ctx: deps.ctx,
     role,

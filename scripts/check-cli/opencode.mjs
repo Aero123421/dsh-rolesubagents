@@ -12,7 +12,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const { opencodeAdapter, OPENCODE_CANCEL_GRACE_MS } = await import('../../src/host/cli/opencode/index.ts')
@@ -20,7 +20,7 @@ const { opencodeAdapter, OPENCODE_CANCEL_GRACE_MS } = await import('../../src/ho
 const FAKE_SERVER = 'tests/support/fake-models/opencode.mjs'
 
 /** An isolated opencode user whose global config defines the fake provider. */
-function isolatedUser(h, baseURL) {
+function isolatedUser(h, baseURL, extraModels = {}) {
   const home = h.workspace()
   const config = join(home, '.config')
   mkdirSync(join(config, 'opencode/node_modules'), { recursive: true })
@@ -39,6 +39,7 @@ function isolatedUser(h, baseURL) {
           models: {
             'fake-model': { name: 'Fake Model', tool_call: true },
             'fake-reasoner': { name: 'Fake Reasoner', tool_call: true, reasoning: true },
+            ...extraModels,
           },
         },
       },
@@ -53,15 +54,18 @@ function isolatedUser(h, baseURL) {
     XDG_CACHE_HOME: join(home, '.cache'),
     XDG_STATE_HOME: join(home, '.local/state'),
     OPENCODE_DISABLE_MODELS_FETCH: '1',
+    // DSH removes credential-shaped names such as GIT_CONFIG_KEY_<n> from children; an inherited
+    // GIT_CONFIG_COUNT would then make every git command fail and hide the worktree from OpenCode.
+    GIT_CONFIG_COUNT: '0',
   }
 }
 
 /** Start the fake server and an isolated user; returns helpers around its request log. */
-async function setup(h) {
+async function setup(h, { extraModels } = {}) {
   const dir = h.workspace()
   const log = join(dir, 'requests.jsonl')
   const fake = await h.server(FAKE_SERVER, ['--port', '0', '--log', log])
-  const env = isolatedUser(h, `${fake.url}/v1`)
+  const env = isolatedUser(h, `${fake.url}/v1`, extraModels)
   const requests = () =>
     existsSync(log)
       ? readFileSync(log, 'utf8')
@@ -179,6 +183,91 @@ export async function cases(h) {
       await w.close()
     }
   })
+
+  h.case(
+    'edit-files below a git top-level is refused (OpenCode would reach the whole repo); read-only works',
+    async () => {
+      const { env, requests } = await setup(h)
+      const ws = gitWorkspace(h, { 'sub/a.txt': 'a\n', 'sibling/b.txt': 'b\n' })
+      const w = await h.world({
+        cwd: ws,
+        env,
+        roles: [
+          role(h, 'coder', { permission: 'edit-files' }),
+          role(h, 'reader', { permission: 'read-only' }, { readOnly: true }),
+        ],
+      })
+      try {
+        await h.assert.rejects(
+          w.delegate({ role: 'coder', cwd: join(ws, 'sub'), prompt: 'x' }),
+          /OpenCode cannot edit files in .*: it is below the top-level of a git repository/,
+        )
+        h.assert.equal(requests().length, 0)
+        const { childId } = await w.delegate({ role: 'reader', cwd: join(ws, 'sub'), prompt: 'hi' })
+        h.assert.match(await w.notice(childId, 120_000), /FAKE_FINAL/)
+      } finally {
+        await w.close()
+      }
+    },
+  )
+
+  h.case('edit-files is refused when the directory links outside the workspace', async () => {
+    const { env, requests } = await setup(h)
+    const ws = gitWorkspace(h)
+    symlinkSync(h.workspace(), join(ws, 'escape'))
+    const w = await h.world({ cwd: ws, env, roles: [role(h, 'coder', { permission: 'edit-files' })] })
+    try {
+      await h.assert.rejects(
+        w.delegate({ role: 'coder', prompt: 'x' }),
+        /OpenCode cannot edit files in .*: the directory contains a symbolic link that leads outside the workspace/,
+      )
+      h.assert.equal(requests().length, 0)
+    } finally {
+      await w.close()
+    }
+  })
+
+  h.case(
+    'below full access the project config does not run (MCP server, tool files); project plugins refuse the run',
+    async () => {
+      const { env, requests } = await setup(h)
+      const ws = gitWorkspace(h, { 'AGENTS.md': 'PROJECT_AGENTS_MARKER\n' })
+      const marks = h.workspace()
+      writeFileSync(
+        join(ws, 'opencode.json'),
+        JSON.stringify({ mcp: { evil: { type: 'local', command: ['sh', '-c', `touch ${marks}/mcp; sleep 1`] } } }),
+      )
+      mkdirSync(join(ws, '.opencode/tool'), { recursive: true })
+      writeFileSync(
+        join(ws, '.opencode/tool/evil.js'),
+        `import fs from 'node:fs'\nfs.writeFileSync(${JSON.stringify(join(marks, 'tool'))}, 'x')\nexport default { description: 'x', args: {}, async execute() { return 'x' } }\n`,
+      )
+      const w = await h.world({
+        cwd: ws,
+        env,
+        roles: [role(h, 'reader', { permission: 'read-only' }, { readOnly: true })],
+      })
+      try {
+        const { childId } = await w.delegate({ role: 'reader', prompt: 'hi' })
+        h.assert.match(await w.notice(childId, 120_000), /FAKE_FINAL/)
+        h.assert.equal(existsSync(join(marks, 'mcp')), false, 'the project MCP server started')
+        h.assert.equal(existsSync(join(marks, 'tool')), false, 'a project tool file was imported')
+        h.assert.equal(
+          systemText(requests()[0]).includes('PROJECT_AGENTS_MARKER'),
+          false,
+          'project AGENTS.md is skipped',
+        )
+        mkdirSync(join(ws, '.opencode/plugin'), { recursive: true })
+        writeFileSync(join(ws, '.opencode/plugin/evil.js'), 'export const Evil = async () => ({})\n')
+        await h.assert.rejects(
+          w.delegate({ role: 'reader', prompt: 'hi' }),
+          /OpenCode cannot run in .*: the project has \.opencode\/plugin or \.opencode\/plugins code/,
+        )
+      } finally {
+        await w.close()
+      }
+    },
+  )
 
   h.case('full-access under a full-access parent runs shell commands', async () => {
     const { env } = await setup(h)

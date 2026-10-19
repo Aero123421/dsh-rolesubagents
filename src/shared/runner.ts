@@ -42,6 +42,15 @@ export const MAX_RUNNER_NAME_LENGTH = 128
 export const MAX_EXECUTABLE_LENGTH = 4_096
 export const MAX_ENV_PASSTHROUGH = 32
 export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+/**
+ * Allowed runner `model`, `provider` and `effort` values: ids such as `gpt-5.5`, `sonnet[1m]`,
+ * `deepseek/v4-pro`, `qwen2.5:7b-q4_K_M`. No whitespace, braces, `$`, quotes or backslashes (OpenCode
+ * expands `{env:…}` / `{file:…}` inside its config, so such text could read Host files or variables), and
+ * no leading `-` (never an option).
+ */
+export const RUNNER_NAME_PATTERN = /^(?!-)[A-Za-z0-9._:@/+[\]-]{1,128}$/
+/** The characters {@link RUNNER_NAME_PATTERN} allows besides letters and digits, for messages. */
+export const RUNNER_NAME_SYMBOLS = '. _ : @ / + - [ ]'
 
 /** Problem codes this module reports (a subset of `SettingsProblem['code']`). */
 export type RunnerProblemCode =
@@ -68,7 +77,7 @@ function unset(value: unknown): boolean {
 function name(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
-  return trimmed.length === 0 || trimmed.length > MAX_RUNNER_NAME_LENGTH ? undefined : trimmed
+  return trimmed.length <= MAX_RUNNER_NAME_LENGTH && RUNNER_NAME_PATTERN.test(trimmed) ? trimmed : undefined
 }
 
 /** The role a runner belongs to, as far as runner rules care. */
@@ -111,8 +120,8 @@ function normalizeModel(
     report(
       'invalid-runner-model',
       descriptor.needsProvider
-        ? `role "${owner.id}" on ${descriptor.displayName} needs both a provider and a model (each 1-${MAX_RUNNER_NAME_LENGTH} characters)`
-        : `model of role "${owner.id}" must be 1-${MAX_RUNNER_NAME_LENGTH} characters; ${descriptor.displayName} has no provider field. The CLI's default model is used instead`,
+        ? `role "${owner.id}" on ${descriptor.displayName} needs both a provider and a model (each 1-${MAX_RUNNER_NAME_LENGTH} letters, digits or ${RUNNER_NAME_SYMBOLS}, not starting with -)`
+        : `model of role "${owner.id}" must be 1-${MAX_RUNNER_NAME_LENGTH} letters, digits or ${RUNNER_NAME_SYMBOLS} (not starting with -); ${descriptor.displayName} has no provider field. The CLI's default model is used instead`,
     )
   }
   const kept = invalid

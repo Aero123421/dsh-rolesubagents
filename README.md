@@ -97,7 +97,7 @@ A role whose **Runs on** is a CLI runs its child once as a separate program on t
    | Field | Meaning |
    |---|---|
    | Provider | OpenCode only. Required together with Model |
-   | Model | The CLI's own model ID. Empty uses the CLI's configured default (not allowed for OpenCode). Suggestions come from **Test connection** or a built-in list; any ID the CLI accepts works |
+   | Model | The CLI's own model ID. Empty uses the CLI's configured default (not allowed for OpenCode). Suggestions come from **Test connection** or a built-in list; any ID the CLI accepts works if it uses only letters, digits, and `. _ : @ / + - [ ]` (not starting with `-`; the same applies to Provider and Reasoning effort) |
    | Reasoning effort | **Model default** or one of the CLI's effort levels. For OpenCode, a variant name of the model (free text) |
    | Permission | One of the CLI's permission presets (below). A delegated run never stops to ask for approval, so this decides what it may do |
    | Timeout (minutes) | The run is stopped after this long; 1–1440, empty for 30 |
@@ -115,8 +115,8 @@ Every run gets the task text through the CLI's input, and the role's instruction
 
 | | |
 |---|---|
-| How it is driven | `codex exec --json --ephemeral --skip-git-repo-check --color never --disable plugins --disable multi_agent -c analytics.enabled=false -c notify=[] -c shell_environment_policy.ignore_default_excludes=false -C <cwd> -s <preset> [-m <model>] [-c model_reasoning_effort=…] [-c developer_instructions=…] -`, task on stdin. No session file is kept |
-| Presets | **Read-only** → `-s read-only`; **Workspace write** (default) → `-s workspace-write`; **Full access (no sandbox)** → `-s danger-full-access`. `-s` is always passed, so a project's `.codex/config.toml` cannot widen it |
+| How it is driven | `codex exec --json --ephemeral --skip-git-repo-check --color never --disable plugins --disable multi_agent -c analytics.enabled=false -c notify=[] -c shell_environment_policy.ignore_default_excludes=false -c sandbox_workspace_write.writable_roots=[] -C <cwd> -s <preset> [-m <model>] [-c model_reasoning_effort=…] [-c developer_instructions=…] -`, task on stdin. No session file is kept |
+| Presets | **Read-only** → `-s read-only`; **Workspace write** (default) → `-s workspace-write`; **Full access (no sandbox)** → `-s danger-full-access`. Enforced by Codex's sandbox, shell commands included. `-s` is always passed and extra writable roots from a Codex config are cleared, so neither your config nor a project's `.codex/config.toml` can widen it |
 | Instructions | `developer_instructions` (a developer message next to Codex's own prompt) |
 | Credentials | `codex login` on the host, or forward `CODEX_API_KEY` (Codex's built-in provider ignores a plain `OPENAI_API_KEY`), or a custom provider from your Codex config with its key variable forwarded. Codex's shell tools do not see variables whose names contain `KEY`, `SECRET`, or `TOKEN` |
 | Model and effort | Your Codex config (model, providers) still applies when Model is empty. Efforts: none, minimal, low, medium, high, xhigh, max |
@@ -127,10 +127,10 @@ Every run gets the task text through the CLI's input, and the role's instruction
 | | |
 |---|---|
 | How it is driven | `claude -p --output-format stream-json --verbose --no-session-persistence --strict-mcp-config [--model <model>] [--effort <effort>] <preset flags> [--append-system-prompt <instructions>]`, task on stdin. No session is saved, and MCP servers from config files are not loaded |
-| Presets | **Read-only** → `--permission-mode dontAsk --setting-sources "" --disallowedTools Write,Edit,NotebookEdit`; **Accept edits** (default) → `--permission-mode acceptEdits`; **Auto (classifier)** → `--permission-mode auto` (the classifier makes extra model calls); **Bypass permissions** (full access) → `--permission-mode bypassPermissions` |
+| Presets | **Read-only** → `--permission-mode dontAsk --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch --disallowedTools Write,Edit,NotebookEdit`; **Edit files (no shell)** (default, `acceptEdits`) → `--permission-mode acceptEdits --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch,Edit,Write,NotebookEdit`; **Auto (classifier)** (full access) → `--permission-mode auto` (the classifier makes extra model calls and can approve any command); **Bypass permissions** (full access) → `--permission-mode bypassPermissions`. Read-only and Edit files have no shell and load no settings files (see [Read-only](#read-only-on-a-cli) and [Workspace confinement](#workspace-confinement)) |
 | Instructions | `--append-system-prompt` (appended to Claude Code's system prompt) |
 | Environment | Sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`; removes `CLAUDECODE` and every inherited `CLAUDE_CODE_*` variable unless you forward it by name |
-| Credentials | Claude Code's own sign-in on the host. `ANTHROPIC_API_KEY` is never passed automatically (in print mode it would override a subscription sign-in); forward it by name if you want key authentication |
+| Credentials | Claude Code's own sign-in on the host. `ANTHROPIC_API_KEY` is never passed automatically (in print mode it would override a subscription sign-in); forward it by name if you want key authentication. Read-only and Edit files do not load settings files, so an `apiKeyHelper`, model, or `env` set there applies only to the full-access presets |
 | Model and effort | A model alias or full model ID; empty uses Claude Code's default. Efforts: low, medium, high, xhigh, max |
 | Connection test | Version and a built-in model list. Sign-in state shows as unknown (Claude Code has no side-effect-free check); the first run reports a sign-in problem |
 
@@ -138,8 +138,8 @@ Every run gets the task text through the CLI's input, and the role's instruction
 
 | | |
 |---|---|
-| How it is driven | `agy --input-format stream-json --output-format stream-json --disable-slash-commands [--model <model>] [--effort <effort>] [--agent dsh-rolesubagents-<nonce>] [--dangerously-skip-permissions] --log-file <private temp dir>/agy.log`, one stream-json user message on stdin, `AGY_CLI_DISABLE_AUTO_UPDATE=true`. Before the run, `agy --output-format json models` checks the sign-in (about 0.5 s instead of waiting for a sign-in code) |
-| Presets | **Read-only** → a generated agent with only `view_file`, `grep_search`, `list_dir`, `find_by_name`; **Edit files (no shell)** (default) → the same plus `write_to_file` and `replace_file_content`; **Full access** → agy's default agent with `--dangerously-skip-permissions` |
+| How it is driven | `agy --input-format stream-json --output-format stream-json --disable-slash-commands [--model <model>] [--effort <effort>] [--agent dsh-rolesubagents-<nonce> [--mode accept-edits]] [--dangerously-skip-permissions] --log-file <private temp dir>/agy.log`, one stream-json user message on stdin, `AGY_CLI_DISABLE_AUTO_UPDATE=true`. Before the run, `agy --output-format json models` checks the sign-in (about 0.5 s instead of waiting for a sign-in code) |
+| Presets | **Read-only** → a generated agent with only `view_file`, `grep_search`, `list_dir`, `find_by_name`; **Edit files (no shell)** (default) → the same plus `write_to_file` and `replace_file_content`, with `--mode accept-edits` (without it headless agy refuses writes outside the temp directory); writes outside the run's directory stay refused; **Full access** → agy's default agent with `--dangerously-skip-permissions` |
 | Instructions | Read-only and Edit files: the body (system prompt) of the generated agent `~/.gemini/config/agents/dsh-rolesubagents-<nonce>.md`, which is removed after the run (leftovers older than 24 hours are removed at plugin start). Full access: prefixed to the task under `# Role instructions` / `# Task`, because a custom agent would lose agy's default tools and prompt |
 | Credentials | agy's own Google sign-in, or forward `GEMINI_API_KEY` together with `"modelProvider": "gemini"` in agy's `settings.json` |
 | Model and effort | Efforts: low, medium, high, xhigh, max. Each model supports only some of them; agy rejects an unsupported combination at start (reported as a configuration failure) |
@@ -149,8 +149,8 @@ Every run gets the task text through the CLI's input, and the role's instruction
 
 | | |
 |---|---|
-| How it is driven | `opencode acp --cwd <cwd> --print-logs --log-level WARN`, driven over the Agent Client Protocol (JSON-RPC on stdin/stdout). The run's settings come from `OPENCODE_CONFIG_CONTENT`, merged over your OpenCode config without writing any file: the model, a uniquely named agent `dsh-<nonce>` carrying the preset, and auto-update, sharing, snapshots, and title generation off. `OPENCODE_DB=:memory:` (no session is saved), and the local server OpenCode opens gets a random password |
-| Presets | **Read-only** → every tool denied except read (not `.env` files), grep, glob, list, lsp, todowrite; **Edit files (no shell)** (default) → the same plus file edits in the workspace, with shell, directories outside the workspace, and questions denied; **Full access** → everything allowed except directories outside the workspace, questions, and plan-mode switches (`.env` files stay unreadable) |
+| How it is driven | `opencode acp --cwd <cwd> --print-logs --log-level WARN`, driven over the Agent Client Protocol (JSON-RPC on stdin/stdout). The run's settings come from `OPENCODE_CONFIG_CONTENT`, merged over your OpenCode config without writing any file (below full access the project's own `opencode.json`, `.opencode` agents, commands and tools, and `AGENTS.md` are not loaded: `OPENCODE_DISABLE_PROJECT_CONFIG=1`): the model, a uniquely named agent `dsh-<nonce>` carrying the preset, and auto-update, sharing, snapshots, and title generation off. `OPENCODE_DB=:memory:` (no session is saved), and the local server OpenCode opens gets a random password |
+| Presets | **Read-only** → every tool denied except read (not `.env` files), grep, glob, list, lsp, todowrite; **Edit files (no shell)** (default) → the same plus file edits, with shell, directories outside the workspace, and questions denied. OpenCode's file tools reach the whole git repository around the run's directory, so Edit files is refused below a repository's top-level (see [Workspace confinement](#workspace-confinement)); **Full access** → everything allowed except directories outside the workspace, questions, and plan-mode switches (`.env` files stay unreadable) |
 | Instructions | An extra `instructions` file in a private temp directory (part of the system prompt, after `AGENTS.md`) |
 | Credentials | OpenCode's own provider sign-in (`opencode auth login`), or forward the provider's key variable (for example `OPENAI_API_KEY`) |
 | Model and effort | **Provider and Model are both required**; a role without them is switched off instead of falling back to OpenCode's own default model. Effort is a variant name of the model (for example `high`). Permission prompts are always answered with "reject"; a turn that ends without an answer after a rejection is reported as a permission failure |
@@ -162,25 +162,43 @@ DSH's sandbox and approvals do not reach inside a CLI, so the plugin decides the
 
 - The ceiling is **read-only** when the calling agent's role is read-only. Otherwise it follows the parent session's sandbox mode: `read-only` → read-only, `danger-full-access` → full access, anything else (including approval modes such as Auto review, or no sandbox service) → workspace write.
 - If the role's preset allows more than the ceiling, the run uses the CLI's preset for the ceiling level instead (the host log records it). A preset is never widened.
-- Below full access, the child's working directory must be inside the parent's workspace root; a `cwd` outside it is refused.
+- Below full access, the child's working directory must be inside the parent's workspace root; a `cwd` outside it is refused. When the parent's workspace root is unknown (no sandbox service), an explicit `cwd` is refused unless the run is read-only; without `cwd` the child uses the parent's directory as usual.
 - A read-only agent can delegate only to read-only roles, CLI roles included.
 - DSH does not count external children toward its depth limit, so the plugin refuses the delegation itself when the next depth would exceed DSH's limit. The CLI's own sub-agents are not counted.
+
+### Workspace confinement
+
+Below full access, what a CLI may change is enforced in one of two ways:
+
+| Preset | Enforced by |
+|---|---|
+| Codex **Read-only**, **Workspace write** | Codex's operating-system sandbox, which also covers shell commands and resolves symbolic links |
+| Claude Code **Read-only**, **Edit files (no shell)**; Antigravity **Read-only**, **Edit files**; OpenCode **Read-only**, **Edit files** | The CLI's own tool permissions: which tools exist (no shell) and which paths its file tools may write. There is no operating-system sandbox |
+
+For the second kind, the plugin checks the working directory before a workspace-write run and **refuses the delegation** (with a short reason the parent sees) when:
+
+- the directory tree contains a symbolic link that leads outside the parent's workspace (or outside the directory when the workspace is unknown); the CLI's file tools would follow it. `.git` is skipped and links are not followed during the check. A directory too large to check (over 100,000 entries or 2 seconds) is refused too;
+- OpenCode only: the directory lies below the top-level of a git repository. OpenCode's file tools reach the whole repository, not just the directory (verified: a write to a sibling directory succeeds, and `apply_patch` can move a file anywhere in the repository), so delegate with the repository's top-level as `cwd`.
+
+Claude Code and Antigravity keep their file tools inside the run's directory (verified: writes to a sibling directory, the repository's top-level, or elsewhere are refused). Hard links are not detected: a file hard-linked into the workspace is changed in place. Use a read-only role, or a parent with full access, when a refused directory is intended.
+
+Below full access OpenCode also refuses a project that has `.opencode/plugin` or `.opencode/plugins` code: OpenCode 1.19.3 runs it at start even with the project configuration disabled.
 
 ### Read-only on a CLI
 
 | CLI | What Read-only does |
 |---|---|
 | Codex | Runs in Codex's `read-only` sandbox |
-| Claude Code | `dontAsk` mode without `Write`, `Edit`, `NotebookEdit`; anything that would need approval is refused. No setting sources are loaded (user and project settings, allow rules, hooks, `CLAUDE.md`), so they cannot widen it; this also skips a model, environment, or `apiKeyHelper` set in those settings. Shell commands Claude Code itself treats as read-only can still run. The other presets load your settings as usual, including allow rules and hooks |
+| Claude Code | Only the read tools (`Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`), no shell, in `dontAsk` mode: anything that would need approval is refused. No setting sources are loaded (user, project, and local settings, allow rules, hooks, `CLAUDE.md`), so they cannot widen it; this also skips a model, environment, or `apiKeyHelper` set in those settings |
 | Antigravity | Only the read tools (view files, search, list folders); no shell |
-| OpenCode | Every tool denied except reading, searching, and listing files; `.env` files stay unreadable |
+| OpenCode | Every tool denied except reading, searching, and listing files; `.env` files stay unreadable. The project's OpenCode configuration and `AGENTS.md` are not loaded; a project with `.opencode/plugin(s)` code is refused |
 
 ### External CLIs settings
 
 The **External CLIs** section of the Plugins page has one card per CLI, shared by every role on it:
 
 - **Executable**: an absolute path, or a command name looked up on the host's `PATH`. Empty uses `codex`, `claude`, `agy`, or `opencode`.
-- **Forwarded environment variables**: variable names only (commas or spaces). Values are read from the DSH host process environment when the CLI starts and are never stored. Up to 32 names.
+- **Forwarded environment variables**: variable names only (commas or spaces). Values are read from the DSH host process environment when the CLI starts and are never stored. Up to 32 names. **Test connection** counts only those that are set on the host.
 - **Test connection**: checks the saved settings: whether the executable is found, its version, sign-in state where the CLI can report it cheaply, and the models it lists (used as suggestions in the role editor). It never calls a model. The button is hidden when the Host does not offer the RPC path it uses (this is not a documented DSH API); the editor then uses built-in suggestions.
 
 These settings apply to the next delegation, also in running sessions.
@@ -191,13 +209,14 @@ These settings apply to the next delegation, also in running sessions.
 - **Always fresh**: no fork of the parent conversation and no Agent Preset.
 - **No rollback**: files changed before a cancel or timeout stay changed.
 - **Host restart**: a run in progress when DSH stops is stopped, and its completion notice is lost.
-- **Timeout** per role (default 30 minutes). A stop first asks the CLI to cancel where it supports that (OpenCode), then terminates the process; DSH kills it after a short grace.
+- **Timeout** per role (default 30 minutes). A stop first asks the CLI to cancel where it supports that (OpenCode), then terminates the process; DSH kills it after a short grace. Background processes the CLI leaves behind are stopped too when the run ends.
 - **The CLI's own side effects** still happen:
   - Antigravity records each run in its own history (about 0.4 MB under `~/.gemini`), so a delegated run becomes the target of `agy --continue` in that directory. agy also always contacts Google's feature-flag and telemetry hosts.
   - OpenCode may create `<repo>/.git/opencode` in your repository. It retries rate-limit and server errors for about a minute before failing.
   - Claude Code refuses **Bypass permissions** when DSH runs as root (reported as a configuration failure with `bypass-refused-as-root`).
-  - Antigravity's **Edit files** also allows writes under the OS temp directory (agy's own policy); writes elsewhere outside the workspace are denied and reported as a permission failure.
+  - Antigravity's **Edit files** also allows writes under the OS temp directory (agy's own policy); writes elsewhere outside the run's directory are denied and reported as a permission failure.
   - Codex's **Workspace write** also allows writes under `/tmp` and `$TMPDIR`, keeps `.git` (and `.codex`, `.agents`) read-only, so a worker cannot commit, and turns network access off.
+  - What each preset loads from the project: Codex reads the project's `AGENTS.md` and, for a project you trusted in Codex, its `.codex/config.toml` (the sandbox flags above still win). Claude Code's Read-only and Edit files load no settings files and no `CLAUDE.md`; its full-access presets load user, project, and local settings, including hooks. OpenCode below full access loads only your global OpenCode configuration (no project `opencode.json`, `.opencode` files, or `AGENTS.md`); at full access it loads the project's too. Antigravity reads the project's `AGENTS.md`.
 - A failed run reaches the parent as a short diagnostic in fixed wording, such as `Subagent failure (CLI: Codex; category: auth; exit code: 1)` with one hint line. The CLI's own error text goes only to the host log.
 
 ### Security notes

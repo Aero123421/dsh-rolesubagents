@@ -24,12 +24,25 @@ export const ACCESS_ORDER: Readonly<Record<AccessLevel, number>> = Object.freeze
   'full-access': 2,
 })
 
+/**
+ * What enforces a preset's limits:
+ * - `os-sandbox`: an operating-system sandbox of the CLI (Codex), which also covers its shell commands
+ *   and resolves symbolic links;
+ * - `tool-scope`: the CLI's own tool permissions (which tools exist, which paths they may write). Before a
+ *   workspace-write run of such a preset the engine checks the workspace and refuses when the CLI's scope
+ *   could reach outside it (see `docs/external-cli.md`);
+ * - `none`: no limit (full access).
+ */
+export type Confinement = 'os-sandbox' | 'tool-scope' | 'none'
+
 /** One CLI-native permission preset offered in the editor. */
 export interface PermissionPreset {
   /** CLI-native id, e.g. codex `workspace-write`, claude `acceptEdits`. */
   readonly id: string
   /** What the preset allows; used for the access ceiling. */
   readonly access: AccessLevel
+  /** What enforces it. */
+  readonly confinement: Confinement
 }
 
 /** Static description of one CLI. Pure data, shared by the Host and the browser. */
@@ -55,4 +68,16 @@ export interface CliDescriptor {
   readonly presetForAccess: Readonly<Record<AccessLevel, string>>
   /** Where the role's instructions reach the CLI (documentation for the preview and README). */
   readonly instructionsChannel: 'system' | 'prompt'
+  /**
+   * How far a `tool-scope` preset's file tools reach: `cwd` (the run's directory tree), or `git-worktree`
+   * (the whole git worktree that contains the directory — OpenCode). With `git-worktree`, a workspace-write
+   * run from below a worktree's top-level is refused.
+   */
+  readonly toolScope: 'cwd' | 'git-worktree'
+  /**
+   * Project directories (relative names, searched from the run's directory up to its git top-level) whose
+   * code the CLI runs at start even under its restricted presets (OpenCode `.opencode/plugin`). Below full
+   * access, a run is refused when one exists.
+   */
+  readonly startupCodeDirs?: readonly string[]
 }

@@ -3,7 +3,7 @@
  *
  * Invocation (DESIGN §5.3, verified against agy 1.4.2):
  *   agy --input-format stream-json --output-format stream-json --disable-slash-commands
- *       [--model m] [--effort e] [--agent dsh-rolesubagents-<nonce>] [--dangerously-skip-permissions]
+ *       [--model m] [--effort e] [--agent dsh-rolesubagents-<nonce> [--mode accept-edits]] [--dangerously-skip-permissions]
  *       --log-file ${RUN_DIR}/agy.log
  * stdin: one `{"event":"user","message":{"content":…}}` line, then EOF (agy runs one turn and exits).
  * env: `AGY_CLI_DISABLE_AUTO_UPDATE=true` (otherwise every launch spawns a detached updater).
@@ -14,10 +14,12 @@
  * - `read-only`, `edit-files`: a generated custom agent `${HOME}/.gemini/config/agents/dsh-rolesubagents-<nonce>.md`
  *   (removed by the engine after the run; stale ones are swept by {@link agyHousekeeping}) whose `tools:`
  *   allowlist is the boundary — an undeclared tool fails with `unknown tool` and the model carries on.
- *   `edit-files` adds `write_to_file` + `replace_file_content` but no `run_command`: agy's default headless
- *   policy auto-allows writes inside the workspace (and the OS temp dir) and soft-denies writes elsewhere
- *   (verified: the run ends with `denied_actions`, mapped to category `permission`). Role instructions are the
- *   agent body (system prompt channel).
+ *   `edit-files` adds `write_to_file` + `replace_file_content` but no `run_command`, and `--mode accept-edits`:
+ *   agy's default headless policy auto-allows writes only under the OS temp dir and soft-denies every other
+ *   write, the workspace included; `accept-edits` auto-allows writes inside the workspace (the run's directory)
+ *   while writes elsewhere — a sibling directory, the enclosing git repository's top-level, other paths —
+ *   stay soft-denied (verified with 1.4.2 outside /tmp: the run ends with `denied_actions`, mapped to category
+ *   `permission`). Role instructions are the agent body (system prompt channel).
  * - `full-access`: agy's DEFAULT agent + `--dangerously-skip-permissions`, instructions as a prompt prefix.
  *   Verified against the real binary: a custom agent without `tools:` does NOT keep the default toolset (it
  *   gets send_message/view_file/read_url_content/search_web/schedule/generate_image/manage_task — no
@@ -144,6 +146,8 @@ function plan(input: PlanInput, nonce: string): RunPlan {
     const tools = level === 'workspace-write' ? EDIT_TOOLS : READ_TOOLS
     files = { [`${HOME_TOKEN}/${AGENTS_DIR}/${name}.md`]: agentMarkdown(name, tools, input.instructions) }
     argv.push('--agent', name)
+    // Without it headless agy denies writes inside the workspace too (only the temp dir is auto-allowed).
+    if (level === 'workspace-write') argv.push('--mode', 'accept-edits')
   }
   argv.push('--log-file', `${RUN_DIR_TOKEN}/agy.log`)
   return {

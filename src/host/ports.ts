@@ -111,8 +111,11 @@ export interface ExternalProviderPort extends SubagentProviderPort {
 /** `ctx.subagents` — the official delegation service. */
 export interface SubagentsPort {
   getProvider(name: string): SubagentProviderPort | undefined
-  /** Register a provider in the caller's scope; returns its removal. Needed for external roles only. */
-  registerProvider?(provider: ExternalProviderPort): () => void
+  /**
+   * Register a provider in the caller's scope; returns its removal, which may return a promise.
+   * Needed for external roles only.
+   */
+  registerProvider?(provider: ExternalProviderPort): () => unknown
   resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined
   startActivation(spec: {
     provider: string

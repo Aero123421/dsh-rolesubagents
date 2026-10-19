@@ -107,9 +107,11 @@ describe('startExternalRun: a successful run', () => {
     expect(t.adapter.nonces).toEqual(['abcdef012345'])
     expect(t.runs.size).toBe(0)
     expect(t.logger.warn).not.toHaveBeenCalled()
-    await run.dispose()
-    await run.dispose()
     expect(process?.terminated).toBe(0)
+    await run.dispose()
+    await run.dispose()
+    // dispose sweeps the (already empty) managed range once.
+    expect(process?.terminated).toBe(1)
   })
 
   it('frames CRLF lines and multi-byte characters split across chunks', async () => {
@@ -389,23 +391,82 @@ describe('startExternalRun: dispose ladder (graceful cancel â†’ cancelGraceMs â†
     }
   })
 
-  it('never terminates a process that exits on the graceful cancel', async () => {
+  it('does not escalate while the CLI exits on the graceful cancel; terminates the range only after the result', async () => {
+    let terminatedAtExit = -1
     const t = setup({
       subprocess: {
         onRun: async p => {
           await p.stdinClosed
           // A CLI that stops by itself once stdin closes (e.g. opencode acp after session/cancel).
-          setTimeout(() => p.exit(0), 5)
+          setTimeout(() => {
+            terminatedAtExit = p.terminated
+            p.exit(0)
+          }, 5)
         },
       },
     })
     const run = await t.start()
     await run.dispose()
     expect(t.adapter.sessions[0]?.cancelled).toBe(1)
-    expect(t.subprocess.processes[0]?.terminated).toBe(0)
+    expect(terminatedAtExit).toBe(0)
+    // Only the final range sweep after the result settled; the grace timer was cleared.
+    expect(t.subprocess.processes[0]?.terminated).toBe(1)
     expect((await run.result).stopReason).toBe('aborted')
     await new Promise(resolve => setTimeout(resolve, 80))
+    expect(t.subprocess.processes[0]?.terminated).toBe(1)
+  })
+
+  it('graceful cancel: a CLI that exits within the grace but leaves a background child is swept, dispose resolves', async () => {
+    const t = setup({
+      subprocess: {
+        leftoverChild: true,
+        onRun: async p => {
+          await p.stdinClosed
+          setTimeout(() => p.exit(0), 5)
+        },
+      },
+    })
+    const run = await t.start()
+    await run.dispose()
+    const process = t.subprocess.processes[0]
+    expect(t.adapter.sessions[0]?.cancelled).toBe(1)
+    expect(process?.terminated).toBe(1)
+    expect(process?.childAlive).toBe(false)
+    expect((await run.result).stopReason).toBe('aborted')
+    expect(t.runs.size).toBe(0)
+  })
+
+  it('natural settle: a CLI that answered and exited but left a background child is swept by dispose', async () => {
+    const t = setup({
+      subprocess: {
+        leftoverChild: true,
+        onRun: answering(line({ type: 'text', text: 'ok' }), line({ type: 'done' })),
+      },
+    })
+    const run = await t.start()
+    expect((await run.result).stopReason).toBe('completed')
+    const process = t.subprocess.processes[0]
+    expect(process?.childAlive).toBe(true)
+    let disposed = false
+    const disposal = run.dispose().then(() => {
+      disposed = true
+    })
+    await Promise.race([disposal, new Promise(resolve => setTimeout(resolve, 200))])
+    expect(disposed).toBe(true)
+    expect(process?.terminated).toBe(1)
+    expect(process?.childAlive).toBe(false)
+    expect(t.adapter.sessions[0]?.cancelled).toBe(0)
+    expect((await run.result).stopReason).toBe('completed')
+  })
+
+  it('a leftover child alone does not settle the run late: the result settles when the CLI exits', async () => {
+    const t = setup({
+      subprocess: { leftoverChild: true, onRun: answering(line({ type: 'text', text: 'ok' }), line({ type: 'done' })) },
+    })
+    const run = await t.start()
+    expect(await run.result).toEqual({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' })
     expect(t.subprocess.processes[0]?.terminated).toBe(0)
+    await run.dispose()
   })
 
   it('terminates at once when the session has no graceful cancel', async () => {
@@ -417,14 +478,28 @@ describe('startExternalRun: dispose ladder (graceful cancel â†’ cancelGraceMs â†
     expect((await run.result).stopReason).toBe('aborted')
   })
 
-  it('does nothing to a run whose process already exited', async () => {
+  it('does not cancel a run whose process already exited; only sweeps its range', async () => {
     const t = setup({ subprocess: { onRun: answering(line({ type: 'text', text: 'ok' }), line({ type: 'done' })) } })
     const run = await t.start()
     expect((await run.result).stopReason).toBe('completed')
     await run.dispose()
     expect(t.adapter.sessions[0]?.cancelled).toBe(0)
-    expect(t.subprocess.processes[0]?.terminated).toBe(0)
+    expect(t.subprocess.processes[0]?.terminated).toBe(1)
     expect((await run.result).stopReason).toBe('completed')
+  })
+
+  it('still resolves when terminating the exited range throws (logged)', async () => {
+    const t = setup({
+      subprocess: {
+        terminateThrowsAfterExit: true,
+        onRun: answering(line({ type: 'text', text: 'ok' }), line({ type: 'done' })),
+      },
+    })
+    const run = await t.start()
+    await run.result
+    await run.dispose()
+    expect(t.logger.warn).toHaveBeenCalledWith(expect.stringMatching(/could not terminate Codex run run-1/))
+    expect(t.runs.size).toBe(0)
   })
 
   it('is idempotent and resolves only after the process exited', async () => {

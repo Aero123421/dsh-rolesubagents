@@ -538,12 +538,17 @@ describe('runs on an external CLI', () => {
     expect(permission.value).toBe('read-only')
     expect([...permission.options].map(option => [option.textContent, option.disabled])).toEqual([
       ['Read-only — no file changes', false],
-      ['Accept edits — edits in the workspace', true],
-      ['Auto (classifier) — edits in the workspace', true],
+      ['Edit files (no shell) — edits in the workspace', true],
+      ['Auto (classifier) — no restrictions', true],
       ['Bypass permissions — no restrictions', true],
     ])
     expect(screen.getByText(/Read-only roles can use only a read-only preset/)).toBeTruthy()
-    expect(screen.getByText(/without its write tools \(Write, Edit, NotebookEdit\) and in dontAsk mode/)).toBeTruthy()
+    expect(
+      screen.getByText(/only its read tools \(Read, Glob, Grep, WebFetch, WebSearch\), with no shell, in dontAsk mode/),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(/Enforced by Claude Code's own tool permissions \(no operating-system sandbox\)\./),
+    ).toBeTruthy()
     fireEvent.click(screen.getByLabelText('Block file writes for this role'))
     expect(permission.value).toBe('acceptEdits')
     expect([...permission.options].every(option => !option.disabled)).toBe(true)

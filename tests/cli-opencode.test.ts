@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import {
   agentName,
-  configContent,
+  configObject,
+  loadsProjectConfig,
   INSTRUCTIONS_FILE,
   OPENCODE_CANCEL_GRACE_MS,
   opencodeAdapter,
@@ -15,7 +16,7 @@ import {
 import { classifyRpcError } from '../src/host/cli/opencode/parser.ts'
 import { parseModels, parseVersion, probeOpencode } from '../src/host/cli/opencode/probe.ts'
 import { formatDiagnostic } from '../src/host/external/diagnostic.ts'
-import { startExternalRun } from '../src/host/external/engine.ts'
+import { jsonEnvText, startExternalRun, substituteLeaves } from '../src/host/external/engine.ts'
 import type { PlanInput, ProbeRunner, RunExit } from '../src/host/external/types.ts'
 import type { SubagentRunPort } from '../src/host/ports.ts'
 import { OPENCODE } from '../src/shared/cli/opencode.ts'
@@ -81,8 +82,10 @@ function replay(name: string, value: PlanInput = input(), exit: RunExit = EXIT) 
   return { outcome: session.finish(exit), writes, ended }
 }
 
-function substituted(json: string, runDir = '/run/dir'): Record<string, unknown> {
-  return JSON.parse(json.replaceAll('${RUN_DIR}', runDir))
+/** The config a run gets: the engine's envJson substitution and serialization. */
+function substituted(config: unknown, runDir = '/run/dir'): Record<string, unknown> {
+  const values = { RUN_DIR: runDir, HOME: '/home/u', SECRET: 's'.repeat(32) }
+  return JSON.parse(jsonEnvText(substituteLeaves(config, values)))
 }
 
 describe('opencode plan', () => {
@@ -91,8 +94,9 @@ describe('opencode plan', () => {
     expect(plan.argv).toEqual(['acp', '--cwd', CWD, '--print-logs', '--log-level', 'WARN'])
     expect(plan.cancelGraceMs).toBe(OPENCODE_CANCEL_GRACE_MS)
     expect(plan.preflight).toBeUndefined()
+    expect(plan.envJson).toEqual({ OPENCODE_CONFIG_CONTENT: configObject(input(), NONCE) })
     expect(plan.env).toEqual({
-      OPENCODE_CONFIG_CONTENT: configContent(input(), NONCE),
+      OPENCODE_DISABLE_PROJECT_CONFIG: '1',
       OPENCODE_DB: ':memory:',
       OPENCODE_DISABLE_AUTOUPDATE: '1',
       OPENCODE_SERVER_PASSWORD: '${SECRET}',
@@ -105,7 +109,7 @@ describe('opencode plan', () => {
   })
 
   it.each(['read-only', 'edit-files', 'full-access'])('builds the config for preset %s', preset => {
-    const config = substituted(configContent(input({ preset }), NONCE))
+    const config = substituted(configObject(input({ preset }), NONCE))
     expect(config).toEqual({
       $schema: 'https://opencode.ai/config.json',
       autoupdate: false,
@@ -128,7 +132,7 @@ describe('opencode plan', () => {
     for (const instructions of ['', '  \n']) {
       const plan = opencodeAdapter.plan(input({ instructions }), NONCE)
       expect(plan.files).toBeUndefined()
-      const config = substituted(plan.env.OPENCODE_CONFIG_CONTENT as string)
+      const config = substituted(plan.envJson?.OPENCODE_CONFIG_CONTENT)
       expect(config).not.toHaveProperty('instructions')
       expect(JSON.stringify(plan)).not.toContain('RUN_DIR')
     }
@@ -140,16 +144,32 @@ describe('opencode plan', () => {
     expect(JSON.stringify(plan)).not.toContain('high')
   })
 
-  it('keeps provider/model ids with slashes and escapes every `$` from data', () => {
-    const value = input({ instructions: '' }, { provider: 'openrouter', model: 'anthropic/x-${SECRET}' })
-    const json = configContent(value, NONCE)
+  it('keeps provider/model ids with slashes; data can form neither a placeholder nor an {env:} reference', () => {
+    const value = input({}, { provider: 'openrouter', model: 'anthropic/x-${SECRET}{env:HOME}' })
+    const json = jsonEnvText(substituteLeaves(configObject(value, NONCE), { RUN_DIR: '/r', HOME: '/h', SECRET: 'S' }))
     expect(json).not.toContain('$')
-    expect(JSON.parse(json).model).toBe('openrouter/anthropic/x-${SECRET}')
-    expect(JSON.parse(json).$schema).toBe('https://opencode.ai/config.json')
-    // Only the one placeholder survives as a literal placeholder.
-    const withInstructions = configContent(input({}, { model: '${RUN_DIR}' }), NONCE)
-    expect(withInstructions.match(/\$\{RUN_DIR\}/g)).toEqual(['${RUN_DIR}'])
-    expect(substituted(withInstructions).model).toBe('fake/${RUN_DIR}')
+    expect(json).not.toContain('{env:')
+    const config = JSON.parse(json)
+    expect(config.model).toBe('openrouter/anthropic/x-${SECRET}{env:HOME}')
+    expect(config.$schema).toBe('https://opencode.ai/config.json')
+    expect(config.instructions).toEqual(['/r/role-instructions.md'])
+  })
+
+  it('keeps the config valid JSON for a run directory with backslashes or quotes', () => {
+    for (const runDir of ['C:\\Users\\me\\AppData\\Local\\Temp\\dsh-x', '/tmp/a\\b"c']) {
+      const config = substituted(configObject(input(), NONCE), runDir)
+      expect(config.instructions).toEqual([`${runDir}/role-instructions.md`])
+    }
+  })
+
+  it('loads the project config only at full access', () => {
+    expect(loadsProjectConfig({ preset: 'full-access', access: 'full-access' })).toBe(true)
+    for (const preset of ['read-only', 'edit-files', 'bogus']) {
+      const plan = opencodeAdapter.plan(input({ preset }), NONCE)
+      expect(plan.env.OPENCODE_DISABLE_PROJECT_CONFIG).toBe('1')
+    }
+    const full = opencodeAdapter.plan(input({ preset: 'full-access', access: 'full-access' }), NONCE)
+    expect(full.env).not.toHaveProperty('OPENCODE_DISABLE_PROJECT_CONFIG')
   })
 
   it('fails closed: unknown presets get the read-only profile; a missing model refuses the run', () => {

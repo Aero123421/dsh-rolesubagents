@@ -18,9 +18,9 @@ export const AGY: CliDescriptor = Object.freeze({
   efforts: Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']),
   effortFreeText: false,
   permissions: Object.freeze([
-    Object.freeze({ id: 'read-only', access: 'read-only' }),
-    Object.freeze({ id: 'edit-files', access: 'workspace-write' }),
-    Object.freeze({ id: 'full-access', access: 'full-access' }),
+    Object.freeze({ id: 'read-only', access: 'read-only', confinement: 'tool-scope' }),
+    Object.freeze({ id: 'edit-files', access: 'workspace-write', confinement: 'tool-scope' }),
+    Object.freeze({ id: 'full-access', access: 'full-access', confinement: 'none' }),
   ]),
   defaultPermission: 'edit-files',
   presetForAccess: Object.freeze({
@@ -29,4 +29,5 @@ export const AGY: CliDescriptor = Object.freeze({
     'full-access': 'full-access',
   }),
   instructionsChannel: 'system',
+  toolScope: 'cwd',
 } satisfies CliDescriptor)

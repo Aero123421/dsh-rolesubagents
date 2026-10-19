@@ -10,6 +10,7 @@
  * - DSH_CHECKOUT  DSH installation whose @deepseek-ai/* packages are used (default /opt/dsh).
  * - CLI_PATH_DIR  extra directory searched for CLI binaries (prepended to PATH). The harness also
  *                 searches /opt/cli-tools/node_modules/.bin and /opt/cli-tools/bin.
+ * - CHECK_CLI_CASE  only run cases whose name contains this text (case-insensitive).
  *
  * What is real: Cordis, SessionStore, AgentRegistry, SystemPrompt, ToolRuntime, the storage stack
  * (Storage + JSON backend in a temp dir + DomainFacility), LocalSubprocessRuntime and
@@ -38,7 +39,9 @@
  * - `h.cli`, `h.executable`             the suite's CLI id and its resolved binary (undefined for `self`).
  * - `h.assert`                          `node:assert/strict`.
  * - `h.case(name, fn)` / `h.skip(name, reason)`   register a case / report a skipped one.
- * - `h.workspace(files?)`               a fresh temp directory (optionally with files); removed at exit.
+ * - `h.workspace(files?, { outsideTmp })`  a fresh temp directory (optionally with files); removed at exit.
+ *                                       `outsideTmp: true` creates it under /var/tmp instead, for checks of
+ *                                       write boundaries (Codex and agy always allow writes under /tmp).
  * - `h.role(id, patch)`                 a role definition with sensible defaults.
  * - `h.server(path, args?)`             spawn a Node script that prints `{"port":<n>}` (or a bare port)
  *                                       as its first stdout line; returns `{ port, url, stop() }`.
@@ -61,19 +64,13 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { hostResolveHook } from './host-resolve-hook.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const checkout = resolve(process.env.DSH_CHECKOUT || '/opt/dsh')
 const hostRequire = createRequire(resolve(checkout, 'package.json'))
 // Resolve every @deepseek-ai/* import (DSH's and this plugin's) from one installation, as DSH does for plugins.
-const resolutionHook = registerHooks({
-  resolve(specifier, context, next) {
-    if (specifier.startsWith('@deepseek-ai/')) {
-      return { url: pathToFileURL(hostRequire.resolve(specifier)).href, shortCircuit: true }
-    }
-    return next(specifier, context)
-  },
-})
+const resolutionHook = registerHooks(hostResolveHook(hostRequire))
 
 // CLI lookup: CLI_PATH_DIR first, then the sandbox's tool dirs, then the existing PATH.
 const extraDirs = [process.env.CLI_PATH_DIR, '/opt/cli-tools/node_modules/.bin', '/opt/cli-tools/bin'].filter(
@@ -119,8 +116,10 @@ function alive(pid) {
   }
 }
 
-function workspace(files = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'rolesubagents-check-'))
+function workspace(files = {}, { outsideTmp = false } = {}) {
+  const dir = mkdtempSync(
+    join(outsideTmp ? (process.env.CHECK_CLI_OUTSIDE_TMP ?? '/var/tmp') : tmpdir(), 'rolesubagents-check-'),
+  )
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, path)), { recursive: true })
@@ -440,6 +439,19 @@ async function selfCheck(h) {
     }
   })
 
+  h.case('a background child the CLI leaves behind neither blocks the notice nor survives', async () => {
+    const w = await h.world(options(h.workspace()))
+    try {
+      const { childId } = await w.delegate({ role: 'fake', prompt: 'LEFTOVER' })
+      const notice = await w.notice(childId, 15_000)
+      const pid = Number(/leftover-child: (\d+)/.exec(notice)?.[1])
+      h.assert.ok(pid > 0, notice)
+      await h.wait(() => !h.alive(pid), 10_000, 'the leftover child to be stopped')
+    } finally {
+      await w.close()
+    }
+  })
+
   h.case('plugin unload disposes a running CLI', async () => {
     const w = await h.world(options(h.workspace()))
     try {
@@ -509,7 +521,9 @@ let skips = 0
 async function runSuite(label, registerCases, cli, executable) {
   const { registered, helpers } = makeHelpers(cli, executable)
   await registerCases(helpers)
+  const only = (process.env.CHECK_CLI_CASE ?? '').toLowerCase()
   for (const entry of registered) {
+    if (only !== '' && !entry.name.toLowerCase().includes(only)) continue
     if (entry.skip !== undefined) {
       skips++
       console.log(`SKIP ${label}: ${entry.name} (${entry.skip})`)
