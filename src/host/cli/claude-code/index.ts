@@ -1,23 +1,168 @@
 /**
- * Claude Code adapter — STUB (Phase A).
+ * Claude Code adapter: `claude -p --output-format stream-json --verbose`.
  *
- * Contract for the implementation that replaces this stub:
- * - Keep the export `export const claudeCodeAdapter: CliAdapter` (registered in `src/host/external/registry.ts`).
- * - `descriptor` stays `CLAUDE_CODE` from `src/shared/cli/claude-code.ts`.
- * - `plan` / `createSession` follow `src/host/external/types.ts` and DESIGN §5; keep them pure.
- * - Put the stdout parser in `./parser.ts` and test it against recorded transcripts in
- *   `tests/fixtures/cli/claude-code/`.
+ * One process per delegation. The task goes to stdin, which is closed right
+ * away (an open stdin costs a 3 s wait); the role's instructions are appended
+ * to Claude Code's own system prompt with `--append-system-prompt`. Presets are
+ * permission modes, except `read-only`, which is `dontAsk` (everything that
+ * needs approval is denied in print mode) with no setting sources (user and
+ * project allow rules, hooks and MCP files cannot widen it) and without the
+ * file-writing tools. `--strict-mcp-config` keeps project `.mcp.json` servers
+ * out of every preset.
+ *
+ * Environment: nested-agent markers and inherited `CLAUDE_CODE_*` variables
+ * are removed (variables the user forwards by name win), non-essential traffic
+ * and the auto-updater are disabled. Credentials stay in Claude Code's own
+ * login unless the user forwards e.g. `ANTHROPIC_API_KEY`.
+ *
+ * Cancellation is the engine's terminate: print mode has no stdin protocol to
+ * ask for a graceful stop, and Bash tool children live in the managed process
+ * range the engine terminates.
  */
 
 import { CLAUDE_CODE } from '../../../shared/cli/claude-code.ts'
-import type { CliAdapter, PlanInput, RunPlan, RunSession } from '../../external/types.ts'
+import type { CliAdapter, PlanInput, ProbeModel, ProbeResult, RunPlan, RunSession } from '../../external/types.ts'
+import { ClaudeStreamParser } from './parser.ts'
+
+/** Tools removed from the read-only preset (Bash stays: `dontAsk` denies mutating commands). */
+export const READ_ONLY_DISALLOWED_TOOLS = 'Write,Edit,NotebookEdit'
+
+/** Permission arguments of each preset id. */
+const PRESET_ARGS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  'read-only': Object.freeze([
+    '--permission-mode',
+    'dontAsk',
+    '--setting-sources',
+    '',
+    '--disallowedTools',
+    READ_ONLY_DISALLOWED_TOOLS,
+  ]),
+  acceptEdits: Object.freeze(['--permission-mode', 'acceptEdits']),
+  auto: Object.freeze(['--permission-mode', 'auto']),
+  bypassPermissions: Object.freeze(['--permission-mode', 'bypassPermissions']),
+})
+
+/**
+ * Models Claude Code offers. Its live list needs an `initialize` control request over stdin (and the
+ * CLI's auth discovery), which a probe cannot send, so the probe reports this list.
+ * Source: the 2.1.303 `initialize` response.
+ */
+export const CLAUDE_CODE_MODELS: readonly ProbeModel[] = Object.freeze(
+  (
+    [
+      ['default', 'Default (recommended)'],
+      ['opus', 'Opus'],
+      ['fable', 'Fable'],
+      ['sonnet', 'Sonnet'],
+      ['haiku', 'Haiku'],
+    ] as const
+  ).map(([id, name]) => Object.freeze({ id, name, efforts: CLAUDE_CODE.efforts })),
+)
+
+const VERSION = /^(\d+\.\d+\.\d+)/
+const PROBE_TIMEOUT_MS = 10_000
+
+/**
+ * Permission arguments for a plan. An unknown preset id falls back to the preset of its access level, and a
+ * read-only access always gets the read-only arguments (fail closed).
+ * @param input - the plan input.
+ * @returns the arguments.
+ */
+export function permissionArgs(input: Pick<PlanInput, 'preset' | 'access'>): readonly string[] {
+  if (input.access === 'read-only') return PRESET_ARGS['read-only'] as readonly string[]
+  const own = PRESET_ARGS[input.preset]
+  if (own !== undefined && CLAUDE_CODE.permissions.some(p => p.id === input.preset && p.access === input.access)) {
+    return own
+  }
+  return PRESET_ARGS[CLAUDE_CODE.presetForAccess[input.access]] as readonly string[]
+}
+
+/**
+ * Describe one Claude Code run.
+ * @param input - the plan input.
+ * @returns argv (without the executable), env overlay and removals.
+ */
+export function planClaudeCode(input: PlanInput): RunPlan {
+  const { runner } = input
+  const argv = [
+    '-p',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--no-session-persistence',
+    '--strict-mcp-config',
+    ...(runner.model === undefined || runner.model === '' ? [] : ['--model', runner.model]),
+    ...(runner.effort === undefined || runner.effort === '' ? [] : ['--effort', runner.effort]),
+    ...permissionArgs(input),
+    ...(input.instructions.trim() === '' ? [] : ['--append-system-prompt', input.instructions]),
+  ]
+  return {
+    argv,
+    env: {
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      DISABLE_AUTOUPDATER: '1',
+      CLAUDECODE: undefined,
+    },
+    envRemovePrefixes: ['CLAUDE_CODE_'],
+    cancelGraceMs: 0,
+  }
+}
+
+/**
+ * A session that writes the task to stdin, closes it and parses stream-json.
+ * @param input - the plan input.
+ * @returns the session.
+ */
+export function createClaudeCodeSession(input: PlanInput): RunSession {
+  const parser = new ClaudeStreamParser()
+  return {
+    start(io) {
+      io.write(input.task)
+      io.end()
+    },
+    line(text) {
+      try {
+        parser.line(text)
+      } catch {
+        // Never throw into the engine; an unreadable line is simply skipped.
+      }
+    },
+    finish(exit) {
+      try {
+        return parser.finish(exit)
+      } catch {
+        return { status: 'failed', category: 'unknown' }
+      }
+    },
+  }
+}
+
+/**
+ * The editor's connection test: version only (sign-in is checked by the first run; `auth status` would
+ * write Claude Code's state files and cannot validate a key).
+ * @param run - runs the executable.
+ * @param signal - aborts the probe.
+ * @returns version, the static model list and `auth: 'unknown'`.
+ */
+export async function probeClaudeCode(
+  run: Parameters<NonNullable<CliAdapter['probe']>>[1],
+  signal: AbortSignal,
+): Promise<Omit<ProbeResult, 'found'>> {
+  const result = await run(['--version'], { timeoutMs: PROBE_TIMEOUT_MS }, signal)
+  const version = result.code === 0 ? VERSION.exec(result.stdout.trim())?.[1] : undefined
+  return {
+    cli: 'claude-code',
+    ...(version === undefined ? { message: result.timedOut ? 'version-timeout' : 'version-unreadable' } : { version }),
+    auth: 'unknown',
+    models: CLAUDE_CODE_MODELS,
+  }
+}
 
 export const claudeCodeAdapter: CliAdapter = {
   descriptor: CLAUDE_CODE,
-  plan(_input: PlanInput, _nonce: string): RunPlan {
-    throw new Error('Claude Code runner is not implemented yet')
-  },
-  createSession(_input: PlanInput, _nonce: string): RunSession {
-    throw new Error('Claude Code runner is not implemented yet')
+  plan: (input, _nonce) => planClaudeCode(input),
+  createSession: (input, _nonce) => createClaudeCodeSession(input),
+  async probe(exe, run, signal) {
+    return { ...(await probeClaudeCode(run, signal)), found: true, path: exe }
   },
 }
