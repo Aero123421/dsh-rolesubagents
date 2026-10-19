@@ -1,6 +1,6 @@
 /** The role settings page that fills the `plugins.bundle.config` slot of this bundle. */
 
-import { type ReactNode, useId, useState } from 'react'
+import { type ReactNode, useEffect, useId, useState } from 'react'
 import { cliDescriptor } from '../shared/cli/index.ts'
 import { MAX_ROLES } from '../shared/roles.ts'
 import { CliSection } from './CliSection.tsx'
@@ -9,6 +9,7 @@ import type { Controller, PageState } from './controller.ts'
 import { type DraftRow, routeLabel, runnerModelLabel, templates } from './draft.ts'
 import { languageOf, issueText } from './i18n.ts'
 import { RoleEditor, WorkflowModelFields } from './RoleEditor.tsx'
+import { bindScrollClearance } from './scroll-clearance.ts'
 import { Badge, Button, Switch } from './ui.tsx'
 
 export interface RolesPageProps {
@@ -40,6 +41,10 @@ function Page() {
   const state = usePageState()
   const t = useT()
   const { draft } = state
+  useEffect(() => {
+    if (state.status !== 'ready' || !state.writable) return
+    return bindScrollClearance(document.querySelector('.dshrs-root'))
+  }, [state.status, state.writable])
   if (state.status !== 'ready' || draft === undefined) {
     return (
       <Frame locale={state.locale}>
@@ -57,7 +62,9 @@ function Page() {
           <p>{t('state.repaired', { count: state.repaired.length })}</p>
           <ul>
             {state.repaired.map(problem => (
-              <li key={`${problem.code}:${problem.index ?? ''}:${problem.id ?? ''}`}>{problem.message}</li>
+              <li key={`${problem.code}:${problem.index ?? ''}:${problem.id ?? ''}`}>
+                {issueText({ code: problem.code, roleId: problem.id }, t)}
+              </li>
             ))}
           </ul>
         </div>

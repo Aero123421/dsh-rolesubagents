@@ -20,6 +20,7 @@ A role can also run its child on a coding-agent CLI installed on the DSH host in
 
 - DSH `>=0.2.1-alpha.3 <0.3.0-0` (child Agent Preset selection and the storage-domain service)
 - The settings page appears on the DSH Web (`dsh web`) Plugins page.
+- 日本語の表示には dsh-japanese が必要です（[dsh-japanese](https://github.com/Aero123421/dsh-japanese)）。This plugin does not register the `ja` language. With that pack installed and Japanese selected, the page uses its own Japanese dictionary. Without the pack, and when DSH is set to 中文 (`zh-CN`), the page stays in English and does not show raw message keys.
 - CLI roles also need the CLI installed on the DSH host (see [External CLI runners](#external-cli-runners)) and a Host that offers plugins its subprocess service and subagent provider registration. Without them, CLI roles are refused with a message and DSH roles keep working.
 
 ## Install

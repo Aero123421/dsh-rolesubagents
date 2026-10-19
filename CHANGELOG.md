@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- The sticky save bar stays at the bottom of the settings page, and the last row is no longer hidden behind it. DSH Web scrolls this page in an ancestor (`overflow: auto`) that also has a bottom padding, so `position: sticky; bottom: 0` sits on that padding edge: the last lines slide under the bar and into the padding. The page sets `scroll-padding-bottom` on that scroller to the bar's height plus the scroller's padding, and scrolls a connection-test result into view (`scrollIntoView({ block: 'nearest' })`).
+- 日本語の表示には dsh-japanese が必要です（[dsh-japanese](https://github.com/Aero123421/dsh-japanese)）。This plugin does not call `addLanguage`. It keeps its own dictionary and follows DSH's active locale: `ja` shows Japanese; `zh` (`zh-CN`) and every other locale show English, never a raw message key. Stored-setting repair notes use the same dictionary.
+- Real Codex CLI, Claude Code, Antigravity CLI, and OpenCode were not run again for this patch.
+
 ## 0.2.0
 
 - Run a role's child on a coding-agent CLI installed on the DSH host: Codex CLI, Claude Code, Antigravity CLI (`agy`), or OpenCode. The parent keeps the same `delegate` tool; a CLI child runs once, notifies the parent with its final answer, and is stopped with `interrupt_agent`. Tested with codex-cli 0.163.0, Claude Code 2.1.303, agy 1.4.2, and OpenCode 1.19.3.
