@@ -7,9 +7,15 @@
  * The draft always exists while the form is `ready`. It follows the Host while
  * it holds no edits; once it holds edits, a Host revision that moved underneath
  * it is a conflict, and the only ways out are to discard or reload.
+ *
+ * It also runs the External CLIs connection test (`rolesubagentsCli/probe`)
+ * when the page was given a way to call it, and treats a Host without that
+ * service as "no connection test" rather than as an error.
  */
 
+import { CLI_IDS, type CliId, cliDescriptor, isCliId } from '../shared/cli/index.ts'
 import {
+  type CliSettings,
   type ForkScope,
   normalizeSettings,
   type RoleContext,
@@ -30,17 +36,30 @@ import {
   isDirty,
   moveRow,
   patchRole,
+  patchRunner,
   type RolePatch,
+  type RunnerPatch,
   removeRow,
   sameSettings,
   setAgentPreset,
+  setCliSettings,
   setContext,
   setEnabled,
   setForkScope,
   setModel,
+  setRunner,
   setWorkflowModel,
 } from './draft.ts'
-import type { CatalogEffort, ConfigFormLike, DshRemote, FormSnapshot, ModelCatalogLike } from './dsh.ts'
+import type {
+  CatalogEffort,
+  ConfigFormLike,
+  DshRemote,
+  FormSnapshot,
+  ModelCatalogLike,
+  ProbeModelLike,
+  ProbeResultLike,
+  RemoteResult,
+} from './dsh.ts'
 
 /** One model a provider offers, with the reasoning efforts it advertises. */
 export interface ModelOption {
@@ -78,6 +97,29 @@ export interface PresetState {
 
 export type SavePhase = 'idle' | 'saving' | 'saved' | 'failed'
 
+/** Calls the Host's `rolesubagentsCli/probe`. Throws {@link ProbeUnavailableError} when there is no way to call it. */
+export type ProbeCall = (cli: CliId, signal: AbortSignal) => Promise<RemoteResult<unknown>>
+
+/** Thrown by a {@link ProbeCall} when the page cannot reach the probe at all (no `connection` service). */
+export class ProbeUnavailableError extends Error {
+  constructor(message = 'the CLI connection test is not available') {
+    super(message)
+    this.name = 'ProbeUnavailableError'
+  }
+}
+
+/** One CLI's connection test. `result` keeps the last answer while a new test runs. */
+export interface ProbeState {
+  readonly status: 'idle' | 'loading' | 'ready' | 'error'
+  readonly result?: ProbeResultLike
+}
+
+/** Connection tests of every CLI. `available` is false once the Host turned out not to offer them. */
+export interface ProbesState {
+  readonly available: boolean
+  readonly clis: Readonly<Record<CliId, ProbeState>>
+}
+
 /** Everything the page renders from. A new object is published on every change. */
 export interface PageState {
   readonly locale: string
@@ -101,6 +143,7 @@ export interface PageState {
   readonly canAdd: boolean
   readonly catalog: CatalogState
   readonly presets: PresetState
+  readonly probes: ProbesState
 }
 
 export interface ControllerOptions {
@@ -108,6 +151,8 @@ export interface ControllerOptions {
   /** Source of the model catalog and the preset list; both are optional. */
   remote: DshRemote | undefined
   locale: string
+  /** The CLI connection test; omitted when the page has no way to call it (the button is then hidden). */
+  probe?: ProbeCall
 }
 
 export interface Controller {
@@ -122,6 +167,13 @@ export interface Controller {
   setForkScope(uid: number, scope: ForkScope): void
   setModel(uid: number, model: RoleModel | undefined): void
   setAgentPreset(uid: number, preset: string | undefined): void
+  /** Choose where a role runs: a CLI, or undefined for DSH. */
+  setRunner(uid: number, cli: CliId | undefined): void
+  patchRunner(uid: number, patch: RunnerPatch): void
+  /** Edit the External CLIs settings of one CLI. */
+  setCliSettings(cli: CliId, patch: CliSettings): void
+  /** Run the connection test of one CLI against the Host's saved settings. */
+  probeCli(cli: CliId): void
   moveRole(uid: number, delta: -1 | 1): void
   duplicateRole(uid: number): void
   removeRole(uid: number): void
@@ -137,15 +189,118 @@ export interface Controller {
   loadReference(): void
   /** Forget both lists (the Host's models changed or the connection reset); reload when the editor needs them. */
   invalidateReference(): void
+  /** Forget the connection tests and whether the Host offers them (a new connection may reach another Host). */
+  resetProbes(): void
   setLocale(locale: string): void
   dispose(): void
 }
 
 const IDLE_CATALOG: CatalogState = { status: 'idle', groups: [], partial: false }
 const IDLE_PRESETS: PresetState = { status: 'idle', options: [] }
+const IDLE_PROBE: ProbeState = { status: 'idle' }
+
+function idleProbes(available: boolean): ProbesState {
+  const clis = {} as Record<CliId, ProbeState>
+  for (const id of CLI_IDS) clis[id] = IDLE_PROBE
+  return { available, clis }
+}
 
 /** Remote error code of a Host that does not run the optional agent-preset service. */
 const PRESETS_ABSENT = 'gateway/invocation-unavailable'
+
+/** Gateway answers of a Host that does not export `rolesubagentsCli/probe` (an older plugin, or Remote services off). */
+const PROBE_ABSENT = new Set([
+  'gateway/invocation-unavailable',
+  'gateway/method-unavailable',
+  'gateway/service-unavailable',
+])
+
+/** Whether a rejected probe call means "this Host has no probe" rather than "this test failed". */
+function probeAbsent(error: unknown): boolean {
+  return error instanceof ProbeUnavailableError || (error instanceof Error && /\bHTTP 404\b/.test(error.message))
+}
+
+function text(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * Read a probe answer defensively: it crosses the wire, so only the known fields of the right type are kept.
+ * @param cli - the CLI that was tested.
+ * @param value - the Remote value.
+ * @returns the result, or undefined when it is not a probe result.
+ */
+export function probeResultOf(cli: CliId, value: unknown): ProbeResultLike | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  if (typeof raw.found !== 'boolean' || (raw.cli !== undefined && raw.cli !== cli)) return undefined
+  const models = Array.isArray(raw.models)
+    ? raw.models.flatMap((entry): ProbeModelLike[] => {
+        const model = typeof entry === 'object' && entry !== null ? (entry as Record<string, unknown>) : {}
+        const id = text(model.id)
+        if (id === undefined) return []
+        const name = text(model.name)
+        const efforts = Array.isArray(model.efforts)
+          ? model.efforts.filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
+          : undefined
+        return [{ id, ...(name === undefined ? {} : { name }), ...(efforts === undefined ? {} : { efforts }) }]
+      })
+    : undefined
+  const path = text(raw.path)
+  const version = text(raw.version)
+  const message = text(raw.message)
+  const auth = raw.auth === 'ok' || raw.auth === 'missing' || raw.auth === 'unknown' ? raw.auth : undefined
+  return {
+    cli,
+    found: raw.found,
+    ...(path === undefined ? {} : { path }),
+    ...(version === undefined ? {} : { version }),
+    ...(auth === undefined ? {} : { auth }),
+    ...(models === undefined ? {} : { models }),
+    ...(message === undefined ? {} : { message }),
+  }
+}
+
+/** What the editor suggests for a CLI role's provider, model and effort fields. */
+export interface CliSuggestions {
+  /** OpenCode only: providers found in the listed `provider/model` ids. */
+  readonly providers: readonly string[]
+  /** Model ids; for OpenCode, the ids of `provider` (without the `provider/` prefix). */
+  readonly models: readonly string[]
+  /** Efforts the listed model advertises (OpenCode's free-text effort). */
+  readonly efforts: readonly string[]
+}
+
+const unique = (values: readonly string[]): string[] => [...new Set(values)]
+
+/**
+ * Suggestions for a CLI role's fields: the models a connection test listed, else the descriptor's static list.
+ * @param probe - the CLI's connection test state.
+ * @param cli - the CLI.
+ * @param provider - OpenCode: the provider typed so far.
+ * @param model - the model typed so far (for its efforts).
+ * @returns the suggestions.
+ */
+export function cliSuggestions(probe: ProbeState | undefined, cli: CliId, provider = '', model = ''): CliSuggestions {
+  const descriptor = cliDescriptor(cli)
+  const listed = probe?.status === 'ready' ? (probe.result?.models ?? []) : []
+  if (!descriptor.needsProvider) {
+    const models = listed.length > 0 ? unique(listed.map(entry => entry.id)) : [...descriptor.modelSuggestions]
+    return { providers: [], models, efforts: listed.find(entry => entry.id === model)?.efforts ?? [] }
+  }
+  const split = listed.flatMap(entry => {
+    const slash = entry.id.indexOf('/')
+    return slash > 0 && slash < entry.id.length - 1
+      ? [{ provider: entry.id.slice(0, slash), model: entry.id.slice(slash + 1), efforts: entry.efforts ?? [] }]
+      : []
+  })
+  const ofProvider = split.filter(entry => entry.provider === provider)
+  return {
+    providers: unique(split.map(entry => entry.provider)),
+    models: unique((ofProvider.length > 0 ? ofProvider : split).map(entry => entry.model)),
+    efforts: ofProvider.find(entry => entry.model === model)?.efforts ?? [],
+  }
+}
 
 function catalogOf(value: ModelCatalogLike): { groups: ProviderOption[]; partial: boolean } {
   return {
@@ -164,7 +319,7 @@ function catalogOf(value: ModelCatalogLike): { groups: ProviderOption[]; partial
  * @returns the controller; call `dispose` to release its subscriptions.
  */
 export function createController(options: ControllerOptions): Controller {
-  const { form, remote } = options
+  const { form, remote, probe } = options
   const listeners = new Set<() => void>()
   let disposed = false
   let locale = options.locale
@@ -179,6 +334,8 @@ export function createController(options: ControllerOptions): Controller {
   let workflowCatalogWanted = false
   let catalogRun = 0
   let presetRun = 0
+  let probes = idleProbes(probe !== undefined)
+  const probeRuns = new Map<CliId, AbortController>()
   let state: PageState
 
   const hostSettings = (snapshot: FormSnapshot) => normalizeSettings(snapshot.value)
@@ -205,6 +362,7 @@ export function createController(options: ControllerOptions): Controller {
       canAdd: canEdit && canAddRole(current),
       catalog,
       presets,
+      probes,
     }
   }
 
@@ -305,6 +463,44 @@ export function createController(options: ControllerOptions): Controller {
     publish()
   }
 
+  function setProbe(cli: CliId, next: ProbeState): void {
+    probes = { ...probes, clis: { ...probes.clis, [cli]: next } }
+  }
+
+  function stopProbes(): void {
+    for (const run of probeRuns.values()) run.abort()
+    probeRuns.clear()
+  }
+
+  async function runProbe(cli: CliId): Promise<void> {
+    if (probe === undefined || !probes.available || !isCliId(cli)) return
+    probeRuns.get(cli)?.abort()
+    const run = new AbortController()
+    probeRuns.set(cli, run)
+    setProbe(cli, { ...probes.clis[cli], status: 'loading' })
+    publish()
+    let next: ProbeState | 'absent'
+    try {
+      const answer = await probe(cli, run.signal)
+      const result = answer.ok ? probeResultOf(cli, answer.value) : undefined
+      next =
+        result !== undefined
+          ? { status: 'ready', result }
+          : !answer.ok && PROBE_ABSENT.has(answer.error.code)
+            ? 'absent'
+            : { status: 'error' }
+    } catch (error) {
+      next = probeAbsent(error) ? 'absent' : { status: 'error' }
+    }
+    if (disposed || probeRuns.get(cli) !== run) return
+    probeRuns.delete(cli)
+    if (next === 'absent') {
+      stopProbes()
+      probes = idleProbes(false)
+    } else setProbe(cli, next)
+    publish()
+  }
+
   function loadWorkflowCatalog(): void {
     workflowCatalogWanted = true
     if (catalog.status === 'idle' || catalog.status === 'error') void loadCatalog()
@@ -339,6 +535,12 @@ export function createController(options: ControllerOptions): Controller {
     setForkScope: (uid, scope) => edit(current => setForkScope(current, uid, scope)),
     setModel: (uid, model) => edit(current => setModel(current, uid, model)),
     setAgentPreset: (uid, preset) => edit(current => setAgentPreset(current, uid, preset)),
+    setRunner: (uid, cli) => edit(current => setRunner(current, uid, cli)),
+    patchRunner: (uid, patch) => edit(current => patchRunner(current, uid, patch)),
+    setCliSettings: (cli, patch) => edit(current => setCliSettings(current, cli, patch)),
+    probeCli(cli) {
+      void runProbe(cli)
+    },
     moveRole: (uid, delta) => edit(current => moveRow(current, uid, delta)),
     duplicateRole: uid => edit(current => duplicateRow(current, uid), openNewRow),
     removeRole(uid) {
@@ -376,6 +578,7 @@ export function createController(options: ControllerOptions): Controller {
             { op: 'set', path: ['enabled'], value: settings.enabled },
             { op: 'set', path: ['roles'], value: settings.roles },
             { op: 'set', path: ['workflowModel'], value: settings.workflowModel ?? null },
+            { op: 'set', path: ['clis'], value: settings.clis ?? {} },
           ],
           sent.revision,
         )
@@ -413,6 +616,11 @@ export function createController(options: ControllerOptions): Controller {
       else if (workflowCatalogWanted) loadWorkflowCatalog()
       else publish()
     },
+    resetProbes() {
+      stopProbes()
+      probes = idleProbes(probe !== undefined)
+      publish()
+    },
     setLocale(next) {
       if (next === locale) return
       locale = next
@@ -422,6 +630,7 @@ export function createController(options: ControllerOptions): Controller {
       disposed = true
       catalogRun++
       presetRun++
+      stopProbes()
       unsubscribe()
       listeners.clear()
     },

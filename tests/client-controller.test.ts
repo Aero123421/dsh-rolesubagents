@@ -1,12 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
-import { type Controller, createController } from '../src/client/controller.ts'
+import {
+  type Controller,
+  cliSuggestions,
+  createController,
+  type ProbeCall,
+  probeResultOf,
+  ProbeUnavailableError,
+} from '../src/client/controller.ts'
 import { DEFAULT_ROLES, type RoleDefinition } from '../src/shared/roles.ts'
-import { CATALOG, fail, type FakeForm, fakeForm, fakeRemote, ok } from './client-helpers.ts'
+import { CATALOG, fail, type FakeForm, fakeForm, fakeProbe, fakeRemote, ok, probeAnswer } from './client-helpers.ts'
 
-function setup(initial: Parameters<typeof fakeForm>[0] = {}, locale = 'en') {
+function setup(initial: Parameters<typeof fakeForm>[0] = {}, locale = 'en', probe?: ProbeCall) {
   const fake = fakeForm(initial)
   const remote = fakeRemote()
-  const controller = createController({ form: fake.form, remote, locale })
+  const controller = createController({ form: fake.form, remote, locale, ...(probe === undefined ? {} : { probe }) })
   return { fake, remote, controller }
 }
 
@@ -168,6 +175,7 @@ describe('save', () => {
       ['enabled'],
       ['roles'],
       ['workflowModel'],
+      ['clis'],
     ])
     expect(call.ops[0]).toMatchObject({ value: false })
     const written = (call.ops[1] as { value: RoleDefinition[] }).value
@@ -436,6 +444,7 @@ describe('workflow model', () => {
         { path: ['enabled'] },
         { path: ['roles'] },
         { path: ['workflowModel'], value: { provider: 'p', model: 'm' } },
+        { path: ['clis'], value: {} },
       ],
     })
     expect(controller.getSnapshot()).toMatchObject({
@@ -472,5 +481,207 @@ describe('workflow model', () => {
     await flush()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(3)
     expect(remote.agentPresets.list).not.toHaveBeenCalled()
+  })
+})
+
+describe('external CLI runners', () => {
+  it('edits runners and CLI settings, and saves them with the roles in one fenced mutation', async () => {
+    const { controller, fake } = setup({ revision: 6 })
+    const worker = uidOf(controller, 'worker')
+    controller.setRunner(worker, 'codex')
+    controller.patchRunner(worker, { model: 'gpt-5.5', effort: 'high', timeoutMinutes: 20 })
+    controller.setRunner(uidOf(controller, 'general'), 'codex')
+    controller.setCliSettings('codex', { executable: '/opt/codex', envPassthrough: ['CODEX_API_KEY'] })
+    controller.setCliSettings('agy', { executable: 'not/a/bare/name' })
+    expect(controller.getSnapshot()).toMatchObject({
+      canSave: false,
+      issues: [{ code: 'invalid-cli-settings', cli: 'agy', field: 'executable' }],
+    })
+    controller.setCliSettings('agy', { executable: '' })
+    expect(controller.getSnapshot().canSave).toBe(true)
+    await controller.save()
+    const call = fake.calls[0]
+    expect(call?.revision).toBe(6)
+    expect(call?.ops.map(op => op.path[0])).toEqual(['enabled', 'roles', 'workflowModel', 'clis'])
+    expect(call?.ops[3]).toEqual({
+      op: 'set',
+      path: ['clis'],
+      value: { codex: { executable: '/opt/codex', envPassthrough: ['CODEX_API_KEY'] } },
+    })
+    expect(roleOf(fake, 'worker')?.runner).toEqual({
+      cli: 'codex',
+      model: 'gpt-5.5',
+      effort: 'high',
+      permission: 'workspace-write',
+      timeoutMinutes: 20,
+    })
+    expect(roleOf(fake, 'general')?.runner).toBeUndefined()
+    expect(controller.getSnapshot()).toMatchObject({ dirty: false, save: 'saved', repaired: [] })
+    expect(controller.getSnapshot().draft?.clis).toEqual({
+      codex: { executable: '/opt/codex', envPassthrough: ['CODEX_API_KEY'] },
+    })
+  })
+
+  it('follows Read-only with the runner permission', () => {
+    const { controller } = setup()
+    const explorer = uidOf(controller, 'explorer')
+    controller.setRunner(explorer, 'claude-code')
+    expect(rows(controller).find(row => row.uid === explorer)?.role.runner?.permission).toBe('read-only')
+    controller.patchRole(explorer, { readOnly: false })
+    expect(rows(controller).find(row => row.uid === explorer)?.role.runner?.permission).toBe('acceptEdits')
+  })
+})
+
+describe('CLI connection test', () => {
+  const flushAll = async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+  }
+
+  it('is unavailable without a way to call it', () => {
+    const { controller } = setup()
+    expect(controller.getSnapshot().probes.available).toBe(false)
+    controller.probeCli('codex')
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
+  })
+
+  it('tests one CLI and keeps its answer', async () => {
+    const probe = fakeProbe()
+    probe.mockResolvedValueOnce(
+      probeAnswer('codex', { models: [{ id: 'gpt-x', name: 'GPT X', efforts: ['low', 9] }, { name: 'no id' }] }),
+    )
+    const { controller } = setup({}, 'en', probe)
+    expect(controller.getSnapshot().probes).toMatchObject({ available: true, clis: { codex: { status: 'idle' } } })
+    controller.probeCli('codex')
+    expect(controller.getSnapshot().probes.clis.codex.status).toBe('loading')
+    await flushAll()
+    expect(probe).toHaveBeenCalledWith('codex', expect.any(AbortSignal))
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({
+      status: 'ready',
+      result: {
+        cli: 'codex',
+        found: true,
+        path: '/usr/local/bin/codex',
+        version: '1.2.3',
+        auth: 'ok',
+        models: [{ id: 'gpt-x', name: 'GPT X', efforts: ['low'] }],
+      },
+    })
+    expect(controller.getSnapshot().probes.clis.agy.status).toBe('idle')
+    controller.probeCli('codex')
+    expect(controller.getSnapshot().probes.clis.codex).toMatchObject({ status: 'loading', result: { found: true } })
+  })
+
+  it.each([
+    ['a Host without the probe method', async () => fail('gateway/invocation-unavailable')],
+    ['a Host without the Remote service', async () => fail('gateway/method-unavailable')],
+    ['a client without the connection service', async () => Promise.reject(new ProbeUnavailableError())],
+    ['a Host without the Gateway route', async () => Promise.reject(new Error('transport failure: HTTP 404'))],
+  ])('hides the test for %s', async (_name, answer) => {
+    const probe = vi.fn<ProbeCall>(answer as ProbeCall)
+    const { controller } = setup({}, 'en', probe)
+    controller.probeCli('agy')
+    await flushAll()
+    expect(controller.getSnapshot().probes.available).toBe(false)
+    expect(controller.getSnapshot().probes.clis.agy).toEqual({ status: 'idle' })
+    controller.probeCli('agy')
+    expect(probe).toHaveBeenCalledTimes(1)
+    controller.resetProbes()
+    expect(controller.getSnapshot().probes.available).toBe(true)
+  })
+
+  it.each([
+    ['a thrown error', async () => Promise.reject(new Error('boom'))],
+    ['a failed call', async () => fail('gateway/internal')],
+    ['an answer that is not a probe result', async () => ok({ nope: true })],
+    ['an answer for another CLI', async () => probeAnswer('codex')],
+  ])('reports %s as a failed test and keeps the button', async (_name, answer) => {
+    const { controller } = setup({}, 'en', vi.fn<ProbeCall>(answer as ProbeCall))
+    controller.probeCli('opencode')
+    await flushAll()
+    expect(controller.getSnapshot().probes).toMatchObject({ available: true, clis: { opencode: { status: 'error' } } })
+  })
+
+  it('keeps only the latest test of a CLI and aborts tests on dispose', async () => {
+    const signals: AbortSignal[] = []
+    const answers: ((value: Awaited<ReturnType<ProbeCall>>) => void)[] = []
+    const probe = vi.fn<ProbeCall>(
+      (_cli, signal) =>
+        new Promise(resolve => {
+          signals.push(signal)
+          answers.push(resolve)
+        }),
+    )
+    const { controller } = setup({}, 'en', probe)
+    controller.probeCli('codex')
+    controller.probeCli('codex')
+    expect(signals[0]?.aborted).toBe(true)
+    answers[1]?.(probeAnswer('codex', { version: 'new' }))
+    answers[0]?.(probeAnswer('codex', { version: 'old' }))
+    await flushAll()
+    expect(controller.getSnapshot().probes.clis.codex.result?.version).toBe('new')
+    controller.probeCli('agy')
+    controller.dispose()
+    expect(signals[2]?.aborted).toBe(true)
+  })
+
+  it('forgets the tests on a new connection', async () => {
+    const { controller } = setup({}, 'en', fakeProbe())
+    controller.probeCli('codex')
+    await flushAll()
+    controller.resetProbes()
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
+  })
+})
+
+describe('CLI suggestions', () => {
+  it('suggests the static models until a test lists the CLI models', () => {
+    expect(cliSuggestions(undefined, 'claude-code').models).toEqual(['default', 'opus', 'sonnet', 'haiku', 'fable'])
+    expect(cliSuggestions({ status: 'ready', result: { cli: 'codex', found: false } }, 'codex').models).toContain(
+      'gpt-5.5',
+    )
+    const ready = {
+      status: 'ready' as const,
+      result: { cli: 'agy' as const, found: true, models: [{ id: 'a', efforts: ['low'] }, { id: 'b' }, { id: 'a' }] },
+    }
+    expect(cliSuggestions(ready, 'agy', '', 'a')).toEqual({ providers: [], models: ['a', 'b'], efforts: ['low'] })
+    expect(cliSuggestions({ ...ready, status: 'error' }, 'agy').models).toContain('gemini-3.1-pro')
+  })
+
+  it('splits OpenCode ids into providers and models', () => {
+    const probe = {
+      status: 'ready' as const,
+      result: {
+        cli: 'opencode' as const,
+        found: true,
+        models: [
+          { id: 'deepseek/v4-pro', efforts: ['high', 'max'] },
+          { id: 'deepseek/v4-flash' },
+          { id: 'openrouter/qwen/qwen3' },
+          { id: 'broken/' },
+          { id: 'noslash' },
+        ],
+      },
+    }
+    expect(cliSuggestions(undefined, 'opencode')).toEqual({ providers: [], models: [], efforts: [] })
+    expect(cliSuggestions(probe, 'opencode')).toEqual({
+      providers: ['deepseek', 'openrouter'],
+      models: ['v4-pro', 'v4-flash', 'qwen/qwen3'],
+      efforts: [],
+    })
+    expect(cliSuggestions(probe, 'opencode', 'deepseek', 'v4-pro')).toEqual({
+      providers: ['deepseek', 'openrouter'],
+      models: ['v4-pro', 'v4-flash'],
+      efforts: ['high', 'max'],
+    })
+  })
+
+  it('reads probe answers defensively', () => {
+    expect(probeResultOf('codex', null)).toBeUndefined()
+    expect(probeResultOf('codex', { found: 'yes' })).toBeUndefined()
+    expect(probeResultOf('codex', { found: false, auth: 'maybe', path: 3, message: 'not-found' })).toEqual({
+      cli: 'codex',
+      found: false,
+      message: 'not-found',
+    })
   })
 })

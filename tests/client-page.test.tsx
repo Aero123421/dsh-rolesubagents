@@ -1,10 +1,19 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it } from 'vitest'
-import { type Controller, createController } from '../src/client/controller.ts'
+import { type Controller, createController, type ProbeCall } from '../src/client/controller.ts'
 import { RolesPage } from '../src/client/RolesPage.tsx'
 import { DEFAULT_ROLES } from '../src/shared/roles.ts'
 import { cleanup, fireEvent, render, screen, settle, update, waitFor, within } from './client-dom.ts'
-import { type FakeForm, fakeForm, fakeRemote, type FakeRemote } from './client-helpers.ts'
+import {
+  type FakeForm,
+  fail,
+  fakeForm,
+  fakeProbe,
+  fakeRemote,
+  type FakeRemote,
+  ok,
+  probeAnswer,
+} from './client-helpers.ts'
 
 afterEach(cleanup)
 
@@ -14,12 +23,19 @@ interface MountOptions {
   remote?: FakeRemote
   /** Load the model and preset lists up front, as if an editor had been opened before. */
   preload?: boolean
+  /** The CLI connection test; omitted = not available. */
+  probe?: ProbeCall
 }
 
 async function mount(options: MountOptions = {}) {
   const fake = fakeForm(options.form)
   const remote = options.remote ?? fakeRemote()
-  const controller = createController({ form: fake.form, remote, locale: options.locale ?? 'en' })
+  const controller = createController({
+    form: fake.form,
+    remote,
+    locale: options.locale ?? 'en',
+    ...(options.probe === undefined ? {} : { probe: options.probe }),
+  })
   render(<RolesPage controller={controller} view="page" />)
   if (options.preload !== false) update(() => controller.loadReference())
   await settle()
@@ -448,5 +464,262 @@ describe('workflow model section', () => {
     fireEvent.click(picker.getByRole('button', { name: 'Retry' }))
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(2)
+  })
+})
+
+const editorOf = (id: string) => within(rowOf(id))
+const cardOf = (name: string) => within(screen.getByLabelText(name))
+const select = (el: HTMLElement) => el as HTMLSelectElement
+const input = (el: HTMLElement) => el as HTMLInputElement
+
+describe('runs on an external CLI', () => {
+  it('switches a role to a CLI, showing the CLI fields and hiding the DSH-only ones', async () => {
+    await mount()
+    fireEvent.click(button('Edit role worker'))
+    const runsOn = select(screen.getByLabelText('Runs on'))
+    expect(runsOn.value).toBe('')
+    expect([...runsOn.options].map(option => option.textContent)).toEqual([
+      'DSH (built-in child)',
+      'Codex',
+      'Claude Code',
+      'Antigravity',
+      'OpenCode',
+    ])
+    fireEvent.change(runsOn, { target: { value: 'codex' } })
+    const editor = editorOf('worker')
+    expect(screen.getAllByRole('radio')).toHaveLength(0)
+    expect(screen.queryByLabelText('Agent preset')).toBeNull()
+    expect(screen.queryByText('Child model')).toBeNull()
+    expect(screen.getByText('Codex settings')).toBeTruthy()
+    expect(input(editor.getByLabelText('Model')).placeholder).toBe('CLI default')
+    expect(editor.queryByLabelText('Provider')).toBeNull()
+    const effort = select(screen.getByLabelText('Reasoning effort'))
+    expect([...effort.options].map(option => option.value)).toEqual([
+      '',
+      'none',
+      'minimal',
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max',
+    ])
+    expect(select(screen.getByLabelText('Permission')).value).toBe('workspace-write')
+    expect(screen.getByText(/It runs once\. The parent gets its final answer/)).toBeTruthy()
+    expect(screen.getByText(/does not undo file changes/)).toBeTruthy()
+    expect(editor.getByText('Codex', { selector: '.dshrs-badge' })).toBeTruthy()
+    expect(editor.queryByText('Fresh')).toBeNull()
+    expect(editor.getByText('Model: Codex · CLI default')).toBeTruthy()
+    expect(screen.getByText(/runs once in Codex; cannot receive send_message/)).toBeTruthy()
+    const datalist = document.getElementById(input(editor.getByLabelText('Model')).getAttribute('list') ?? '')
+    expect([...(datalist?.querySelectorAll('option') ?? [])].map(option => option.value)).toContain('gpt-5.5')
+    fireEvent.change(editor.getByLabelText('Model'), { target: { value: 'gpt-5.5' } })
+    fireEvent.change(effort, { target: { value: 'high' } })
+    expect(editor.getByText('Model: Codex · gpt-5.5 · high')).toBeTruthy()
+    fireEvent.change(runsOn, { target: { value: '' } })
+    expect(screen.getAllByRole('radio')).toHaveLength(2)
+    expect(editor.getByText('Fresh')).toBeTruthy()
+  })
+
+  it('keeps built-in roles on DSH', async () => {
+    await mount()
+    fireEvent.click(button('Edit role general'))
+    const runsOn = select(screen.getByLabelText('Runs on'))
+    expect(runsOn.disabled).toBe(true)
+    expect(runsOn.value).toBe('')
+    expect(screen.getByText('Built-in roles always run on DSH.')).toBeTruthy()
+  })
+
+  it('offers only read-only presets while Read-only is on, and moves the preset with it', async () => {
+    await mount()
+    fireEvent.click(button('Edit role explorer'))
+    fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: 'claude-code' } })
+    const permission = select(screen.getByLabelText('Permission'))
+    expect(permission.value).toBe('read-only')
+    expect([...permission.options].map(option => [option.textContent, option.disabled])).toEqual([
+      ['Read-only — no file changes', false],
+      ['Accept edits — edits in the workspace', true],
+      ['Auto (classifier) — edits in the workspace', true],
+      ['Bypass permissions — no restrictions', true],
+    ])
+    expect(screen.getByText(/Read-only roles can use only a read-only preset/)).toBeTruthy()
+    expect(screen.getByText(/without its write tools \(Write, Edit, NotebookEdit\) and in dontAsk mode/)).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('Block file writes for this role'))
+    expect(permission.value).toBe('acceptEdits')
+    expect([...permission.options].every(option => !option.disabled)).toBe(true)
+    fireEvent.change(permission, { target: { value: 'bypassPermissions' } })
+    fireEvent.click(screen.getByLabelText('Block file writes for this role'))
+    expect(permission.value).toBe('read-only')
+    expect(screen.queryByText('Fix these before saving:')).toBeNull()
+  })
+
+  it('asks OpenCode for a provider and a model, with suggestions from the connection test', async () => {
+    const probe = fakeProbe()
+    probe.mockResolvedValue(
+      probeAnswer('opencode', {
+        models: [{ id: 'deepseek/v4-pro', efforts: ['high', 'max'] }, { id: 'deepseek/v4-flash' }, { id: 'local/q' }],
+      }),
+    )
+    await mount({ probe })
+    fireEvent.click(button('Test connection to OpenCode'))
+    await settle()
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: 'opencode' } })
+    const editor = editorOf('worker')
+    expect(editor.getAllByText(/on OpenCode needs both a provider and a model/).length).toBeGreaterThan(0)
+    expect(editor.getByText('Needs a fix')).toBeTruthy()
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+    const provider = input(editor.getByLabelText('Provider'))
+    const listOf = (el: HTMLInputElement) =>
+      [...(document.getElementById(el.getAttribute('list') ?? '')?.querySelectorAll('option') ?? [])].map(
+        option => option.value,
+      )
+    expect(listOf(provider)).toEqual(['deepseek', 'local'])
+    fireEvent.change(provider, { target: { value: 'deepseek' } })
+    const model = input(editor.getByLabelText('Model'))
+    expect(listOf(model)).toEqual(['v4-pro', 'v4-flash'])
+    fireEvent.change(model, { target: { value: 'v4-pro' } })
+    const effort = input(screen.getByLabelText('Reasoning effort'))
+    expect(listOf(effort)).toEqual(['high', 'max'])
+    fireEvent.change(effort, { target: { value: 'max' } })
+    expect(editor.getByText('Model: OpenCode · deepseek/v4-pro · max')).toBeTruthy()
+    expect(screen.queryByText('Fix these before saving:')).toBeNull()
+    expect(screen.getByText(/never falls back to its own default model/)).toBeTruthy()
+  })
+
+  it('validates the timeout as it is typed and saves it', async () => {
+    const { fake } = await mount()
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: 'agy' } })
+    const timeout = input(screen.getByLabelText('Timeout (minutes)'))
+    expect(timeout.placeholder).toBe('30')
+    fireEvent.change(timeout, { target: { value: '1.' } })
+    expect(timeout.value).toBe('1.')
+    fireEvent.change(timeout, { target: { value: '1.5' } })
+    expect(timeout.getAttribute('aria-invalid')).toBe('true')
+    expect(screen.getAllByText(/must be a whole number of minutes from 1 to 1440/).length).toBeGreaterThan(0)
+    fireEvent.change(timeout, { target: { value: 'abc' } })
+    expect(timeout.value).toBe('abc')
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(timeout, { target: { value: '45' } })
+    expect(timeout.getAttribute('aria-invalid')).toBeNull()
+    fireEvent.click(button('Save'))
+    await saved(fake)
+    const roles = (fake.calls[0]?.ops[1] as { value: { id: string; runner?: unknown }[] } | undefined)?.value
+    expect(roles?.find(role => role.id === 'worker')?.runner).toEqual({
+      cli: 'agy',
+      permission: 'edit-files',
+      timeoutMinutes: 45,
+    })
+  })
+})
+
+describe('external CLIs section', () => {
+  it('edits the executable and forwarded names of a CLI and saves them', async () => {
+    const { fake } = await mount()
+    expect(screen.getByText('External CLIs', { selector: 'h3' })).toBeTruthy()
+    const codex = cardOf('Codex')
+    const executable = input(codex.getByLabelText('Executable'))
+    expect(executable.placeholder).toBe('codex')
+    fireEvent.change(executable, { target: { value: 'bin/codex' } })
+    expect(executable.getAttribute('aria-invalid')).toBe('true')
+    expect(codex.getByText(/must be an absolute path or a command name without folders/)).toBeTruthy()
+    fireEvent.change(executable, { target: { value: '/opt/codex/bin/codex' } })
+    expect(executable.getAttribute('aria-invalid')).toBeNull()
+    const env = input(codex.getByLabelText('Forwarded environment variables'))
+    fireEvent.change(env, { target: { value: 'CODEX_API_KEY, ' } })
+    expect(env.value).toBe('CODEX_API_KEY, ')
+    fireEvent.change(env, { target: { value: 'CODEX_API_KEY, 9X' } })
+    expect(env.getAttribute('aria-invalid')).toBe('true')
+    fireEvent.change(env, { target: { value: 'CODEX_API_KEY, OPENAI_BASE_URL' } })
+    fireEvent.click(button('Save'))
+    await saved(fake)
+    expect(fake.calls[0]?.ops[3]).toEqual({
+      op: 'set',
+      path: ['clis'],
+      value: { codex: { executable: '/opt/codex/bin/codex', envPassthrough: ['CODEX_API_KEY', 'OPENAI_BASE_URL'] } },
+    })
+    expect(env.value).toBe('CODEX_API_KEY, OPENAI_BASE_URL')
+    fireEvent.change(env, { target: { value: '' } })
+    fireEvent.click(button('Discard'))
+    expect(env.value).toBe('CODEX_API_KEY, OPENAI_BASE_URL')
+  })
+
+  it('counts the roles that use a CLI', async () => {
+    await mount()
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: 'claude-code' } })
+    expect(cardOf('Claude Code').getByText('Used by 1 role(s)')).toBeTruthy()
+    expect(cardOf('Codex').queryByText(/Used by/)).toBeNull()
+  })
+
+  it('hides the connection test when it is not available', async () => {
+    await mount()
+    expect(screen.queryByRole('button', { name: /Test connection/ })).toBeNull()
+    expect(screen.getByText('The connection test is not available on this Host.')).toBeTruthy()
+  })
+
+  it('shows what the connection test found', async () => {
+    const probe = fakeProbe()
+    probe.mockImplementation(async cli =>
+      cli === 'codex'
+        ? probeAnswer('codex', { version: '0.200.0', models: [{ id: 'a' }, { id: 'b' }] })
+        : cli === 'agy'
+          ? probeAnswer('agy', { auth: 'missing', message: 'probe-failed', version: undefined })
+          : cli === 'opencode'
+            ? ok({ cli, found: false, message: 'not-found' })
+            : ok({ cli, found: false, message: 'subprocess-unavailable' }),
+    )
+    await mount({ probe })
+    expect(screen.queryByText(/not available on this Host/)).toBeNull()
+    fireEvent.click(button('Test connection to Codex'))
+    expect(button('Test connection to Codex').getAttribute('aria-busy')).toBe('true')
+    expect(button('Test connection to Codex').textContent).toBe('Testing…')
+    await settle()
+    expect(
+      cardOf('Codex').getByText('Found: /usr/local/bin/codex · Version 0.200.0 · Signed in · 2 models listed'),
+    ).toBeTruthy()
+    fireEvent.click(button('Test connection to Antigravity'))
+    fireEvent.click(button('Test connection to OpenCode'))
+    fireEvent.click(button('Test connection to Claude Code'))
+    await settle()
+    expect(cardOf('Antigravity').getByText(/Not signed in\. Sign in with Antigravity on the Host/)).toBeTruthy()
+    expect(cardOf('Antigravity').getByText('The version and sign-in checks did not answer.')).toBeTruthy()
+    expect(cardOf('OpenCode').getByText(/OpenCode was not found on the Host/)).toBeTruthy()
+    expect(cardOf('Claude Code').getByText(/cannot start programs for plugins/)).toBeTruthy()
+    fireEvent.change(cardOf('Codex').getByLabelText('Executable'), { target: { value: '/x/codex' } })
+    expect(cardOf('Codex').getByText(/The test uses the saved settings/)).toBeTruthy()
+    expect(probe).toHaveBeenCalledWith('codex', expect.any(AbortSignal))
+  })
+
+  it('reports a failed test, and hides the button when the Host has no probe', async () => {
+    const probe = fakeProbe()
+    probe.mockRejectedValueOnce(new Error('network down'))
+    probe.mockResolvedValueOnce(fail('gateway/invocation-unavailable'))
+    await mount({ probe })
+    fireEvent.click(button('Test connection to Codex'))
+    await settle()
+    expect(cardOf('Codex').getByText('The test could not run. Check the connection and try again.')).toBeTruthy()
+    fireEvent.click(button('Test connection to Codex'))
+    await settle()
+    expect(screen.queryByRole('button', { name: /Test connection/ })).toBeNull()
+    expect(screen.getByText('The connection test is not available on this Host.')).toBeTruthy()
+  })
+
+  it('shows the CLI editor and section in Japanese', async () => {
+    await mount({ locale: 'ja', probe: fakeProbe() })
+    expect(screen.getByText('外部 CLI', { selector: 'h3' })).toBeTruthy()
+    expect(cardOf('Codex').getByLabelText('引き渡す環境変数')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Codex への接続をテスト' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'ロール worker を編集' }))
+    fireEvent.change(screen.getByLabelText('実行先'), { target: { value: 'codex' } })
+    const permission = select(screen.getByLabelText('権限'))
+    expect([...permission.options].map(option => option.textContent)).toEqual([
+      '読み取り専用 — ファイルを変更しない',
+      'ワークスペースへの書き込み — ワークスペース内を編集',
+      'フルアクセス（サンドボックスなし） — 制限なし',
+    ])
+    expect(within(rowOf('worker')).getByText('モデル: Codex · CLI の既定')).toBeTruthy()
+    expect(screen.getByText(/1回だけ実行されます/)).toBeTruthy()
   })
 })

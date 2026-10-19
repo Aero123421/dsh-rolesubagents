@@ -5,7 +5,17 @@
  * never translated.
  */
 
-import { MAX_DESCRIPTION_LENGTH, MAX_INSTRUCTIONS_LENGTH, MAX_ROLES, type SettingsProblem } from '../shared/roles.ts'
+import { type AccessLevel, type CliId, cliDescriptor } from '../shared/cli/index.ts'
+import {
+  DEFAULT_RUNNER_TIMEOUT_MINUTES,
+  MAX_DESCRIPTION_LENGTH,
+  MAX_ENV_PASSTHROUGH,
+  MAX_INSTRUCTIONS_LENGTH,
+  MAX_ROLES,
+  MAX_RUNNER_TIMEOUT_MINUTES,
+  type SettingsProblem,
+} from '../shared/roles.ts'
+import { MAX_RUNNER_NAME_LENGTH } from '../shared/runner.ts'
 import { ID_MAX_LENGTH, type Issue } from './draft.ts'
 
 const en = {
@@ -50,6 +60,8 @@ const en = {
   'row.down': 'Down',
   'row.downLabel': 'Move role {id} down',
   'row.needsFix': 'Needs a fix',
+  'row.cliTitle': 'Runs once in {cli} on the Host, starting fresh',
+  'row.cliDefault': 'CLI default',
 
   'ed.id': 'Role ID',
   'ed.idHelp':
@@ -100,6 +112,75 @@ const en = {
   'ed.previewParent': 'What the parent sees',
   'ed.previewChild': 'What the child gets',
   'ed.previewChildNone': "Nothing is added to the child's context.",
+  'ed.runsOn': 'Runs on',
+  'ed.runsOnDsh': 'DSH (built-in child)',
+  'ed.runsOnHelp': 'DSH runs the child inside this session. A CLI runs it once as a separate program on the Host.',
+  'ed.runsOnBuiltin': 'Built-in roles always run on DSH.',
+  'ed.cliSettings': '{cli} settings',
+  'ed.cliModelHelp':
+    "Leave empty to use {cli}'s default model. Suggestions come from Test connection under External CLIs, or a built-in list; any model ID {cli} accepts works.",
+  'ed.cliModelOpenCode':
+    'OpenCode needs both a provider and a model; it never falls back to its own default model. Test connection under External CLIs lists the models it can use.',
+  'ed.cliEffortFree': "A variant name of the model, such as high. Leave empty for the model's default.",
+  'ed.permission': 'Permission',
+  'ed.permissionHelp':
+    'What {cli} may do without asking; a delegated run never stops to ask. A delegation never gets more access than the parent session has.',
+  'ed.permissionReadOnly': 'Read-only roles can use only a read-only preset.',
+  'ed.permissionOption': '{name} — {access}',
+  'ed.timeout': 'Timeout (minutes)',
+  'ed.timeoutHelp': 'The run is stopped after this many minutes (1–{max}). Leave empty for {default}.',
+  'ed.cliLimits': 'A CLI role works differently from a DSH role:',
+  'ed.cliLimitOnce':
+    'It runs once. The parent gets its final answer, but cannot send it follow-up messages (send_message), and list_agents does not show it.',
+  'ed.cliLimitFresh': 'It always starts fresh: it cannot fork the parent conversation or use an agent preset.',
+  'ed.cliLimitInstalled':
+    '{cli} must be installed and signed in on the Host, or get its API key from a forwarded variable (External CLIs).',
+  'ed.cliLimitCancel': 'Stopping it does not undo file changes it already made.',
+  'ed.readOnlyHelp.codex': 'Runs Codex in its read-only sandbox, so it cannot change files.',
+  'ed.readOnlyHelp.claude-code':
+    'Runs Claude Code without its write tools (Write, Edit, NotebookEdit) and in dontAsk mode, so anything that would need approval is refused.',
+  'ed.readOnlyHelp.agy': 'Gives Antigravity only its read tools: view files, search, and list folders.',
+  'ed.readOnlyHelp.opencode':
+    'Denies every OpenCode tool except reading, searching and listing files; .env files stay unreadable.',
+
+  'preset.read-only': 'Read-only',
+  'preset.workspace-write': 'Workspace write',
+  'preset.danger-full-access': 'Full access (no sandbox)',
+  'preset.acceptEdits': 'Accept edits',
+  'preset.auto': 'Auto (classifier)',
+  'preset.bypassPermissions': 'Bypass permissions',
+  'preset.edit-files': 'Edit files (no shell)',
+  'preset.full-access': 'Full access',
+  'access.read-only': 'no file changes',
+  'access.workspace-write': 'edits in the workspace',
+  'access.full-access': 'no restrictions',
+
+  'clis.heading': 'External CLIs',
+  'clis.hint':
+    'Settings shared by every role that runs on a CLI. API keys are never stored here: sign in with each CLI on the Host, or forward the name of an environment variable that holds the key.',
+  'clis.used': 'Used by {count} role(s)',
+  'clis.executable': 'Executable',
+  'clis.executableHelp':
+    'An absolute path, or a command name looked up on the Host\'s PATH. Leave empty for "{default}".',
+  'clis.env': 'Forwarded environment variables',
+  'clis.envHelp':
+    "Names only, separated by commas or spaces. Their values are read from the Host's environment when {cli} starts and are never stored.",
+  'clis.envPlaceholder': 'e.g. MY_API_KEY',
+  'clis.test': 'Test connection',
+  'clis.testLabel': 'Test connection to {cli}',
+  'clis.testing': 'Testing…',
+  'clis.testSaved': 'The test uses the saved settings. Save first to test your changes.',
+  'clis.unavailable': 'The connection test is not available on this Host.',
+  'probe.found': 'Found: {path}',
+  'probe.version': 'Version {version}',
+  'probe.authOk': 'Signed in',
+  'probe.authMissing': 'Not signed in. Sign in with {cli} on the Host, or forward its API-key variable.',
+  'probe.authUnknown': 'Sign-in state unknown',
+  'probe.models': '{count} models listed',
+  'probe.notFound': '{cli} was not found on the Host. Install it, or set its path above.',
+  'probe.noSubprocess': 'This Host cannot start programs for plugins, so CLI roles cannot run here.',
+  'probe.checksFailed': 'The version and sign-in checks did not answer.',
+  'probe.error': 'The test could not run. Check the connection and try again.',
 
   'foot.clean': 'No changes',
   'foot.unsaved': 'Unsaved changes',
@@ -134,6 +215,21 @@ const en = {
     'Fork role "{id}" must inherit either all completed turns or the task only. An invalid value is kept as task only and does not copy the parent conversation.',
   'issue.spawnForkScope': 'Role "{id}" is not a fork, so its inherited-context option is removed.',
   'issue.builtin': 'The built-in roles general and fork must stay in the list, once each, with their fixed context.',
+  'issue.builtinRunner': 'Built-in role "{id}" always runs on DSH.',
+  'issue.runner': 'The CLI of "{id}" is not supported. Choose another one under Runs on.',
+  'issue.runnerContext': 'Role "{id}" runs on {cli}, which always starts fresh, so it cannot be a fork.',
+  'issue.runnerDshModel': 'Role "{id}" runs on {cli}, which has its own model setting; the DSH model is removed.',
+  'issue.runnerPreset': 'Role "{id}" runs on {cli}, which cannot use an agent preset.',
+  'issue.runnerModel': 'The model of "{id}" must be 1–{max} characters, or empty for the CLI default.',
+  'issue.runnerProviderModel': 'Role "{id}" on {cli} needs both a provider and a model.',
+  'issue.runnerEffort': 'The reasoning effort of "{id}" is not one {cli} accepts.',
+  'issue.runnerPermission': 'The permission of "{id}" is not one of the {cli} presets.',
+  'issue.runnerReadOnly': 'Role "{id}" is read-only, so it needs a read-only permission.',
+  'issue.runnerTimeout': 'The timeout of "{id}" must be a whole number of minutes from 1 to {max}.',
+  'issue.cliExecutable': 'The executable of {cli} must be an absolute path or a command name without folders.',
+  'issue.cliEnv':
+    'Forwarded variables of {cli} must be at most {max} names like MY_API_KEY: letters, digits and _, not starting with a digit.',
+  'issue.cliSettings': 'The external CLI settings are not valid.',
 } as const
 
 /** Every UI string key. */
@@ -181,6 +277,8 @@ const ja: Record<Key, string> = {
   'row.down': '下へ',
   'row.downLabel': 'ロール {id} を下へ移動',
   'row.needsFix': '要修正',
+  'row.cliTitle': 'ホスト上の {cli} で1回だけ実行（空の会話から開始）',
+  'row.cliDefault': 'CLI の既定',
 
   'ed.id': 'ロールID',
   'ed.idHelp': '親がこのロールを選ぶときの名前です。小文字・数字・ - ・ _ が使え、先頭は英小文字、最大{max}文字です。',
@@ -229,6 +327,76 @@ const ja: Record<Key, string> = {
   'ed.previewParent': '親に見える内容',
   'ed.previewChild': '子に渡される内容',
   'ed.previewChildNone': '子のコンテキストには何も追加されません。',
+  'ed.runsOn': '実行先',
+  'ed.runsOnDsh': 'DSH（標準の子エージェント）',
+  'ed.runsOnHelp':
+    'DSH はこのセッションの中で子を動かします。CLI を選ぶと、ホスト上の別のプログラムとして1回だけ実行します。',
+  'ed.runsOnBuiltin': '組み込みロールは常に DSH で動きます。',
+  'ed.cliSettings': '{cli} の設定',
+  'ed.cliModelHelp':
+    '空欄なら {cli} の既定のモデルを使います。候補は「外部 CLI」の接続テストの結果か、組み込みの一覧から表示します。{cli} が受け付けるモデルIDなら何でも指定できます。',
+  'ed.cliModelOpenCode':
+    'OpenCode ではプロバイダーとモデルの両方が必要です（OpenCode 自身の既定モデルには切り替えません）。使えるモデルは「外部 CLI」の接続テストで一覧できます。',
+  'ed.cliEffortFree': 'モデルのバリアント名（例: high）です。空欄ならモデルの既定を使います。',
+  'ed.permission': '権限',
+  'ed.permissionHelp':
+    '{cli} が確認なしで行えることです。委譲した実行中に確認を求めることはありません。親のセッションより強い権限で動くこともありません。',
+  'ed.permissionReadOnly': '読み取り専用のロールでは、読み取り専用のプリセットだけを選べます。',
+  'ed.permissionOption': '{name} — {access}',
+  'ed.timeout': 'タイムアウト（分）',
+  'ed.timeoutHelp': 'この時間（1〜{max}分）を過ぎると実行を止めます。空欄なら{default}分です。',
+  'ed.cliLimits': 'CLI のロールは、DSH のロールと次の点が異なります:',
+  'ed.cliLimitOnce':
+    '1回だけ実行されます。親は最終回答を受け取れますが、追加のメッセージ（send_message）は送れず、list_agents にも表示されません。',
+  'ed.cliLimitFresh': '常に空の会話から始まります。親の会話のフォークやエージェントプリセットは使えません。',
+  'ed.cliLimitInstalled':
+    '{cli} がホストにインストールされ、サインイン済みである必要があります（または「外部 CLI」で API キーの環境変数を引き渡してください）。',
+  'ed.cliLimitCancel': '途中で止めても、すでに変更されたファイルは元に戻りません。',
+  'ed.readOnlyHelp.codex': 'Codex を読み取り専用のサンドボックスで実行し、ファイルを変更できないようにします。',
+  'ed.readOnlyHelp.claude-code':
+    'Claude Code を書き込み系ツール（Write・Edit・NotebookEdit）なしの dontAsk モードで実行し、承認が必要な操作はすべて拒否します。',
+  'ed.readOnlyHelp.agy': 'Antigravity には読み取り系のツール（ファイルの表示・検索・フォルダーの一覧）だけを渡します。',
+  'ed.readOnlyHelp.opencode':
+    'ファイルの読み取り・検索・一覧以外の OpenCode のツールをすべて拒否します。.env ファイルも読めません。',
+
+  'preset.read-only': '読み取り専用',
+  'preset.workspace-write': 'ワークスペースへの書き込み',
+  'preset.danger-full-access': 'フルアクセス（サンドボックスなし）',
+  'preset.acceptEdits': '編集を自動承認',
+  'preset.auto': '自動判定',
+  'preset.bypassPermissions': '権限確認をすべて省略',
+  'preset.edit-files': 'ファイル編集のみ（シェルなし）',
+  'preset.full-access': 'フルアクセス',
+  'access.read-only': 'ファイルを変更しない',
+  'access.workspace-write': 'ワークスペース内を編集',
+  'access.full-access': '制限なし',
+
+  'clis.heading': '外部 CLI',
+  'clis.hint':
+    'CLI で動くすべてのロールに共通の設定です。API キーはここには保存しません。ホスト上で各 CLI にサインインするか、キーを持つ環境変数の名前を引き渡してください。',
+  'clis.used': '{count}個のロールが使用中',
+  'clis.executable': '実行ファイル',
+  'clis.executableHelp': '絶対パス、またはホストの PATH から探すコマンド名です。空欄なら「{default}」を使います。',
+  'clis.env': '引き渡す環境変数',
+  'clis.envHelp':
+    '名前だけを、カンマかスペースで区切って入力します。値は {cli} の起動時にホストの環境から読み取り、保存はしません。',
+  'clis.envPlaceholder': '例: MY_API_KEY',
+  'clis.test': '接続をテスト',
+  'clis.testLabel': '{cli} への接続をテスト',
+  'clis.testing': 'テスト中…',
+  'clis.testSaved': 'テストは保存済みの設定で行います。変更を試すには、先に保存してください。',
+  'clis.unavailable': 'このホストでは接続テストを利用できません。',
+  'probe.found': '検出: {path}',
+  'probe.version': 'バージョン {version}',
+  'probe.authOk': 'サインイン済み',
+  'probe.authMissing': '未サインインです。ホストで {cli} にサインインするか、API キーの環境変数を引き渡してください。',
+  'probe.authUnknown': 'サインイン状態は不明',
+  'probe.models': 'モデル{count}件',
+  'probe.notFound':
+    'ホストで {cli} が見つかりませんでした。インストールするか、上の「実行ファイル」でパスを指定してください。',
+  'probe.noSubprocess': 'このホストではプラグインからプログラムを起動できないため、CLI のロールは実行できません。',
+  'probe.checksFailed': 'バージョンとサインイン状態の確認に応答がありませんでした。',
+  'probe.error': 'テストを実行できませんでした。接続を確認して、もう一度お試しください。',
 
   'foot.clean': '変更はありません',
   'foot.unsaved': '未保存の変更があります',
@@ -263,7 +431,26 @@ const ja: Record<Key, string> = {
     'フォークのロール「{id}」が引き継げるのは、完了済みのやり取り全部か、タスクだけか、どちらかです。それ以外の値はタスクのみとして扱い、親の会話はコピーしません。',
   'issue.spawnForkScope': 'ロール「{id}」はフォークではないので、引き継ぐ文脈の指定は外します。',
   'issue.builtin': '組み込みロール general と fork は、固定のコンテキストで1つずつ残す必要があります。',
+  'issue.builtinRunner': '組み込みロール「{id}」は常に DSH で動きます。',
+  'issue.runner': '「{id}」の CLI はサポートされていません。「実行先」で選び直してください。',
+  'issue.runnerContext': 'ロール「{id}」は {cli} で動き、常に空の会話から始まるため、フォークにはできません。',
+  'issue.runnerDshModel':
+    'ロール「{id}」は {cli} で動き、モデルは {cli} 側で指定するため、DSH のモデル指定は外します。',
+  'issue.runnerPreset': 'ロール「{id}」は {cli} で動くため、エージェントプリセットは使えません。',
+  'issue.runnerModel': '「{id}」のモデルは1〜{max}文字で指定するか、空欄にして CLI の既定を使ってください。',
+  'issue.runnerProviderModel': '{cli} で動く「{id}」には、プロバイダーとモデルの両方が必要です。',
+  'issue.runnerEffort': '「{id}」の推論の強さは、{cli} で使えない値です。',
+  'issue.runnerPermission': '「{id}」の権限は、{cli} のプリセットにない値です。',
+  'issue.runnerReadOnly': 'ロール「{id}」は読み取り専用なので、読み取り専用の権限を選んでください。',
+  'issue.runnerTimeout': '「{id}」のタイムアウトは、1〜{max}の整数（分）で指定してください。',
+  'issue.cliExecutable': '{cli} の実行ファイルは、絶対パスか、フォルダーを含まないコマンド名で指定してください。',
+  'issue.cliEnv':
+    '{cli} に引き渡す環境変数は、MY_API_KEY のように英字・数字・_ からなり数字で始まらない名前を、{max}個まで指定してください。',
+  'issue.cliSettings': '外部 CLI の設定が正しくありません。',
 }
+
+/** Both dictionaries, for the completeness check in the tests. */
+export const DICTIONARIES: Readonly<Record<'en' | 'ja', Readonly<Record<Key, string>>>> = { en, ja }
 
 /** Translate a key, filling `{name}` placeholders from `params`. */
 export type Translator = (key: Key, params?: Readonly<Record<string, string | number>>) => string
@@ -301,35 +488,86 @@ const ISSUE_KEYS: Record<SettingsProblem['code'], Key> = {
   'builtin-context-fixed': 'issue.builtin',
   'builtin-missing': 'issue.builtin',
   'builtin-duplicate': 'issue.builtin',
-  // Placeholder mappings so the shared problem codes type-check; the editor work replaces them with dedicated texts.
-  'builtin-runner-ignored': 'issue.builtin',
-  'runner-context-forced': 'issue.forkScope',
-  'runner-model-ignored': 'issue.forkModel',
-  'runner-preset-ignored': 'issue.forkPreset',
-  'invalid-runner': 'issue.model',
-  'invalid-runner-model': 'issue.model',
-  'invalid-runner-effort': 'issue.model',
-  'invalid-runner-permission': 'issue.preset',
-  'runner-readonly-permission': 'issue.preset',
-  'invalid-runner-timeout': 'issue.model',
-  'invalid-cli-settings': 'issue.model',
+  'builtin-runner-ignored': 'issue.builtinRunner',
+  'runner-context-forced': 'issue.runnerContext',
+  'runner-model-ignored': 'issue.runnerDshModel',
+  'runner-preset-ignored': 'issue.runnerPreset',
+  'invalid-runner': 'issue.runner',
+  'invalid-runner-model': 'issue.runnerModel',
+  'invalid-runner-effort': 'issue.runnerEffort',
+  'invalid-runner-permission': 'issue.runnerPermission',
+  'runner-readonly-permission': 'issue.runnerReadOnly',
+  'invalid-runner-timeout': 'issue.runnerTimeout',
+  'invalid-cli-settings': 'issue.cliSettings',
+}
+
+function issueKey(issue: Issue): Key {
+  if (issue.code === 'invalid-id' && (issue.roleId ?? '') === '') return 'issue.emptyId'
+  if (issue.code === 'invalid-runner-model' && issue.cli !== undefined && cliDescriptor(issue.cli).needsProvider) {
+    return 'issue.runnerProviderModel'
+  }
+  if (issue.code === 'invalid-cli-settings' && issue.field === 'executable') return 'issue.cliExecutable'
+  if (issue.code === 'invalid-cli-settings' && issue.field === 'env') return 'issue.cliEnv'
+  return ISSUE_KEYS[issue.code]
+}
+
+const ISSUE_LIMITS: Partial<Record<SettingsProblem['code'], number>> = {
+  'description-too-long': MAX_DESCRIPTION_LENGTH,
+  'instructions-too-long': MAX_INSTRUCTIONS_LENGTH,
+  'too-many-roles': MAX_ROLES,
+  'invalid-runner-model': MAX_RUNNER_NAME_LENGTH,
+  'invalid-runner-timeout': MAX_RUNNER_TIMEOUT_MINUTES,
+  'invalid-cli-settings': MAX_ENV_PASSTHROUGH,
 }
 
 /**
  * The sentence that tells the user what to fix.
  * @param issue - a validation issue.
  * @param t - the translator.
- * @returns localized text naming the role and the limit involved.
+ * @returns localized text naming the role, the CLI and the limit involved.
  */
 export function issueText(issue: Issue, t: Translator): string {
   const id = issue.roleId ?? ''
-  const max =
-    issue.code === 'description-too-long'
-      ? MAX_DESCRIPTION_LENGTH
-      : issue.code === 'instructions-too-long'
-        ? MAX_INSTRUCTIONS_LENGTH
-        : issue.code === 'too-many-roles'
-          ? MAX_ROLES
-          : ID_MAX_LENGTH
-  return t(issue.code === 'invalid-id' && id === '' ? 'issue.emptyId' : ISSUE_KEYS[issue.code], { id, max })
+  const cli = issue.cli === undefined ? 'CLI' : cliDescriptor(issue.cli).displayName
+  const max = ISSUE_LIMITS[issue.code] ?? ID_MAX_LENGTH
+  return t(issueKey(issue), { id, max, cli })
 }
+
+/** Whether a string is a UI key. */
+function isKey(key: string): key is Key {
+  return Object.hasOwn(en, key)
+}
+
+/**
+ * Display name of a CLI permission preset.
+ * @param t - the translator.
+ * @param preset - a preset id (CLI-native).
+ * @returns its translated name, or the id itself for a preset without one.
+ */
+export function presetName(t: Translator, preset: string): string {
+  const key = `preset.${preset}`
+  return isKey(key) ? t(key) : preset
+}
+
+/**
+ * What an access level allows, in a few words.
+ * @param t - the translator.
+ * @param access - the level.
+ * @returns the translated label.
+ */
+export function accessName(t: Translator, access: AccessLevel): string {
+  return t(`access.${access}`)
+}
+
+/**
+ * How Read-only is enforced on one CLI.
+ * @param t - the translator.
+ * @param cli - the CLI.
+ * @returns the translated help text.
+ */
+export function readOnlyHelp(t: Translator, cli: CliId): string {
+  return t(`ed.readOnlyHelp.${cli}`)
+}
+
+/** Timeout limits for the editor's help text. */
+export const TIMEOUT_TEXT = { max: MAX_RUNNER_TIMEOUT_MINUTES, default: DEFAULT_RUNNER_TIMEOUT_MINUTES } as const

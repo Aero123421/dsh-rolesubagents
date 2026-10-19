@@ -1,6 +1,6 @@
 /** Small presentational pieces shared by the page and the role editor. */
 
-import { type ButtonHTMLAttributes, type ReactNode, useId } from 'react'
+import { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, useId, useState } from 'react'
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: 'primary' | 'ghost' | 'danger'
@@ -33,7 +33,38 @@ export function Switch(props: {
   )
 }
 
-export function Badge(props: { tone?: 'fork' | 'ro' | 'err' | 'quiet'; title?: string; children: ReactNode }) {
+/**
+ * A text input over a parsed draft value (a number, a list of names). The text
+ * the user typed is kept while it still means the draft's value, so "30," or
+ * "1." can be typed through; a value changed elsewhere (discard, reload) wins.
+ */
+export function TextInput({
+  value,
+  canonical,
+  onText,
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'> & {
+  /** The draft value as text. */
+  value: string
+  /** Maps typed text to the text of the value it parses to. */
+  canonical: (text: string) => string
+  onText: (text: string) => void
+}) {
+  const [typed, setTyped] = useState(value)
+  const shown = canonical(typed) === value ? typed : value
+  return (
+    <input
+      {...rest}
+      value={shown}
+      onChange={event => {
+        setTyped(event.target.value)
+        onText(event.target.value)
+      }}
+    />
+  )
+}
+
+export function Badge(props: { tone?: 'fork' | 'ro' | 'err' | 'quiet' | 'cli'; title?: string; children: ReactNode }) {
   const tone = props.tone === undefined ? '' : ` dshrs-badge--${props.tone}`
   return (
     <span className={`dshrs-badge${tone}`} title={props.title}>

@@ -9,7 +9,10 @@
  * each of those would drop or change something the user typed.
  */
 
+import { CLI_IDS, type CliId, cliDescriptor, isCliId, presetAccess } from '../shared/cli/index.ts'
 import {
+  type CliSettings,
+  type CliSettingsMap,
   DEFAULT_ROLES,
   MAX_DESCRIPTION_LENGTH,
   MAX_INSTRUCTIONS_LENGTH,
@@ -20,11 +23,13 @@ import {
   type RoleContext,
   type RoleDefinition,
   type RoleModel,
+  type RoleRunner,
   type RoleSettings,
   roleContextText,
   roleListLine,
   type SettingsProblem,
 } from '../shared/roles.ts'
+import { normalizeClis } from '../shared/runner.ts'
 
 /** Longest role id; the `{0,31}` tail of `ROLE_ID_PATTERN` plus its first letter. */
 export const ID_MAX_LENGTH = 32
@@ -39,6 +44,8 @@ export interface DraftRow {
 export interface Draft {
   readonly enabled: boolean
   readonly workflowModel?: { provider: string; model: string }
+  /** Per-CLI executable and forwarded variable names, as typed; omitted when nothing is set. */
+  readonly clis?: CliSettingsMap
   readonly rows: readonly DraftRow[]
   /** The settings this draft started from; the baseline of {@link isDirty}. */
   readonly base: RoleSettings
@@ -52,7 +59,25 @@ export interface Draft {
 export type RolePatch = Partial<Pick<RoleDefinition, 'id' | 'enabled' | 'description' | 'instructions' | 'readOnly'>>
 
 function cloneRole(role: RoleDefinition): RoleDefinition {
-  return { ...role, ...(role.model === undefined ? {} : { model: { ...role.model } }) }
+  return {
+    ...role,
+    ...(role.model === undefined ? {} : { model: { ...role.model } }),
+    ...(role.runner === undefined ? {} : { runner: { ...role.runner } }),
+  }
+}
+
+function cloneClis(clis: CliSettingsMap | undefined): CliSettingsMap | undefined {
+  if (clis === undefined) return undefined
+  const copy: CliSettingsMap = {}
+  for (const id of CLI_IDS) {
+    const entry = clis[id]
+    if (entry === undefined) continue
+    copy[id] = {
+      ...entry,
+      ...(entry.envPassthrough === undefined ? {} : { envPassthrough: [...entry.envPassthrough] }),
+    }
+  }
+  return copy
 }
 
 /**
@@ -65,11 +90,13 @@ export function createDraft(settings: RoleSettings, revision: number | undefined
   return {
     enabled: settings.enabled,
     ...(settings.workflowModel === undefined ? {} : { workflowModel: { ...settings.workflowModel } }),
+    ...(settings.clis === undefined ? {} : { clis: cloneClis(settings.clis) }),
     rows: settings.roles.map((role, index) => ({ uid: index + 1, role: cloneRole(role) })),
     base: {
       enabled: settings.enabled,
       roles: settings.roles.map(cloneRole),
       ...(settings.workflowModel === undefined ? {} : { workflowModel: { ...settings.workflowModel } }),
+      ...(settings.clis === undefined ? {} : { clis: cloneClis(settings.clis) }),
     },
     revision,
     nextUid: settings.roles.length + 1,
@@ -86,7 +113,30 @@ export function draftSettings(draft: Draft): RoleSettings {
     enabled: draft.enabled,
     roles: draft.rows.map(row => row.role),
     ...(draft.workflowModel === undefined ? {} : { workflowModel: { ...draft.workflowModel } }),
+    ...(draft.clis === undefined ? {} : { clis: cloneClis(draft.clis) }),
   }
+}
+
+/** A number as text, so NaN (a half-typed timeout) differs from "not set" when compared. */
+const numberKey = (value: number | undefined): string | null => (value === undefined ? null : String(value))
+
+function canonicalRunner(runner: RoleRunner | undefined): unknown {
+  if (runner === undefined) return null
+  return [
+    runner.cli,
+    runner.provider ?? null,
+    runner.model ?? null,
+    runner.effort ?? null,
+    runner.permission,
+    numberKey(runner.timeoutMinutes),
+  ]
+}
+
+function canonicalClis(clis: CliSettingsMap | undefined): unknown[] {
+  return CLI_IDS.map(id => {
+    const entry = clis?.[id]
+    return [entry?.executable ?? null, entry?.envPassthrough ?? null]
+  })
 }
 
 function canonical(role: RoleDefinition): unknown[] {
@@ -102,6 +152,7 @@ function canonical(role: RoleDefinition): unknown[] {
     role.readOnly,
     role.agentPreset ?? null,
     model === undefined ? null : [model.provider, model.model, model.reasoningEffort ?? null],
+    canonicalRunner(role.runner),
   ]
 }
 
@@ -117,7 +168,8 @@ export function sameSettings(a: RoleSettings, b: RoleSettings): boolean {
     a.workflowModel?.provider === b.workflowModel?.provider &&
     a.workflowModel?.model === b.workflowModel?.model &&
     a.roles.length === b.roles.length &&
-    JSON.stringify(a.roles.map(canonical)) === JSON.stringify(b.roles.map(canonical))
+    JSON.stringify(a.roles.map(canonical)) === JSON.stringify(b.roles.map(canonical)) &&
+    JSON.stringify(canonicalClis(a.clis)) === JSON.stringify(canonicalClis(b.clis))
   )
 }
 
@@ -193,13 +245,131 @@ export function setWorkflowModel(draft: Draft, model: RoleSettings['workflowMode
 export function patchRole(draft: Draft, uid: number, patch: RolePatch): Draft {
   return mapRow(draft, uid, role => {
     const { id, ...rest } = patch
-    return { ...role, ...rest, ...(id === undefined || role.builtin !== undefined ? {} : { id }) }
+    const next = { ...role, ...rest, ...(id === undefined || role.builtin !== undefined ? {} : { id }) }
+    if (role.runner !== undefined && patch.readOnly !== undefined && patch.readOnly !== role.readOnly) {
+      // A runner's permission follows Read-only: on → the CLI's read-only preset, off → its default preset.
+      next.runner = { ...role.runner, permission: switchedPermission(role.runner.cli, patch.readOnly) }
+    }
+    return next
+  })
+}
+
+function switchedPermission(cli: CliId, readOnly: boolean): string {
+  const descriptor = cliDescriptor(cli)
+  return readOnly ? descriptor.presetForAccess['read-only'] : descriptor.defaultPermission
+}
+
+/**
+ * Choose where a role's child runs. Built-in roles always run on DSH.
+ * DSH → CLI starts fresh and drops the DSH-only fields (fork, inherited context,
+ * model, agent preset); CLI → DSH drops the runner; CLI → another CLI keeps only
+ * the permission Read-only implies. The permission is the CLI's read-only preset
+ * for a read-only role, its default preset otherwise.
+ * @param draft - the draft.
+ * @param uid - the row.
+ * @param cli - the CLI, or undefined for DSH.
+ * @returns the edited draft.
+ */
+export function setRunner(draft: Draft, uid: number, cli: CliId | undefined): Draft {
+  return mapRow(draft, uid, role => {
+    if (role.builtin !== undefined || role.runner?.cli === cli) return role
+    if (cli === undefined) {
+      const { runner: _runner, ...dsh } = role
+      return dsh
+    }
+    const { runner: _runner, model: _model, agentPreset: _preset, forkScope: _scope, ...rest } = role
+    return { ...rest, context: 'spawn', runner: { cli, permission: switchedPermission(cli, role.readOnly) } }
+  })
+}
+
+/** The runner fields the editor changes directly. An empty text clears its field. */
+export type RunnerPatch = Partial<Pick<RoleRunner, 'model' | 'provider' | 'effort' | 'permission' | 'timeoutMinutes'>>
+
+/**
+ * Edit the runner fields of a CLI role; ignored for DSH roles. Values are kept
+ * as typed (a half-filled provider/model pair, a non-integer timeout) so
+ * validation can point at them; `timeoutMinutes: undefined` clears the timeout.
+ * @param draft - the draft.
+ * @param uid - the row.
+ * @param patch - the new values.
+ * @returns the edited draft.
+ */
+export function patchRunner(draft: Draft, uid: number, patch: RunnerPatch): Draft {
+  return mapRow(draft, uid, role => {
+    if (role.runner === undefined) return role
+    const runner: RoleRunner = { ...role.runner }
+    for (const key of ['model', 'provider', 'effort'] as const) {
+      if (!(key in patch)) continue
+      const value = patch[key]
+      if (value === undefined || value === '') delete runner[key]
+      else runner[key] = value
+    }
+    if (patch.permission !== undefined && patch.permission !== '') runner.permission = patch.permission
+    if ('timeoutMinutes' in patch) {
+      if (patch.timeoutMinutes === undefined) delete runner.timeoutMinutes
+      else runner.timeoutMinutes = patch.timeoutMinutes
+    }
+    return JSON.stringify(canonicalRunner(runner)) === JSON.stringify(canonicalRunner(role.runner))
+      ? role
+      : { ...role, runner }
   })
 }
 
 /**
- * Change how a role's child starts. A built-in role's context is fixed; a role that
- * becomes a fork loses its model and agent preset, which forks cannot have.
+ * Whether a permission preset can be chosen for a role: while Read-only is on,
+ * only the CLI's read-only presets can.
+ * @param cli - the role's CLI.
+ * @param preset - a preset id of that CLI.
+ * @param readOnly - the role's Read-only switch.
+ * @returns true when the preset is selectable.
+ */
+export function permissionAllowed(cli: CliId, preset: string, readOnly: boolean): boolean {
+  const access = presetAccess(cliDescriptor(cli), preset)
+  return access !== undefined && (!readOnly || access === 'read-only')
+}
+
+/**
+ * Edit the plugin-level settings of one CLI. A blank executable and an empty
+ * name list are removed, and so is an entry that ends up empty. The names are
+ * kept as typed so validation can point at an invalid one.
+ * @param draft - the draft.
+ * @param cli - the CLI.
+ * @param patch - `executable` and/or `envPassthrough`; a key that is present replaces the value.
+ * @returns the edited draft.
+ */
+export function setCliSettings(draft: Draft, cli: CliId, patch: CliSettings): Draft {
+  const current = draft.clis?.[cli] ?? {}
+  const next: CliSettings = { ...current }
+  if ('executable' in patch) {
+    if (patch.executable === undefined || patch.executable.trim() === '') delete next.executable
+    else next.executable = patch.executable
+  }
+  if ('envPassthrough' in patch) {
+    if (patch.envPassthrough === undefined || patch.envPassthrough.length === 0) delete next.envPassthrough
+    else next.envPassthrough = [...patch.envPassthrough]
+  }
+  const map: CliSettingsMap = { ...draft.clis }
+  if (Object.keys(next).length === 0) delete map[cli]
+  else map[cli] = next
+  const clis = cloneClis(map)
+  if (JSON.stringify(canonicalClis(clis)) === JSON.stringify(canonicalClis(draft.clis))) return draft
+  const { clis: _previous, ...rest } = draft
+  return clis === undefined || Object.keys(clis).length === 0 ? rest : { ...rest, clis }
+}
+
+/**
+ * Split the forwarded-variables text into names: commas and whitespace separate them.
+ * @param text - what the user typed.
+ * @returns the names, without empty entries.
+ */
+export function parseEnvNames(text: string): string[] {
+  return text.split(/[\s,]+/).filter(name => name.length > 0)
+}
+
+/**
+ * Change how a role's child starts. A built-in role's context is fixed, and a CLI role
+ * always starts fresh; a role that becomes a fork loses its model and agent preset,
+ * which forks cannot have.
  * @param draft - the draft.
  * @param uid - the row.
  * @param context - the new context.
@@ -207,7 +377,7 @@ export function patchRole(draft: Draft, uid: number, patch: RolePatch): Draft {
  */
 export function setContext(draft: Draft, uid: number, context: RoleContext): Draft {
   return mapRow(draft, uid, role => {
-    if (role.builtin !== undefined || role.context === context) return role
+    if (role.builtin !== undefined || role.runner !== undefined || role.context === context) return role
     if (context === 'spawn') {
       const { model: _model, agentPreset: _preset, forkScope: _scope, ...rest } = role
       return { ...rest, context }
@@ -232,7 +402,7 @@ export function setForkScope(draft: Draft, uid: number, scope: ForkScope): Draft
 }
 
 /**
- * Set the child's model route; an all-empty route clears it. Ignored for fork roles.
+ * Set the child's model route; an all-empty route clears it. Ignored for fork and CLI roles.
  * A half-filled route is kept so the user can finish it; validation blocks the save.
  * @param draft - the draft.
  * @param uid - the row.
@@ -241,7 +411,7 @@ export function setForkScope(draft: Draft, uid: number, scope: ForkScope): Draft
  */
 export function setModel(draft: Draft, uid: number, model: RoleModel | undefined): Draft {
   return mapRow(draft, uid, role => {
-    if (role.context === 'fork') return role
+    if (role.context === 'fork' || role.runner !== undefined) return role
     const { model: _previous, ...rest } = role
     if (model === undefined || (model.provider === '' && model.model === '' && !model.reasoningEffort)) return rest
     const route: RoleModel = { provider: model.provider, model: model.model }
@@ -251,7 +421,7 @@ export function setModel(draft: Draft, uid: number, model: RoleModel | undefined
 }
 
 /**
- * Set the agent preset the child mounts; empty clears it. Ignored for fork roles.
+ * Set the agent preset the child mounts; empty clears it. Ignored for fork and CLI roles.
  * @param draft - the draft.
  * @param uid - the row.
  * @param preset - the preset id.
@@ -259,7 +429,7 @@ export function setModel(draft: Draft, uid: number, model: RoleModel | undefined
  */
 export function setAgentPreset(draft: Draft, uid: number, preset: string | undefined): Draft {
   return mapRow(draft, uid, role => {
-    if (role.context === 'fork') return role
+    if (role.context === 'fork' || role.runner !== undefined) return role
     const { agentPreset: _previous, ...rest } = role
     return preset === undefined || preset === '' ? rest : { ...rest, agentPreset: preset }
   })
@@ -361,7 +531,23 @@ export function addTemplateRole(draft: Draft, templateId: string): Draft {
 }
 
 /** Which field of a role an issue belongs to. */
-export type IssueField = 'id' | 'description' | 'instructions' | 'model' | 'preset'
+export type IssueField =
+  | 'id'
+  | 'description'
+  | 'instructions'
+  | 'model'
+  | 'preset'
+  /** Runs on (the runner as a whole). */
+  | 'runner'
+  /** The runner's provider and model. */
+  | 'runnerModel'
+  | 'effort'
+  | 'permission'
+  | 'timeout'
+  /** A CLI's executable (External CLIs section). */
+  | 'executable'
+  /** A CLI's forwarded variable names (External CLIs section). */
+  | 'env'
 
 /** One reason the draft cannot be saved as typed. */
 export interface Issue {
@@ -371,6 +557,8 @@ export interface Issue {
   /** The role id as typed. */
   readonly roleId?: string
   readonly field?: IssueField
+  /** The CLI involved: the row's runner, or the External CLIs card. */
+  readonly cli?: CliId
 }
 
 const FIELD_OF: Partial<Record<SettingsProblem['code'], IssueField>> = {
@@ -383,6 +571,37 @@ const FIELD_OF: Partial<Record<SettingsProblem['code'], IssueField>> = {
   'fork-model-ignored': 'model',
   'invalid-preset': 'preset',
   'fork-preset-ignored': 'preset',
+  'builtin-runner-ignored': 'runner',
+  'invalid-runner': 'runner',
+  'runner-context-forced': 'runner',
+  'runner-model-ignored': 'runner',
+  'runner-preset-ignored': 'runner',
+  'invalid-runner-model': 'runnerModel',
+  'invalid-runner-effort': 'effort',
+  'invalid-runner-permission': 'permission',
+  'runner-readonly-permission': 'permission',
+  'invalid-runner-timeout': 'timeout',
+}
+
+/** The `clis` problems of one card field, found by normalizing that field alone. */
+function cliIssues(clis: CliSettingsMap | undefined): Issue[] {
+  const issues: Issue[] = []
+  for (const cli of CLI_IDS) {
+    const entry = clis?.[cli]
+    if (entry === undefined) continue
+    const fields = [
+      ['executable', { executable: entry.executable }],
+      ['env', { envPassthrough: entry.envPassthrough }],
+    ] as const
+    for (const [field, value] of fields) {
+      let bad = false
+      normalizeClis({ [cli]: value }, () => {
+        bad = true
+      })
+      if (bad) issues.push({ code: 'invalid-cli-settings', field, cli })
+    }
+  }
+  return issues
 }
 
 /** Settings as they would be stored, and every reason the draft cannot be saved as typed. */
@@ -401,6 +620,8 @@ export function analyseDraft(draft: Draft): Analysis {
   const { settings, problems } = normalizeSettings(draftSettings(draft))
   const issues: Issue[] = []
   for (const problem of problems) {
+    // Reported per card and field below, where the user can fix them.
+    if (problem.code === 'invalid-cli-settings') continue
     let index = problem.index
     const row = index === undefined ? undefined : draft.rows[index]
     if (problem.code === 'duplicate-id' && row !== undefined && row.role.builtin !== undefined) {
@@ -410,13 +631,16 @@ export function analyseDraft(draft: Draft): Analysis {
     }
     const field = FIELD_OF[problem.code]
     const owner = index === undefined ? undefined : draft.rows[index]
+    const cli = isCliId(owner?.role.runner?.cli) ? owner?.role.runner?.cli : undefined
     issues.push({
       code: problem.code,
       ...(owner === undefined ? {} : { uid: owner.uid, roleId: owner.role.id }),
       ...(owner === undefined && problem.id !== undefined ? { roleId: problem.id } : {}),
       ...(field === undefined ? {} : { field }),
+      ...(cli === undefined ? {} : { cli }),
     })
   }
+  issues.push(...cliIssues(draft.clis))
   // A built-in shadowed by a custom role is already reported as that role's duplicate id.
   const shadowed = (issue: Issue): boolean =>
     issue.code === 'builtin-missing' && issues.some(o => o.code === 'duplicate-id' && o.roleId === issue.roleId)
@@ -455,4 +679,18 @@ export function routeLabel(model: RoleModel | undefined): string | undefined {
   if (model === undefined) return undefined
   const route = `${model.provider} / ${model.model}`
   return model.reasoningEffort ? `${route} · ${model.reasoningEffort}` : route
+}
+
+/**
+ * Short text for a runner's model.
+ * @param runner - the runner.
+ * @returns `model` (OpenCode: `provider/model`) with the effort, or undefined for the CLI's default model.
+ */
+export function runnerModelLabel(runner: RoleRunner): string | undefined {
+  const model =
+    runner.provider !== undefined && runner.model !== undefined
+      ? `${runner.provider}/${runner.model}`
+      : (runner.model ?? runner.provider)
+  if (model === undefined) return undefined
+  return runner.effort ? `${model} · ${runner.effort}` : model
 }

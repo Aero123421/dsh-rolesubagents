@@ -10,6 +10,8 @@ import type {
   PresetRosterLike,
   RemoteResult,
 } from '../src/client/dsh.ts'
+import type { ProbeCall } from '../src/client/controller.ts'
+import type { CliId } from '../src/shared/cli/index.ts'
 import { DEFAULT_ROLES } from '../src/shared/roles.ts'
 
 export const ok = <T>(value: T): RemoteResult<T> => ({ ok: true, value })
@@ -119,4 +121,14 @@ export function fakeRemote(): FakeRemote {
     agentPresets: { list: vi.fn(async () => ok(PRESETS)) },
     $on: vi.fn(() => () => {}),
   }
+}
+
+/** A probe answer as the Host's `rolesubagentsCli/probe` gives it. */
+export function probeAnswer(cli: CliId, patch: Record<string, unknown> = {}) {
+  return ok({ cli, found: true, path: `/usr/local/bin/${cli}`, version: '1.2.3', auth: 'ok', ...patch })
+}
+
+/** A connection test that answers like a Host with the probe service. */
+export function fakeProbe() {
+  return vi.fn<ProbeCall>(async cli => probeAnswer(cli))
 }
