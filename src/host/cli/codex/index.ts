@@ -100,6 +100,8 @@ class CodexSession implements RunSession {
 /**
  * Version, sign-in state and model list; none of these calls a model.
  * `login status` exits 0 when signed in and 1 when not; a forwarded `CODEX_API_KEY` also counts as signed in.
+ * `login status` only knows Codex's built-in OpenAI login, so when other variables are forwarded (a custom
+ * provider's `env_key`, for example) a "not signed in" answer is reported as unknown rather than missing.
  */
 async function probeCodex(
   _exe: string,
@@ -113,8 +115,10 @@ async function probeCodex(
     run(['login', 'status'], opts, signal),
     run(['debug', 'models'], opts, signal),
   ])
-  const forwardsKey = settings.envPassthrough?.includes(CODEX_API_KEY_ENV) === true
-  const auth = login.code === 0 || forwardsKey ? 'ok' : login.code === 1 ? 'missing' : 'unknown'
+  const forwarded = settings.envPassthrough ?? []
+  const forwardsKey = forwarded.includes(CODEX_API_KEY_ENV)
+  const auth =
+    login.code === 0 || forwardsKey ? 'ok' : login.code === 1 && forwarded.length === 0 ? 'missing' : 'unknown'
   const parsedVersion = version.code === 0 ? parseVersion(version.stdout) : undefined
   const parsedModels = models.code === 0 ? parseDebugModels(models.stdout) : undefined
   return {

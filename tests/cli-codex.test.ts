@@ -416,6 +416,10 @@ describe('codex probe', () => {
   it('not logged in → missing, unless CODEX_API_KEY is forwarded; failures → unknown/absent', async () => {
     const missing = runs({ 'login status': { code: 1, stderr: fixture('login-missing.stderr.txt') } })
     expect((await codexAdapter.probe?.('/bin/codex', missing.run, signal, {}))?.auth).toBe('missing')
+    // Another forwarded variable may be a custom provider's key, which `login status` cannot see.
+    expect(
+      (await codexAdapter.probe?.('/bin/codex', missing.run, signal, { envPassthrough: ['FAKE_CODEX_KEY'] }))?.auth,
+    ).toBe('unknown')
     expect(
       (await codexAdapter.probe?.('/bin/codex', missing.run, signal, { envPassthrough: ['CODEX_API_KEY'] }))?.auth,
     ).toBe('ok')

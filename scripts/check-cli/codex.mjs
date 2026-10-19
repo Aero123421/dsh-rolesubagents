@@ -286,7 +286,8 @@ export async function cases(h) {
       const result = await service.probe({ cli: 'codex' }, new AbortController().signal)
       h.assert.equal(result.found, true)
       h.assert.match(result.version ?? '', /^\d+\.\d+\.\d+/)
-      h.assert.equal(result.auth, 'missing', 'the isolated CODEX_HOME is not signed in')
+      // Not signed in to OpenAI, but a custom provider's key is forwarded, which `login status` cannot judge.
+      h.assert.equal(result.auth, 'unknown', 'a forwarded custom-provider key makes the sign-in state unknown')
       h.assert.ok((result.models ?? []).length > 0, 'models are listed')
       h.assert.ok(
         result.models.every(model => !(model.efforts ?? []).includes('ultra')),
