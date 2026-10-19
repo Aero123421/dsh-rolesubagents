@@ -1,0 +1,80 @@
+anthropic/claude-fable-5
+{
+  "id": "claude-fable-5",
+  "providerID": "anthropic",
+  "name": "Claude Fable 5",
+  "family": "claude-fable",
+  "api": {
+    "id": "claude-fable-5",
+    "url": "",
+    "npm": "@ai-sdk/anthropic"
+  },
+  "status": "active",
+  "headers": {},
+  "options": {},
+  "cost": {
+    "input": 10,
+    "output": 50,
+    "cache": {
+      "read": 1,
+      "write": 12.5
+    }
+  },
+  "limit": {
+    "context": 1000000,
+    "output": 128000
+  },
+  "capabilities": {
+    "temperature": false,
+    "reasoning": true,
+    "attachment": true,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": true,
+      "video": false,
+      "pdf": true
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": false
+  },
+  "release_date": "2026-06-07",
+  "variants": {
+    "low": {
+      "thinking": {
+        "type": "adaptive",
+        "display": "summarized"
+      },
+      "effort": "low"
+    },
+    "medium": {
+      "thinking": {
+        "type": "adaptive",
+        "display": "summarized"
+      },
+      "effort": "medium"
+    },
+    "high": {
+      "thinking": {
+        "type": "adaptive",
+        "display": "summarized"
+      },
+      "effort": "high"
+    },
+    "xhigh": {
+      "thinking": {
+        "type": "adaptive",
+        "display": "summarized"
+      },
+      "effort": "xhigh"
+    },
+    "max": {
+      "thinking": {
+        "type": "adaptive",
