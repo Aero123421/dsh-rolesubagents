@@ -16,6 +16,14 @@ export function scrollPaddingBottom(barHeight: number, paddingBottom: number): n
   return Math.ceil(bar + pad)
 }
 
+/** A connection test should move the page only after the user starts it and it finishes. */
+export function shouldRevealProbe(
+  previous: 'idle' | 'loading' | 'ready' | 'error',
+  next: 'idle' | 'loading' | 'ready' | 'error',
+): boolean {
+  return previous === 'loading' && next !== 'loading'
+}
+
 /** The nearest ancestor that scrolls vertically, or null when the page itself does not. */
 export function scrollPortOf(start: Element | null): HTMLElement | null {
   let el = start?.parentElement ?? null

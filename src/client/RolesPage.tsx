@@ -1,6 +1,6 @@
 /** The role settings page that fills the `plugins.bundle.config` slot of this bundle. */
 
-import { type ReactNode, useEffect, useId, useState } from 'react'
+import { type ReactNode, type Ref, useEffect, useId, useRef, useState } from 'react'
 import { cliDescriptor } from '../shared/cli/index.ts'
 import { MAX_ROLES } from '../shared/roles.ts'
 import { CliSection } from './CliSection.tsx'
@@ -29,9 +29,9 @@ export function RolesPage(props: RolesPageProps) {
   )
 }
 
-function Frame({ locale, children }: { locale: string; children: ReactNode }) {
+function Frame({ locale, children, rootRef }: { locale: string; children: ReactNode; rootRef?: Ref<HTMLDivElement> }) {
   return (
-    <div className="dshrs-root" lang={languageOf(locale)}>
+    <div className="dshrs-root" lang={languageOf(locale)} ref={rootRef}>
       {children}
     </div>
   )
@@ -40,14 +40,16 @@ function Frame({ locale, children }: { locale: string; children: ReactNode }) {
 function Page() {
   const state = usePageState()
   const t = useT()
+  const rootRef = useRef<HTMLDivElement>(null)
   const { draft } = state
+  const hasDraft = draft !== undefined
   useEffect(() => {
-    if (state.status !== 'ready' || !state.writable) return
-    return bindScrollClearance(document.querySelector('.dshrs-root'))
-  }, [state.status, state.writable])
+    if (state.status !== 'ready' || !state.writable || !hasDraft) return
+    return bindScrollClearance(rootRef.current)
+  }, [state.status, state.writable, hasDraft])
   if (state.status !== 'ready' || draft === undefined) {
     return (
-      <Frame locale={state.locale}>
+      <Frame locale={state.locale} rootRef={rootRef}>
         <p className="dshrs-notice" role="status">
           {t(state.status === 'unavailable' ? 'state.unavailable' : 'state.loading')}
         </p>
@@ -55,7 +57,7 @@ function Page() {
     )
   }
   return (
-    <Frame locale={state.locale}>
+    <Frame locale={state.locale} rootRef={rootRef}>
       {state.writable ? null : <p className="dshrs-notice">{t('state.readOnly')}</p>}
       {state.repaired.length === 0 ? null : (
         <div className="dshrs-notice dshrs-notice--warn">
