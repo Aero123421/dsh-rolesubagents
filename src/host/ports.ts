@@ -58,9 +58,64 @@ export interface ChildAgentOptions {
   reasoningEffort?: string
 }
 
+/** One content block of a prompt or a result; only text is produced here. */
+export interface ContentBlockPort {
+  readonly type: string
+  readonly text?: string
+}
+
+/** Why a subagent run ended (DSH's known stop reasons). */
+export type SubagentStopReasonPort = 'completed' | 'aborted' | 'error' | 'max-tokens' | 'refusal'
+
+/** The terminal outcome of one subagent run. */
+export interface SubagentResultPort {
+  readonly output: readonly ContentBlockPort[]
+  /** Safe, fixed-vocabulary failure detail (≤ 4096 UTF-8 bytes); never raw CLI output. */
+  readonly diagnostic?: string
+  readonly stopReason: SubagentStopReasonPort
+}
+
+/** A started out-of-process run, owned by DSH's activation registry once returned. */
+export interface SubagentRunPort {
+  /** Provider-minted unique id. */
+  readonly id: string
+  /** Settles with the terminal result; never rejects. */
+  readonly result: Promise<SubagentResultPort>
+  /** Cancel, reach quiescence and release resources. Idempotent. */
+  dispose(): Promise<void>
+}
+
+/** What DSH hands an external provider's `start` (`ResolvedSubagentStartRequest` subset). */
+export interface SubagentStartRequestPort {
+  /** Absolute child directory selected by DSH (not validated by DSH). */
+  readonly cwd: string
+  readonly label?: string
+  readonly prompt: readonly ContentBlockPort[]
+  readonly parent: AgentPort
+  /** Manager-owned: aborts on `interrupt_agent` and disposal. */
+  readonly signal: AbortSignal
+}
+
+/** A provider this plugin registers for one external delegation. */
+export interface ExternalProviderPort extends SubagentProviderPort {
+  readonly capabilities: {
+    readonly agentOptions: false
+    readonly agentPreset: false
+    readonly outputSchema: false
+    readonly depthLimit: false
+  }
+  readonly inheritsParentContext: false
+  start(request: SubagentStartRequestPort): Promise<SubagentRunPort>
+}
+
 /** `ctx.subagents` — the official delegation service. */
 export interface SubagentsPort {
   getProvider(name: string): SubagentProviderPort | undefined
+  /**
+   * Register a provider in the caller's scope; returns its removal, which may return a promise.
+   * Needed for external roles only.
+   */
+  registerProvider?(provider: ExternalProviderPort): () => unknown
   resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined
   startActivation(spec: {
     provider: string
@@ -121,6 +176,67 @@ export interface StorageDomainPort {
   open(spec: unknown): Promise<DomainPort>
 }
 
+/** `ctx.sandboxPolicy` — optional; resolves a Session's effective file-sandbox policy. */
+export interface SandboxPolicyPort {
+  resolve(request?: { session?: SessionPort }): { readonly mode?: string; readonly workspaceRoot?: string }
+}
+
+/** Exit facts of one closed process. */
+export interface SubprocessOutcomePort {
+  exitCode: number | null
+  signal: string | null
+}
+
+/** Offset-based reader of one collected output stream. */
+export interface SubprocessOutputReaderPort {
+  readFrom(fromByte: number): { text: string; nextOffset: number; lossy: boolean }
+}
+
+/** One stdout/stderr disposition (DSH's `SubprocessOutputMode`). */
+export type SubprocessOutputModePort = 'pipe' | 'inherit' | { maxBytes: number }
+
+/** A fully specified spawn request (DSH's `SubprocessSpawnSpec`). */
+export interface SubprocessSpawnSpecPort {
+  argv: readonly string[]
+  cwd: string
+  stdio: {
+    stdin: 'ignore' | 'pipe' | { readonly data: string }
+    stdout: SubprocessOutputModePort
+    stderr: SubprocessOutputModePort
+  }
+  graceMs: number
+  signal?: AbortSignal
+  /** Merged over DSH's scrubbed parent environment; `undefined` removes an entry. */
+  env?: Record<string, string | undefined>
+}
+
+/** A live process and its managed process range (DSH's `SubprocessHandle`). */
+export interface SubprocessHandlePort {
+  readonly stdin?: NodeJS.WritableStream & { destroyed?: boolean; writableEnded?: boolean }
+  readonly stdout?: NodeJS.ReadableStream
+  readonly stderr?: NodeJS.ReadableStream
+  readonly collected: { readonly stdout?: SubprocessOutputReaderPort; readonly stderr?: SubprocessOutputReaderPort }
+  /** Resolves with exit facts; rejects for spawn failures (e.g. ENOENT). */
+  readonly done: Promise<SubprocessOutcomePort>
+  /** Start TERM → grace → KILL on the managed range. */
+  terminate(): void
+  /** Resolves true once the managed range is quiet. */
+  waitForExit(signal?: AbortSignal): Promise<boolean>
+}
+
+/**
+ * `ctx.subprocess` — optional; DSH's process seam (`@deepseek-ai/dsh-subprocess`).
+ * The local implementation spawns POSIX children with `detached: true`
+ * (directly, or `systemd-run` when a user scope is available), i.e. in a new
+ * session via setsid: the child has NO controlling terminal, so a CLI that
+ * opens `/dev/tty` for an interactive login fails instead of prompting.
+ * Verified in `@deepseek-ai/dsh-subprocess-local` 0.2.1 (`spawnSubprocess`, `launchLinuxScope`).
+ */
+export interface SubprocessPort {
+  resolveExecutable(command: string, env?: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<string>
+  spawn(spec: SubprocessSpawnSpecPort): SubprocessHandlePort
+}
+
 /** The plugin's Host context. */
 export interface HostContext {
   readonly subagents: SubagentsPort
@@ -130,6 +246,8 @@ export interface HostContext {
   get(name: 'llm'): LlmPort | undefined
   get(name: 'sessions'): { get(id: string): SessionPort | undefined } | undefined
   get(name: 'storageDomain'): StorageDomainPort | undefined
+  get(name: 'subprocess'): SubprocessPort | undefined
+  get(name: 'sandboxPolicy'): SandboxPolicyPort | undefined
   get(name: string): unknown
   on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown
@@ -139,4 +257,6 @@ export interface HostContext {
     listener: (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void,
   ): unknown
   effect(execute: () => () => void, label?: string): unknown
+  /** Cordis child-plugin loading; used only to mount the optional probe service. */
+  plugin?(plugin: unknown, config?: unknown): unknown
 }

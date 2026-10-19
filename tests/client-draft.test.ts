@@ -13,14 +13,21 @@ import {
   isDirty,
   moveRow,
   parentLine,
+  parseEnvNames,
   patchRole,
+  patchRunner,
+  permissionAllowed,
   removeRow,
   routeLabel,
+  runnerModelLabel,
   sameSettings,
   setAgentPreset,
+  setCliSettings,
   setContext,
   setEnabled,
+  setForkScope,
   setModel,
+  setRunner,
   setWorkflowModel,
   templates,
   uniqueId,
@@ -360,5 +367,224 @@ describe('workflow model draft', () => {
       settings: { workflowModel: { provider: 'p', model: 'm' } },
     })
     expect(draftSettings(setWorkflowModel(valid, { provider: '', model: '' })).workflowModel).toBeUndefined()
+  })
+})
+
+describe('runs on (external CLI runners)', () => {
+  it('drops fork, inherited context, model and preset when a role moves from DSH to a CLI', () => {
+    let draft = setModel(fresh(), 3, { provider: 'p', model: 'm' })
+    draft = setAgentPreset(draft, 3, 'ptc')
+    draft = setRunner(draft, 3, 'codex')
+    expect(roleOf(draft, 3)).toMatchObject({
+      context: 'spawn',
+      runner: { cli: 'codex', permission: 'workspace-write' },
+    })
+    expect(roleOf(draft, 3).model).toBeUndefined()
+    expect(roleOf(draft, 3).agentPreset).toBeUndefined()
+    let fork = setForkScope(setContext(fresh(), 3, 'fork'), 3, 'task')
+    fork = setRunner(fork, 3, 'agy')
+    expect(roleOf(fork, 3)).toMatchObject({ context: 'spawn', runner: { cli: 'agy', permission: 'edit-files' } })
+    expect(roleOf(fork, 3).forkScope).toBeUndefined()
+    expect(analyseDraft(draft).issues).toEqual([])
+    expect(analyseDraft(fork).issues).toEqual([])
+  })
+
+  it('gives a read-only role the read-only preset of the CLI it moves to', () => {
+    const draft = setRunner(fresh(), 4, 'claude-code')
+    expect(roleOf(draft, 4).runner).toEqual({ cli: 'claude-code', permission: 'read-only' })
+    expect(analyseDraft(draft).issues).toEqual([])
+  })
+
+  it('keeps only the read-only-derived permission when a role moves to another CLI', () => {
+    let draft = setRunner(fresh(), 3, 'codex')
+    draft = patchRunner(draft, 3, {
+      model: 'gpt-5.5',
+      effort: 'high',
+      permission: 'danger-full-access',
+      timeoutMinutes: 45,
+    })
+    draft = setRunner(draft, 3, 'opencode')
+    expect(roleOf(draft, 3).runner).toEqual({ cli: 'opencode', permission: 'edit-files' })
+    const readOnly = setRunner(setRunner(fresh(), 4, 'codex'), 4, 'agy')
+    expect(roleOf(readOnly, 4).runner).toEqual({ cli: 'agy', permission: 'read-only' })
+  })
+
+  it('drops the runner when a role moves back to DSH, and ignores a move to the same place', () => {
+    const codex = setRunner(fresh(), 3, 'codex')
+    expect(setRunner(codex, 3, 'codex')).toBe(codex)
+    const back = setRunner(codex, 3, undefined)
+    expect(roleOf(back, 3).runner).toBeUndefined()
+    expect(roleOf(back, 3).context).toBe('spawn')
+    expect(isDirty(back)).toBe(false)
+    expect(setRunner(fresh(), 3, undefined).rows).toEqual(fresh().rows)
+  })
+
+  it('never puts a built-in role on a CLI', () => {
+    const draft = fresh()
+    expect(setRunner(draft, 1, 'codex')).toBe(draft)
+    expect(setRunner(draft, 2, 'claude-code')).toBe(draft)
+  })
+
+  it('ignores the DSH-only edits on a CLI role', () => {
+    const draft = setRunner(fresh(), 3, 'codex')
+    expect(setContext(draft, 3, 'fork')).toBe(draft)
+    expect(setModel(draft, 3, { provider: 'p', model: 'm' })).toBe(draft)
+    expect(setAgentPreset(draft, 3, 'ptc')).toBe(draft)
+    expect(patchRunner(fresh(), 3, { model: 'x' }).rows).toEqual(fresh().rows)
+  })
+
+  it('moves the permission with Read-only on a CLI role', () => {
+    let draft = patchRunner(setRunner(fresh(), 3, 'opencode'), 3, { permission: 'full-access' })
+    expect(roleOf(patchRole(draft, 3, { readOnly: false }), 3).runner?.permission).toBe('full-access')
+    draft = patchRole(draft, 3, { readOnly: true })
+    expect(roleOf(draft, 3)).toMatchObject({ readOnly: true, runner: { permission: 'read-only' } })
+    draft = patchRole(draft, 3, { readOnly: false })
+    expect(roleOf(draft, 3)).toMatchObject({ readOnly: false, runner: { permission: 'edit-files' } })
+    const codex = patchRole(setRunner(fresh(), 3, 'codex'), 3, { readOnly: true, description: 'x' })
+    expect(roleOf(codex, 3).runner?.permission).toBe('read-only')
+    expect(roleOf(patchRole(fresh(), 3, { readOnly: true }), 3).runner).toBeUndefined()
+  })
+
+  it('allows only read-only presets while Read-only is on', () => {
+    expect(permissionAllowed('codex', 'read-only', true)).toBe(true)
+    expect(permissionAllowed('codex', 'workspace-write', true)).toBe(false)
+    expect(permissionAllowed('claude-code', 'auto', true)).toBe(false)
+    expect(permissionAllowed('claude-code', 'bypassPermissions', false)).toBe(true)
+    expect(permissionAllowed('agy', 'nope', false)).toBe(false)
+  })
+
+  it('keeps half-typed runner values for validation and clears empty ones', () => {
+    let draft = patchRunner(setRunner(fresh(), 3, 'codex'), 3, { model: ' gpt-5.5 ', effort: 'ultra' })
+    expect(roleOf(draft, 3).runner).toMatchObject({ model: ' gpt-5.5 ', effort: 'ultra' })
+    expect(analyseDraft(draft).issues).toEqual([
+      { code: 'invalid-runner-effort', uid: 3, roleId: 'worker', field: 'effort', cli: 'codex' },
+    ])
+    draft = patchRunner(draft, 3, { effort: '' })
+    expect(roleOf(draft, 3).runner?.effort).toBeUndefined()
+    expect(analyseDraft(draft).settings.roles[2]?.runner).toEqual({
+      cli: 'codex',
+      model: 'gpt-5.5',
+      permission: 'workspace-write',
+    })
+    expect(patchRunner(draft, 3, { model: ' gpt-5.5 ' })).toBe(draft)
+    for (const timeoutMinutes of [Number.NaN, 1.5, 0, 1441]) {
+      const timed = patchRunner(draft, 3, { timeoutMinutes })
+      expect(analyseDraft(timed).issues).toEqual([
+        { code: 'invalid-runner-timeout', uid: 3, roleId: 'worker', field: 'timeout', cli: 'codex' },
+      ])
+      expect(isDirty(timed)).toBe(true)
+    }
+    draft = patchRunner(draft, 3, { timeoutMinutes: 45 })
+    expect(analyseDraft(draft).issues).toEqual([])
+    expect(roleOf(patchRunner(draft, 3, { timeoutMinutes: undefined }), 3).runner?.timeoutMinutes).toBeUndefined()
+  })
+
+  it('requires both a provider and a model on OpenCode', () => {
+    let draft = setRunner(fresh(), 3, 'opencode')
+    const issue = { code: 'invalid-runner-model', uid: 3, roleId: 'worker', field: 'runnerModel', cli: 'opencode' }
+    expect(analyseDraft(draft).issues).toEqual([issue])
+    draft = patchRunner(draft, 3, { provider: 'deepseek' })
+    expect(analyseDraft(draft).issues).toEqual([issue])
+    draft = patchRunner(draft, 3, { model: 'deepseek-v4-pro', effort: 'max' })
+    const { issues, settings } = analyseDraft(draft)
+    expect(issues).toEqual([])
+    expect(settings.roles[2]).toMatchObject({
+      enabled: true,
+      runner: {
+        cli: 'opencode',
+        provider: 'deepseek',
+        model: 'deepseek-v4-pro',
+        effort: 'max',
+        permission: 'edit-files',
+      },
+    })
+    expect(runnerModelLabel(settings.roles[2]?.runner ?? { cli: 'codex', permission: 'x' })).toBe(
+      'deepseek/deepseek-v4-pro · max',
+    )
+  })
+
+  it('reports a provider on a CLI without one', () => {
+    const draft = patchRunner(setRunner(fresh(), 3, 'codex'), 3, { provider: 'x', model: 'm' })
+    expect(analyseDraft(draft).issues.map(issue => [issue.code, issue.field])).toEqual([
+      ['invalid-runner-model', 'runnerModel'],
+    ])
+  })
+
+  it('tracks runner edits as changes and compares them by value', () => {
+    const draft = setRunner(fresh(), 3, 'codex')
+    expect(isDirty(draft)).toBe(true)
+    const saved = analyseDraft(draft).settings
+    const reloaded = createDraft(saved, 8)
+    expect(isDirty(reloaded)).toBe(false)
+    expect(isDirty(patchRunner(reloaded, 3, { timeoutMinutes: 10 }))).toBe(true)
+    expect(sameSettings(saved, defaults())).toBe(false)
+    expect(reloaded.rows[2]?.role.runner).not.toBe(reloaded.base.roles[2]?.runner)
+  })
+
+  it('copies the runner so a duplicate is edited independently', () => {
+    const source = patchRunner(setRunner(fresh(), 3, 'codex'), 3, { model: 'm' })
+    const draft = duplicateRow(source, 3)
+    expect(draft.rows[3]?.role.runner).toEqual({ cli: 'codex', model: 'm', permission: 'workspace-write' })
+    expect(draft.rows[3]?.role.runner).not.toBe(roleOf(draft, 3).runner)
+  })
+
+  it('previews the runner note and the one-shot instructions', () => {
+    const draft = patchRole(setRunner(fresh(), 4, 'codex'), 4, { description: 'Looks.' })
+    const explorer = roleOf(draft, 4)
+    expect(parentLine(explorer)).toBe('- explorer: Looks. (runs once in Codex, read-only; cannot receive send_message)')
+    expect(childText(explorer)).toContain("you run in your CLI's read-only mode")
+    expect(childText(explorer)).toContain('You will not receive follow-up messages')
+  })
+
+  it('labels a runner model, or nothing for the CLI default', () => {
+    expect(runnerModelLabel({ cli: 'codex', permission: 'read-only' })).toBeUndefined()
+    expect(runnerModelLabel({ cli: 'codex', model: 'gpt-5.5', effort: 'high', permission: 'read-only' })).toBe(
+      'gpt-5.5 · high',
+    )
+  })
+})
+
+describe('external CLI settings', () => {
+  it('edits, clears and compares the settings of one CLI', () => {
+    let draft = setCliSettings(fresh(), 'codex', { executable: '/opt/codex/bin/codex' })
+    expect(draft.clis).toEqual({ codex: { executable: '/opt/codex/bin/codex' } })
+    expect(isDirty(draft)).toBe(true)
+    draft = setCliSettings(draft, 'opencode', { envPassthrough: ['OPENROUTER_API_KEY'] })
+    draft = setCliSettings(draft, 'codex', { envPassthrough: ['CODEX_API_KEY', 'CODEX_API_KEY'] })
+    expect(setCliSettings(draft, 'codex', { executable: '/opt/codex/bin/codex' })).toBe(draft)
+    const { settings, issues } = analyseDraft(draft)
+    expect(issues).toEqual([])
+    expect(settings.clis).toEqual({
+      codex: { executable: '/opt/codex/bin/codex', envPassthrough: ['CODEX_API_KEY'] },
+      opencode: { envPassthrough: ['OPENROUTER_API_KEY'] },
+    })
+    expect(Object.keys(settings.clis ?? {})).toEqual(['codex', 'opencode'])
+    const reloaded = createDraft(settings, 3)
+    expect(isDirty(reloaded)).toBe(false)
+    expect(reloaded.clis?.codex?.envPassthrough).not.toBe(reloaded.base.clis?.codex?.envPassthrough)
+    let cleared = setCliSettings(reloaded, 'codex', { executable: '  ', envPassthrough: [] })
+    cleared = setCliSettings(cleared, 'opencode', { envPassthrough: undefined })
+    expect(cleared.clis).toBeUndefined()
+    expect(draftSettings(cleared).clis).toBeUndefined()
+    expect(isDirty(cleared)).toBe(true)
+    expect(isDirty(setCliSettings(fresh(), 'agy', {}))).toBe(false)
+  })
+
+  it('reports an unusable executable or variable name on its CLI and field', () => {
+    let draft = setCliSettings(fresh(), 'codex', { executable: './bin/codex' })
+    draft = setCliSettings(draft, 'agy', { envPassthrough: ['GOOD', '1BAD'] })
+    expect(analyseDraft(draft).issues).toEqual([
+      { code: 'invalid-cli-settings', field: 'executable', cli: 'codex' },
+      { code: 'invalid-cli-settings', field: 'env', cli: 'agy' },
+    ])
+    const many = setCliSettings(fresh(), 'opencode', {
+      envPassthrough: Array.from({ length: 33 }, (_, n) => `KEY_${n}`),
+    })
+    expect(analyseDraft(many).issues).toEqual([{ code: 'invalid-cli-settings', field: 'env', cli: 'opencode' }])
+  })
+
+  it('splits forwarded variable names at commas and whitespace', () => {
+    expect(parseEnvNames(' A_KEY, B_KEY\tC_KEY,,  ')).toEqual(['A_KEY', 'B_KEY', 'C_KEY'])
+    expect(parseEnvNames('')).toEqual([])
   })
 })

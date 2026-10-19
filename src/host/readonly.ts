@@ -255,7 +255,8 @@ function delegateDenial(args: unknown, roles: readonly RoleDefinition[]): string
     )
   }
   if (!role.readOnly) return refuse('delegate', `role "${role.id}" is not read-only`)
-  if (forkInheritsHistory(role)) {
+  // A runner role always starts fresh in its CLI's read-only mode, so it never copies the parent conversation.
+  if (role.runner === undefined && forkInheritsHistory(role)) {
     return refuse('delegate', `role "${role.id}" would copy the parent conversation into the child`)
   }
   return undefined

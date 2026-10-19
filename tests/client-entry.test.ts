@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply, inject } from '../src/client/index.ts'
-import type { Controller } from '../src/client/controller.ts'
+import { apply, inject, PROBE_ENDPOINT, probeCaller } from '../src/client/index.ts'
+import { type Controller, ProbeUnavailableError } from '../src/client/controller.ts'
 import type { DshClientContext } from '../src/client/dsh.ts'
 import { RolesPage } from '../src/client/RolesPage.tsx'
 import { fakeForm, fakeRemote } from './client-helpers.ts'
@@ -13,7 +13,7 @@ interface Registration {
 }
 
 /** A context that runs effects and slot injections at once and remembers how to undo them. */
-function fakeContext(locale = 'en') {
+function fakeContext(locale = 'en', services?: Record<string, unknown>) {
   const form = fakeForm()
   const remote = fakeRemote()
   const disposers: { label: string | undefined; dispose: () => unknown }[] = []
@@ -66,6 +66,7 @@ function fakeContext(locale = 'en') {
     effect(execute, label) {
       disposers.push({ label, dispose: execute() })
     },
+    ...(services === undefined ? {} : { get: (name: string) => services[name] }),
   }
   return {
     ctx,
@@ -174,5 +175,53 @@ describe('client entry', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(3)
     expect(remote.agentPresets.list).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('CLI connection test wiring', () => {
+  it('keeps connection out of the required services and reads it lazily', async () => {
+    expect(inject).not.toContain('connection')
+    const call = vi.fn(async () => ({ ok: true as const, value: { cli: 'codex', found: false } }))
+    const services: Record<string, unknown> = {}
+    const { ctx } = fakeContext('en', services)
+    const probe = probeCaller(ctx)
+    if (probe === undefined) throw new Error('no probe')
+    const signal = new AbortController().signal
+    await expect(probe('codex', signal)).rejects.toBeInstanceOf(ProbeUnavailableError)
+    services.connection = { rpc: {} }
+    await expect(probe('codex', signal)).rejects.toBeInstanceOf(ProbeUnavailableError)
+    services.connection = { rpc: { call } }
+    await expect(probe('agy', signal)).resolves.toEqual({ ok: true, value: { cli: 'codex', found: false } })
+    expect(call).toHaveBeenCalledWith('/api', PROBE_ENDPOINT, { args: { request: { cli: 'agy' } } }, signal)
+    expect(PROBE_ENDPOINT).toBe('rolesubagentsCli/probe')
+  })
+
+  it('treats a throwing service lookup as no connection', async () => {
+    const { ctx } = fakeContext()
+    const probe = probeCaller({
+      ...ctx,
+      get: () => {
+        throw new Error('inactive context')
+      },
+    })
+    await expect(probe?.('codex', new AbortController().signal)).rejects.toBeInstanceOf(ProbeUnavailableError)
+  })
+
+  it('offers the test only when the context can read optional services, and resets it on reconnect', async () => {
+    const plain = fakeContext()
+    apply(plain.ctx)
+    expect(probeCaller(plain.ctx)).toBeUndefined()
+    expect(controllerOf(plain.registrations[0]).getSnapshot().probes.available).toBe(false)
+
+    const call = vi.fn(async () => ({ ok: false as const, error: { code: 'gateway/method-unavailable', message: '' } }))
+    const wired = fakeContext('en', { connection: { rpc: { call } } })
+    apply(wired.ctx)
+    const controller = controllerOf(wired.registrations[0])
+    expect(controller.getSnapshot().probes.available).toBe(true)
+    controller.probeCli('codex')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(controller.getSnapshot().probes.available).toBe(false)
+    wired.eventListeners.get('connection/reset')?.()
+    expect(controller.getSnapshot().probes.available).toBe(true)
   })
 })

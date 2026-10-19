@@ -34,6 +34,7 @@ export const STYLES = /* css */ `
   --dshrs-warn-ink: color-mix(in srgb, var(--dsw-alias-state-warn-label, #dd8629) 68%, var(--dshrs-text));
   --dshrs-warn-tint: color-mix(in srgb, var(--dshrs-warn) 13%, transparent);
   --dshrs-ok-ink: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 62%, var(--dshrs-text));
+  --dshrs-ok-tint: color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 13%, transparent);
   --dshrs-idle: var(--dsw-alias-state-idle-primary, #d4d4d4);
   --dshrs-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
   container: dshrs-root / inline-size;
@@ -120,6 +121,7 @@ export const STYLES = /* css */ `
 .dshrs-badge--fork { background: var(--dshrs-accent-tint); color: var(--dshrs-accent-ink); }
 .dshrs-badge--ro { background: var(--dshrs-warn-tint); color: var(--dshrs-warn-ink); }
 .dshrs-badge--err { background: var(--dshrs-err-tint); color: var(--dshrs-err-ink); }
+.dshrs-badge--cli { background: var(--dshrs-ok-tint); color: var(--dshrs-ok-ink); }
 .dshrs-badge--quiet { background: transparent; box-shadow: inset 0 0 0 1px var(--dshrs-line-strong); color: var(--dshrs-text3); }
 
 .dshrs-editor { display: grid; gap: 16px; min-width: 0; }
@@ -151,6 +153,22 @@ export const STYLES = /* css */ `
 .dshrs-choice input { margin: 4px 0 0; width: 16px; height: 16px; flex: none; accent-color: var(--dshrs-primary); }
 .dshrs-choice input:disabled { cursor: not-allowed; }
 .dshrs-model-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+
+.dshrs-cli-grid { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+.dshrs-card {
+  display: grid; gap: 12px; align-content: start; min-width: 0;
+  padding: 12px; border: 1px solid var(--dshrs-line); border-radius: 12px;
+}
+.dshrs-card-head { display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; justify-content: space-between; }
+.dshrs-card-title { font-size: 14px; font-weight: 500; line-height: 22px; }
+.dshrs-probe-bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.dshrs-probe-result { display: grid; gap: 2px; min-width: 0; }
+.dshrs-probe { color: var(--dshrs-text2); font-size: 12.5px; line-height: 1.55; overflow-wrap: anywhere; }
+.dshrs-probe.dshrs-ok { color: var(--dshrs-ok-ink); }
+.dshrs-probe.dshrs-bad { color: var(--dshrs-err-ink); }
+@container dshrs-root (min-width: 640px) {
+  .dshrs-cli-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 .dshrs-preview { display: grid; gap: 10px; padding: 12px; border-radius: 10px; background: var(--dshrs-field); }
 .dshrs-pre {

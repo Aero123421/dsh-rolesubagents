@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a15291-1952-78d3-a085-d04780ce4d1b"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `fake-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"Missing environment variable: `FAKE_API_KEY`."}
+{"type":"turn.failed","error":{"message":"Missing environment variable: `FAKE_API_KEY`."}}

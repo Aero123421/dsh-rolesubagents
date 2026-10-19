@@ -4,6 +4,8 @@ English | [日本語](README.ja.md)
 
 Role-based subagents for DeepSeek Harness (DSH). Define roles such as worker, reviewer, and explorer, each with its own model, child instructions, context (fresh or fork), and read-only mode, from the Plugins page. The parent agent picks a role every time it delegates.
 
+A role can also run its child on a coding-agent CLI installed on the DSH host instead of inside DSH: **Codex CLI**, **Claude Code**, **Antigravity CLI** (`agy`), or **OpenCode**. The parent uses the same `delegate` tool either way.
+
 ## Features
 
 - **Roles**: edit the id, parent-facing description, child instructions, model, read-only switch, and Agent Preset on the settings page. Each role can be switched on or off.
@@ -11,12 +13,14 @@ Role-based subagents for DeepSeek Harness (DSH). Define roles such as worker, re
 - **Templates**: `worker`, `explorer`, and `reviewer` ship as templates.
 - **Read-only**: pins the child's file sandbox to `read-only` and appends `read-only` again if a later `sandbox/mode` selects a wider mode. While that role is active, write-like tools from MCP and other plugins are refused. Requests for wider sandbox access are still rejected automatically, even when the parent runs in Full access or Auto review.
 - **Cache-friendly**: role instructions reach the child as runtime context, not as system prompt. A role that keeps the parent's model and preset leaves the child's system prompt and tool definitions identical to the parent's. Fork roles also keep the inherited conversation cached.
-- **Fixed per session**: changes apply to new sessions; a running session keeps the role list it started with.
+- **External CLI runners**: set a role's **Runs on** to Codex, Claude Code, Antigravity, or OpenCode and its child runs once as that CLI on the host, with the CLI's own model, reasoning effort, and permission preset. The preset never exceeds what the parent session may do. See [External CLI runners](#external-cli-runners).
+- **Fixed per session**: changes apply to new sessions; a running session keeps the role list it started with. The **External CLIs** settings (executable path, forwarded variables) are the exception: they are read at each delegation.
 
 ## Requirements
 
 - DSH `>=0.2.1-alpha.3 <0.3.0-0` (child Agent Preset selection and the storage-domain service)
 - The settings page appears on the DSH Web (`dsh web`) Plugins page.
+- CLI roles also need the CLI installed on the DSH host (see [External CLI runners](#external-cli-runners)) and a Host that offers plugins its subprocess service and subagent provider registration. Without them, CLI roles are refused with a message and DSH roles keep working.
 
 ## Install
 
@@ -40,13 +44,14 @@ Restart DSH if asked.
 2. Start a new session. The parent model sees a `delegate` tool whose description lists the enabled roles.
 3. The parent calls `delegate({ role: "reviewer", description, prompt })`. Without `role` it starts `general` (`role` is required when `general` is off).
 
-Children run on the official subagent runtime: they start in the background, notify the parent when they finish, and accept follow-ups through `send_message`.
+Children run on the official subagent runtime: they start in the background, notify the parent when they finish, and accept follow-ups through `send_message`. A child of a CLI role also starts in the background and notifies the parent, but it runs once and does not accept `send_message`.
 
 ### Role fields
 
 | Field | Meaning |
 |---|---|
 | ID | The name the parent passes; lowercase letters, digits, `-`, `_`, up to 32 characters |
+| Runs on | DSH (built-in child, the default) or one of the external CLIs. A CLI replaces Context, Inherited context, Model, and Agent preset with its own fields; see [External CLI runners](#external-cli-runners). Built-in roles always run on DSH |
 | Description for the parent | What the role is for and how to brief it; shown in the tool description |
 | Instructions for the child | Added to the child's runtime context; never shown to the parent |
 | Context | Fresh (spawn) or fork |
@@ -74,6 +79,152 @@ The original workflow tool still owns execution, schemas, limits, cancellation, 
 - A role with the parent's model and composition shares the parent's cached system prompt and tool definitions.
 - A role with another model or an Agent Preset does not share the parent's cache (children of the same role still share one).
 - Fork roles cannot change the model or preset, because that would re-read the whole inherited conversation uncached.
+
+## External CLI runners
+
+A role whose **Runs on** is a CLI runs its child once as a separate program on the DSH host. The parent still calls `delegate`; the tool description marks such roles as `(runs once in <CLI>[, read-only]; cannot receive send_message)`, and the result reads `started <CLI> subagent <id>`. When the CLI finishes, the parent receives the usual completion notice carrying the CLI's final answer.
+
+### Requirements
+
+- Install the CLI on the DSH host and sign in with it there, as the same OS user that runs DSH (or forward the variable that holds its API key, see [External CLIs](#external-clis-settings)).
+- Tested versions: Codex CLI `codex-cli 0.163.0`, Claude Code `2.1.303`, Antigravity CLI `agy 1.4.2`, OpenCode `1.19.3`. Other versions usually work; the parsers ignore unknown events, but flags and output formats can change between releases.
+
+### Setting up a role
+
+1. Open the role on the Plugins page and choose a CLI under **Runs on**.
+2. Fill in the CLI fields that appear in place of Context, Inherited context, Model, and Agent preset:
+
+   | Field | Meaning |
+   |---|---|
+   | Provider | OpenCode only. Required together with Model |
+   | Model | The CLI's own model ID. Empty uses the CLI's configured default (not allowed for OpenCode). Suggestions come from **Test connection** or a built-in list; any ID the CLI accepts works if it uses only letters, digits, and `. _ : @ / + - [ ]` (not starting with `-`; the same applies to Provider and Reasoning effort) |
+   | Reasoning effort | **Model default** or one of the CLI's effort levels. For OpenCode, a variant name of the model (free text) |
+   | Permission | One of the CLI's permission presets (below). A delegated run never stops to ask for approval, so this decides what it may do |
+   | Timeout (minutes) | The run is stopped after this long; 1–1440, empty for 30 |
+
+3. **Read-only** keeps its meaning: only the CLI's read-only preset can be selected (see [Read-only](#read-only-on-a-cli)).
+4. Save, then start a new session.
+
+Switching a role to a CLI drops its fork context, DSH model, and Agent preset; switching back to DSH drops the CLI fields.
+
+### Per-CLI details
+
+Every run gets the task text through the CLI's input, and the role's instructions (with `Your role: <id>.` and a note that the run is one-shot) through the channel listed below. Inherited variables that make a CLI think it runs inside another agent (`CLAUDECODE`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`) are removed.
+
+#### Codex CLI (`codex`)
+
+| | |
+|---|---|
+| How it is driven | `codex exec --json --ephemeral --skip-git-repo-check --color never --disable plugins --disable multi_agent -c analytics.enabled=false -c notify=[] -c shell_environment_policy.ignore_default_excludes=false -c sandbox_workspace_write.writable_roots=[] -C <cwd> -s <preset> [-m <model>] [-c model_reasoning_effort=…] [-c developer_instructions=…] -`, task on stdin. No session file is kept |
+| Presets | **Read-only** → `-s read-only`; **Workspace write** (default) → `-s workspace-write`; **Full access (no sandbox)** → `-s danger-full-access`. Enforced by Codex's sandbox, shell commands included. `-s` is always passed and extra writable roots from a Codex config are cleared, so neither your config nor a project's `.codex/config.toml` can widen it |
+| Instructions | `developer_instructions` (a developer message next to Codex's own prompt) |
+| Credentials | `codex login` on the host, or forward `CODEX_API_KEY` (Codex's built-in provider ignores a plain `OPENAI_API_KEY`), or a custom provider from your Codex config with its key variable forwarded. Codex's shell tools do not see variables whose names contain `KEY`, `SECRET`, or `TOKEN` |
+| Model and effort | Your Codex config (model, providers) still applies when Model is empty. Efforts: none, minimal, low, medium, high, xhigh, max |
+| Connection test | Version, sign-in from `codex login status` (a forwarded `CODEX_API_KEY` counts as signed in; when other variables are forwarded, for example a custom provider's key, a "not signed in" answer is shown as unknown because `login status` only knows the built-in OpenAI login), and models from `codex debug models` |
+
+#### Claude Code (`claude`)
+
+| | |
+|---|---|
+| How it is driven | `claude -p --output-format stream-json --verbose --no-session-persistence --strict-mcp-config [--model <model>] [--effort <effort>] <preset flags> [--append-system-prompt <instructions>]`, task on stdin. No session is saved, and MCP servers from config files are not loaded |
+| Presets | **Read-only** → `--permission-mode dontAsk --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch --disallowedTools Write,Edit,NotebookEdit`; **Edit files (no shell)** (default, `acceptEdits`) → `--permission-mode acceptEdits --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch,Edit,Write,NotebookEdit`; **Auto (classifier)** (full access) → `--permission-mode auto` (the classifier makes extra model calls and can approve any command); **Bypass permissions** (full access) → `--permission-mode bypassPermissions`. Read-only and Edit files have no shell and load no settings files (see [Read-only](#read-only-on-a-cli) and [Workspace confinement](#workspace-confinement)) |
+| Instructions | `--append-system-prompt` (appended to Claude Code's system prompt) |
+| Environment | Sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`; removes `CLAUDECODE` and every inherited `CLAUDE_CODE_*` variable unless you forward it by name |
+| Credentials | Claude Code's own sign-in on the host. `ANTHROPIC_API_KEY` is never passed automatically (in print mode it would override a subscription sign-in); forward it by name if you want key authentication. Read-only and Edit files do not load settings files, so an `apiKeyHelper`, model, or `env` set there applies only to the full-access presets |
+| Model and effort | A model alias or full model ID; empty uses Claude Code's default. Efforts: low, medium, high, xhigh, max |
+| Connection test | Version and a built-in model list. Sign-in state shows as unknown (Claude Code has no side-effect-free check); the first run reports a sign-in problem |
+
+#### Antigravity CLI (`agy`)
+
+| | |
+|---|---|
+| How it is driven | `agy --input-format stream-json --output-format stream-json --disable-slash-commands [--model <model>] [--effort <effort>] [--agent dsh-rolesubagents-<nonce> [--mode accept-edits]] [--dangerously-skip-permissions] --log-file <private temp dir>/agy.log`, one stream-json user message on stdin, `AGY_CLI_DISABLE_AUTO_UPDATE=true`. Before the run, `agy --output-format json models` checks the sign-in (about 0.5 s instead of waiting for a sign-in code) |
+| Presets | **Read-only** → a generated agent with only `view_file`, `grep_search`, `list_dir`, `find_by_name`; **Edit files (no shell)** (default) → the same plus `write_to_file` and `replace_file_content`, with `--mode accept-edits` (without it headless agy refuses writes outside the temp directory); writes outside the run's directory stay refused; **Full access** → agy's default agent with `--dangerously-skip-permissions` |
+| Instructions | Read-only and Edit files: the body (system prompt) of the generated agent `~/.gemini/config/agents/dsh-rolesubagents-<nonce>.md`, which is removed after the run (leftovers older than 24 hours are removed at plugin start). Full access: prefixed to the task under `# Role instructions` / `# Task`, because a custom agent would lose agy's default tools and prompt |
+| Credentials | agy's own Google sign-in, or forward `GEMINI_API_KEY` together with `"modelProvider": "gemini"` in agy's `settings.json` |
+| Model and effort | Efforts: low, medium, high, xhigh, max. Each model supports only some of them; agy rejects an unsupported combination at start (reported as a configuration failure) |
+| Connection test | Version, sign-in state, and the model list (effort-suffixed models are grouped into a model plus its efforts) |
+
+#### OpenCode (`opencode`)
+
+| | |
+|---|---|
+| How it is driven | `opencode acp --cwd <cwd> --print-logs --log-level WARN`, driven over the Agent Client Protocol (JSON-RPC on stdin/stdout). The run's settings come from `OPENCODE_CONFIG_CONTENT`, merged over your OpenCode config without writing any file (below full access the project's own `opencode.json`, `.opencode` agents, commands and tools, and `AGENTS.md` are not loaded: `OPENCODE_DISABLE_PROJECT_CONFIG=1`): the model, a uniquely named agent `dsh-<nonce>` carrying the preset, and auto-update, sharing, snapshots, and title generation off. `OPENCODE_DB=:memory:` (no session is saved), and the local server OpenCode opens gets a random password |
+| Presets | **Read-only** → every tool denied except read (not `.env` files), grep, glob, list, lsp, todowrite; **Edit files (no shell)** (default) → the same plus file edits, with shell, directories outside the workspace, and questions denied. OpenCode's file tools reach the whole git repository around the run's directory, so Edit files is refused below a repository's top-level (see [Workspace confinement](#workspace-confinement)); **Full access** → everything allowed except directories outside the workspace, questions, and plan-mode switches (`.env` files stay unreadable) |
+| Instructions | An extra `instructions` file in a private temp directory (part of the system prompt, after `AGENTS.md`) |
+| Credentials | OpenCode's own provider sign-in (`opencode auth login`), or forward the provider's key variable (for example `OPENAI_API_KEY`) |
+| Model and effort | **Provider and Model are both required**; a role without them is switched off instead of falling back to OpenCode's own default model. Effort is a variant name of the model (for example `high`). Permission prompts are always answered with "reject"; a turn that ends without an answer after a rejection is reported as a permission failure |
+| Connection test | Version and the model list with each model's variants. Sign-in state shows as unknown |
+
+### Access ceiling
+
+DSH's sandbox and approvals do not reach inside a CLI, so the plugin decides the preset before it starts:
+
+- The ceiling is **read-only** when the calling agent's role is read-only. Otherwise it follows the parent session's sandbox mode: `read-only` → read-only, `danger-full-access` → full access, anything else (including approval modes such as Auto review, or no sandbox service) → workspace write.
+- If the role's preset allows more than the ceiling, the run uses the CLI's preset for the ceiling level instead (the host log records it). A preset is never widened.
+- Below full access, the child's working directory must be inside the parent's workspace root; a `cwd` outside it is refused. When the parent's workspace root is unknown (no sandbox service), an explicit `cwd` is refused unless the run is read-only; without `cwd` the child uses the parent's directory as usual.
+- A read-only agent can delegate only to read-only roles, CLI roles included.
+- DSH does not count external children toward its depth limit, so the plugin refuses the delegation itself when the next depth would exceed DSH's limit. The CLI's own sub-agents are not counted.
+
+### Workspace confinement
+
+Below full access, what a CLI may change is enforced in one of two ways:
+
+| Preset | Enforced by |
+|---|---|
+| Codex **Read-only**, **Workspace write** | Codex's operating-system sandbox, which also covers shell commands and resolves symbolic links |
+| Claude Code **Read-only**, **Edit files (no shell)**; Antigravity **Read-only**, **Edit files**; OpenCode **Read-only**, **Edit files** | The CLI's own tool permissions: which tools exist (no shell) and which paths its file tools may write. There is no operating-system sandbox |
+
+For the second kind, the plugin checks the working directory before a workspace-write run and **refuses the delegation** (with a short reason the parent sees) when:
+
+- the directory tree contains a symbolic link that leads outside the parent's workspace (or outside the directory when the workspace is unknown); the CLI's file tools would follow it. The check includes `.git` and follows internal directory links once per real path. Unreadable directories are refused. A directory too large to check (over 100,000 entries or 2 seconds) is refused too;
+- OpenCode only: the directory lies below the top-level of a git repository. OpenCode's file tools reach the whole repository, not just the directory (verified: a write to a sibling directory succeeds, and `apply_patch` can move a file anywhere in the repository), so delegate with the repository's top-level as `cwd`.
+
+Claude Code and Antigravity keep their file tools inside the run's directory (verified: writes to a sibling directory, the repository's top-level, or elsewhere are refused). The scan is a startup check; it does not prevent another process changing links during a run. Hard links are not detected: a file hard-linked into the workspace is changed in place. Use a read-only role, or a parent with full access, when a refused directory is intended.
+
+Below full access OpenCode also refuses a project that has `.opencode/plugin` or `.opencode/plugins` code: OpenCode 1.19.3 runs it at start even with the project configuration disabled.
+
+### Read-only on a CLI
+
+| CLI | What Read-only does |
+|---|---|
+| Codex | Runs in Codex's `read-only` sandbox |
+| Claude Code | Only the read tools (`Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`), no shell, in `dontAsk` mode: anything that would need approval is refused. No setting sources are loaded (user, project, and local settings, allow rules, hooks, `CLAUDE.md`), so they cannot widen it; this also skips a model, environment, or `apiKeyHelper` set in those settings |
+| Antigravity | Only the read tools (view files, search, list folders); no shell |
+| OpenCode | Every tool denied except reading, searching, and listing files; `.env` files stay unreadable. The project's OpenCode configuration and `AGENTS.md` are not loaded; a project with `.opencode/plugin(s)` code is refused |
+
+### External CLIs settings
+
+The **External CLIs** section of the Plugins page has one card per CLI, shared by every role on it:
+
+- **Executable**: an absolute path, or a command name looked up on the host's `PATH`. Empty uses `codex`, `claude`, `agy`, or `opencode`.
+- **Forwarded environment variables**: variable names only (commas or spaces). Values are read from the DSH host process environment when the CLI starts and are never stored. Up to 32 names. **Test connection** counts only those that are set on the host.
+- **Test connection**: checks the saved settings: whether the executable is found, its version, sign-in state where the CLI can report it cheaply, and the models it lists (used as suggestions in the role editor). It never calls a model. The button is hidden when the Host does not offer the RPC path it uses (this is not a documented DSH API); the editor then uses built-in suggestions.
+
+These settings apply to the next delegation, also in running sessions.
+
+### Limits
+
+- **One-shot**: a CLI child cannot receive `send_message` (DSH rejects it) and `list_agents` does not list it. Stop it with `interrupt_agent`; DSH Web shows it as an external task row without a stop button.
+- **Always fresh**: no fork of the parent conversation and no Agent Preset.
+- **No rollback**: files changed before a cancel or timeout stay changed.
+- **Host restart**: a run in progress when DSH stops is stopped, and its completion notice is lost.
+- **Timeout** per role (default 30 minutes). A stop first asks the CLI to cancel where it supports that (OpenCode), then terminates the process; DSH kills it after a short grace. Background processes the CLI leaves behind are stopped too when the run ends.
+- **The CLI's own side effects** still happen:
+  - Antigravity records each run in its own history (about 0.4 MB under `~/.gemini`), so a delegated run becomes the target of `agy --continue` in that directory. agy also always contacts Google's feature-flag and telemetry hosts.
+  - OpenCode may create `<repo>/.git/opencode` in your repository. It retries rate-limit and server errors for about a minute before failing.
+  - Claude Code refuses **Bypass permissions** when DSH runs as root (reported as a configuration failure with `bypass-refused-as-root`).
+  - Antigravity's **Edit files** also allows writes under the OS temp directory (agy's own policy); writes elsewhere outside the run's directory are denied and reported as a permission failure.
+  - Codex's **Workspace write** also allows writes under `/tmp` and `$TMPDIR`, keeps `.git` (and `.codex`, `.agents`) read-only, so a worker cannot commit, and turns network access off.
+  - What each preset loads from the project: Codex reads the project's `AGENTS.md` and, for a project you trusted in Codex, its `.codex/config.toml` (the sandbox flags above still win). Claude Code's Read-only and Edit files load no settings files and no `CLAUDE.md`; its full-access presets load user, project, and local settings, including hooks. OpenCode below full access loads only your global OpenCode configuration (no project `opencode.json`, `.opencode` files, or `AGENTS.md`); at full access it loads the project's too. Antigravity reads the project's `AGENTS.md`.
+- A failed run reaches the parent as a short diagnostic in fixed wording, such as `Subagent failure (CLI: Codex; category: auth; exit code: 1)` with one hint line. The CLI's own error text goes only to the host log.
+
+### Security notes
+
+- Nothing secret is stored in the plugin settings: the CLIs use their own sign-in, and forwarded variables are names only.
+- DSH removes variables whose names contain `KEY`, `TOKEN`, `SECRET`, or `PASSWORD` (and `DSH_*`) from every child process. A CLI gets such a variable only when you forward it by name.
+- A forwarded variable is visible to the CLI and usually to the tools it runs (shell commands, MCP servers). Forward only what that CLI needs.
+- Other variables of the DSH process, such as proxy settings and `*_BASE_URL`, are inherited as usual.
 
 ## Official subagent tools
 
@@ -104,7 +255,7 @@ Keep the official `send_message`, `list_agents`, and `interrupt_agent` tools on.
 - Slash commands are not tools. A command that appends `sandbox/mode` is overwritten back to `read-only`. This plugin does not re-assert the child's approval or policy. A one-shot `sandbox_permissions` escalation still depends on DSH denying it for a delegated child.
 - A fork set to all completed turns copies that whole prefix, including tool results. The warnings on the settings page, in the tool description, in the tool result, in the host log, and in the child's runtime context do not filter or rewrite that history. Task only uses the fresh-child provider, so the parent log is never copied. An invalid fork scope is stored as task only. A fresh role and a task-only fork refuse a provider that sets `inheritsParentContext` to true. The official fork provider has no smaller slice, and events already copied cannot be removed.
 - A read-only agent cannot delegate to a role that is not read-only, or to a fork that copies the parent conversation. It can delegate to a read-only fresh role or a task-only fork.
-- Out-of-process children (codex, claude-code, acp) are not supported; roles use the spawn and fork providers.
+- DSH's official out-of-process providers (codex, claude-code, acp) are not used. DSH roles use the spawn and fork providers; CLI roles run through this plugin's own runners (see [External CLI runners](#external-cli-runners), which has its own limits).
 - When a child's conversation is compacted, the role instructions are re-sent as runtime context; the initial task text is replaced by the summary.
 - Some Agent Presets suppress optional runtime context (for example `minimal`). The role instructions are still delivered, but the official "delegated subagent" statement is not.
 
@@ -114,6 +265,7 @@ Keep the official `send_message`, `list_agents`, and `interrupt_agent` tools on.
 - For each child it starts, it reserves the child id, records the child's role in the storage domain, and, for read-only roles, appends `sandbox/mode: read-only` before the child's first request. If that first pin fails, the child is not started. Afterwards, `session/event` re-appends `read-only` whenever the mode changes, including after resume when the stored mode is no longer `read-only`. The read-only agent also receives a `tools.guard` that refuses write-like calls.
 - A fork role set to task only is started on the spawn provider. A fork that inherits history is started on the fork provider, and the host logs that inherited tool results can carry prompt injection.
 - One global runtime-context provider reads the role from the storage domain, so the instructions survive compaction and resume. Role state used to be written as Session-log plugin records; those are still read back, but new state is only written to the storage domain (an exported Session moved without its storage keeps its log, not its role). A full-history fork also receives a warning to treat that history as untrusted.
+- A CLI role takes a separate path. `delegate` checks the depth limit and the access ceiling, then registers one temporary provider for that delegation (`rolesubagents:<cli>:<role>:<uuid>`) and starts the child through DSH's subagent service with delivery to the parent; the registration is removed right after the start. The provider's `start` spawns the CLI through the Host's `ctx.subprocess` service, speaks that CLI's session protocol (a task on stdin and JSON lines on stdout for Codex, Claude Code, and Antigravity; Agent Client Protocol JSON-RPC for OpenCode), and turns its final event into DSH's result. DSH then owns the run: it delivers the completion notice and stops it on `interrupt_agent`. [docs/external-cli.md](docs/external-cli.md) describes the design for maintainers.
 
 ## Development
 
@@ -122,7 +274,10 @@ pnpm install
 pnpm check   # lint, typecheck, test, and committed lib/ matches a fresh build
 pnpm build   # lib/index.js (Host) and lib/client.js (Web)
 pnpm check:host # optional real installed-DSH workflow integration checks
+pnpm check:cli  # optional real-CLI integration checks (see below)
 ```
+
+`pnpm check:cli [self|codex|claude-code|agy|opencode …]` runs the external runners against a real DSH runtime and the real CLIs. It is opt-in and not part of `pnpm check`: it needs DSH installed (`DSH_CHECKOUT`, default `/opt/dsh`) and the CLIs on `PATH` (or in `CLI_PATH_DIR`); a CLI that is not found is skipped. Every case points the CLI at a local fake model server under `tests/support/fake-models/` with fake keys and an isolated home directory, so no real credentials or model calls are used.
 
 `lib/` is committed. After changing sources, run `pnpm build` and commit `lib/` with them.
 

@@ -5,6 +5,8 @@
 # storage domain, and contributes the role instructions as runtime
 # context. Its browser half (lib/client.js, declared under `dsh.client` in
 # package.json) adds the role editor to this bundle's page under Plugins.
+# A role can instead run its child once on an external coding-agent CLI
+# installed on the Host (Codex CLI, Claude Code, Antigravity CLI, OpenCode).
 #
 # Roles are edited from the Plugins page and stored as this row's settings.
 # Changes apply to Sessions created afterwards; a running Session keeps the

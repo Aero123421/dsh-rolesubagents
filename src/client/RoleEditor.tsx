@@ -1,18 +1,28 @@
-/** The inline editor of one role: fields, model and preset pickers, and the preview. */
+/** The inline editor of one role: fields, model and preset pickers (or the CLI runner fields), and the preview. */
 
 import { useEffect, useId, useRef } from 'react'
+import { CLI_IDS, cliDescriptor, isCliId } from '../shared/cli/index.ts'
 import {
   type ForkScope,
   MAX_DESCRIPTION_LENGTH,
   MAX_INSTRUCTIONS_LENGTH,
   type RoleDefinition,
   type RoleModel,
+  type RoleRunner,
 } from '../shared/roles.ts'
 import { useController, useT } from './context.tsx'
-import type { PageState } from './controller.ts'
-import { childText, type DraftRow, ID_MAX_LENGTH, type IssueField, parentLine } from './draft.ts'
-import { issueText, type Translator } from './i18n.ts'
-import { Button, Field } from './ui.tsx'
+import { cliSuggestions, type PageState } from './controller.ts'
+import { childText, type DraftRow, ID_MAX_LENGTH, type IssueField, parentLine, permissionAllowed } from './draft.ts'
+import {
+  accessName,
+  confinementHelp,
+  issueText,
+  presetName,
+  readOnlyHelp,
+  TIMEOUT_TEXT,
+  type Translator,
+} from './i18n.ts'
+import { Button, Field, TextInput } from './ui.tsx'
 
 interface EditorProps {
   row: DraftRow
@@ -33,7 +43,7 @@ export function RoleEditor({ row, state }: EditorProps) {
   const builtin = role.builtin !== undefined
   const canEdit = state.canEdit
   const contextName = useId()
-  const readOnlyHelp = useId()
+  const readOnlyHelpId = useId()
   const root = useRef<HTMLElement>(null)
   const errorOf = (field: IssueField): string | undefined => {
     const issue = state.issues.find(candidate => candidate.uid === uid && candidate.field === field)
@@ -65,6 +75,8 @@ export function RoleEditor({ row, state }: EditorProps) {
           />
         )}
       </Field>
+
+      <RunsOnField uid={uid} role={role} canEdit={canEdit} error={errorOf('runner')} />
 
       <Field
         label={t('ed.description')}
@@ -102,28 +114,34 @@ export function RoleEditor({ row, state }: EditorProps) {
         )}
       </Field>
 
-      <fieldset className="dshrs-group">
-        <legend>{t('ed.context')}</legend>
-        {(['spawn', 'fork'] as const).map(value => (
-          <label className="dshrs-choice" key={value}>
-            <input
-              type="radio"
-              name={contextName}
-              value={value}
-              checked={role.context === value}
-              disabled={!canEdit || builtin}
-              onChange={() => c.setContext(uid, value)}
-            />
-            <span>{t(value === 'spawn' ? 'ed.contextSpawn' : 'ed.contextFork')}</span>
-          </label>
-        ))}
-        {builtin ? <p className="dshrs-hint">{t('ed.contextFixed')}</p> : null}
-      </fieldset>
+      {role.runner === undefined ? (
+        <>
+          <fieldset className="dshrs-group">
+            <legend>{t('ed.context')}</legend>
+            {(['spawn', 'fork'] as const).map(value => (
+              <label className="dshrs-choice" key={value}>
+                <input
+                  type="radio"
+                  name={contextName}
+                  value={value}
+                  checked={role.context === value}
+                  disabled={!canEdit || builtin}
+                  onChange={() => c.setContext(uid, value)}
+                />
+                <span>{t(value === 'spawn' ? 'ed.contextSpawn' : 'ed.contextFork')}</span>
+              </label>
+            ))}
+            {builtin ? <p className="dshrs-hint">{t('ed.contextFixed')}</p> : null}
+          </fieldset>
 
-      {role.context === 'fork' ? <ForkScopeField uid={uid} role={role} canEdit={canEdit} /> : null}
+          {role.context === 'fork' ? <ForkScopeField uid={uid} role={role} canEdit={canEdit} /> : null}
 
-      <ModelFields uid={uid} role={role} state={state} error={errorOf('model')} />
-      <PresetField uid={uid} role={role} state={state} error={errorOf('preset')} />
+          <ModelFields uid={uid} role={role} state={state} error={errorOf('model')} />
+          <PresetField uid={uid} role={role} state={state} error={errorOf('preset')} />
+        </>
+      ) : (
+        <RunnerFields uid={uid} role={role} runner={role.runner} state={state} errorOf={errorOf} />
+      )}
 
       <fieldset className="dshrs-group">
         <legend>{t('ed.readOnly')}</legend>
@@ -132,18 +150,218 @@ export function RoleEditor({ row, state }: EditorProps) {
             type="checkbox"
             checked={role.readOnly}
             disabled={!canEdit}
-            aria-describedby={readOnlyHelp}
+            aria-describedby={readOnlyHelpId}
             onChange={event => c.patchRole(uid, { readOnly: event.target.checked })}
           />
           <span>{t('ed.readOnlyLabel')}</span>
         </label>
-        <p className="dshrs-hint" id={readOnlyHelp}>
-          {t('ed.readOnlyHelp')}
+        <p className="dshrs-hint" id={readOnlyHelpId}>
+          {role.runner === undefined ? t('ed.readOnlyHelp') : readOnlyHelp(t, role.runner.cli)}
         </p>
       </fieldset>
 
       <Preview role={role} />
     </section>
+  )
+}
+
+function RunsOnField(props: { uid: number; role: RoleDefinition; canEdit: boolean; error: string | undefined }) {
+  const c = useController()
+  const t = useT()
+  const builtin = props.role.builtin !== undefined
+  return (
+    <Field label={t('ed.runsOn')} help={t(builtin ? 'ed.runsOnBuiltin' : 'ed.runsOnHelp')} error={props.error}>
+      {a11y => (
+        <select
+          {...a11y}
+          className="dshrs-select"
+          value={props.role.runner?.cli ?? ''}
+          disabled={!props.canEdit || builtin}
+          onChange={event => {
+            const next = event.target.value
+            c.setRunner(props.uid, isCliId(next) ? next : undefined)
+          }}
+        >
+          <option value="">{t('ed.runsOnDsh')}</option>
+          {CLI_IDS.map(id => (
+            <option key={id} value={id}>
+              {cliDescriptor(id).displayName}
+            </option>
+          ))}
+        </select>
+      )}
+    </Field>
+  )
+}
+
+/** Typed timeout text → the text of the number it stands for ('' when empty). */
+const timeoutText = (text: string): string => (text.trim() === '' ? '' : String(Number(text.trim())))
+
+/** The fields of a role that runs on an external CLI, and what such a role cannot do. */
+function RunnerFields(props: {
+  uid: number
+  role: RoleDefinition
+  runner: RoleRunner
+  state: PageState
+  errorOf: (field: IssueField) => string | undefined
+}) {
+  const c = useController()
+  const t = useT()
+  const { uid, role, runner, state, errorOf } = props
+  const descriptor = cliDescriptor(runner.cli)
+  const cli = descriptor.displayName
+  const disabled = !state.canEdit
+  const provider = runner.provider ?? ''
+  const model = runner.model ?? ''
+  const effort = runner.effort ?? ''
+  const suggestions = cliSuggestions(state.probes.clis[runner.cli], runner.cli, provider, model)
+  // Plain characters only: some DOMs resolve `list` through a CSS selector, where React's `:r1:` ids are invalid.
+  const lists = `dshrs-list${useId().replace(/[^\w-]/g, '')}`
+  const modelError = errorOf('runnerModel')
+  const effortList = descriptor.effortFreeText ? [...suggestions.efforts] : [...descriptor.efforts]
+  const textInput = { className: 'dshrs-input', spellCheck: false, autoComplete: 'off', disabled } as const
+  return (
+    <fieldset className="dshrs-group">
+      <legend>{t('ed.cliSettings', { cli })}</legend>
+      <div className="dshrs-model-grid">
+        {descriptor.needsProvider ? (
+          <Field label={t('ed.provider')} error={modelError}>
+            {a11y => (
+              <input
+                {...a11y}
+                {...textInput}
+                list={`${lists}-providers`}
+                value={provider}
+                onChange={event => c.patchRunner(uid, { provider: event.target.value })}
+              />
+            )}
+          </Field>
+        ) : null}
+        <Field label={t('ed.modelId')} error={descriptor.needsProvider ? undefined : modelError}>
+          {a11y => (
+            <input
+              {...a11y}
+              {...textInput}
+              list={`${lists}-models`}
+              value={model}
+              placeholder={descriptor.needsProvider ? undefined : t('row.cliDefault')}
+              onChange={event => c.patchRunner(uid, { model: event.target.value })}
+            />
+          )}
+        </Field>
+        {descriptor.effortFreeText ? (
+          <Field label={t('ed.effort')} help={t('ed.cliEffortFree')} error={errorOf('effort')}>
+            {a11y => (
+              <input
+                {...a11y}
+                {...textInput}
+                list={`${lists}-efforts`}
+                value={effort}
+                onChange={event => c.patchRunner(uid, { effort: event.target.value })}
+              />
+            )}
+          </Field>
+        ) : descriptor.efforts.length > 0 ? (
+          <Field label={t('ed.effort')} error={errorOf('effort')}>
+            {a11y => (
+              <select
+                {...a11y}
+                className="dshrs-select"
+                value={effort}
+                disabled={disabled}
+                onChange={event => c.patchRunner(uid, { effort: event.target.value })}
+              >
+                <option value="">{t('ed.effortDefault')}</option>
+                {descriptor.efforts.map(id => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ))}
+                {effort !== '' && !descriptor.efforts.includes(effort) ? (
+                  <option value={effort}>{t('ed.unlisted', { value: effort })}</option>
+                ) : null}
+              </select>
+            )}
+          </Field>
+        ) : null}
+      </div>
+      <p className="dshrs-hint">{t(descriptor.needsProvider ? 'ed.cliModelOpenCode' : 'ed.cliModelHelp', { cli })}</p>
+      <datalist id={`${lists}-providers`}>
+        {suggestions.providers.map(id => (
+          <option key={id} value={id} />
+        ))}
+      </datalist>
+      <datalist id={`${lists}-models`}>
+        {suggestions.models.map(id => (
+          <option key={id} value={id} />
+        ))}
+      </datalist>
+      <datalist id={`${lists}-efforts`}>
+        {effortList.map(id => (
+          <option key={id} value={id} />
+        ))}
+      </datalist>
+      <div className="dshrs-model-grid">
+        <Field
+          label={t('ed.permission')}
+          help={[
+            t('ed.permissionHelp', { cli }),
+            confinementHelp(t, runner.cli, runner.permission),
+            role.readOnly ? t('ed.permissionReadOnly') : '',
+          ]
+            .filter(text => text !== '')
+            .join(' ')}
+          error={errorOf('permission')}
+        >
+          {a11y => (
+            <select
+              {...a11y}
+              className="dshrs-select"
+              value={runner.permission}
+              disabled={disabled}
+              onChange={event => c.patchRunner(uid, { permission: event.target.value })}
+            >
+              {descriptor.permissions.map(preset => (
+                <option
+                  key={preset.id}
+                  value={preset.id}
+                  disabled={!permissionAllowed(runner.cli, preset.id, role.readOnly)}
+                >
+                  {t('ed.permissionOption', { name: presetName(t, preset.id), access: accessName(t, preset.access) })}
+                </option>
+              ))}
+              {descriptor.permissions.some(preset => preset.id === runner.permission) ? null : (
+                <option value={runner.permission}>{t('ed.unlisted', { value: runner.permission })}</option>
+              )}
+            </select>
+          )}
+        </Field>
+        <Field label={t('ed.timeout')} help={t('ed.timeoutHelp', TIMEOUT_TEXT)} error={errorOf('timeout')}>
+          {a11y => (
+            <TextInput
+              {...a11y}
+              {...textInput}
+              inputMode="numeric"
+              placeholder={String(TIMEOUT_TEXT.default)}
+              value={runner.timeoutMinutes === undefined ? '' : String(runner.timeoutMinutes)}
+              canonical={timeoutText}
+              onText={text =>
+                c.patchRunner(uid, { timeoutMinutes: text.trim() === '' ? undefined : Number(text.trim()) })
+              }
+            />
+          )}
+        </Field>
+      </div>
+      <div className="dshrs-notice">
+        <p>{t('ed.cliLimits')}</p>
+        <ul>
+          <li>{t('ed.cliLimitOnce')}</li>
+          <li>{t('ed.cliLimitFresh')}</li>
+          <li>{t('ed.cliLimitInstalled', { cli })}</li>
+          <li>{t('ed.cliLimitCancel')}</li>
+        </ul>
+      </div>
+    </fieldset>
   )
 }
 

@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a15290-c58c-7771-8d83-93c6688bf7a3"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `fake-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."}
+{"type":"turn.failed","error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."}}

@@ -1,0 +1,1 @@
+error: invalid model selection (--model "gemini-3.1-pro" --effort "xhigh"): gemini-3.1-pro has no "xhigh" effort (available: low, high)

@@ -1,10 +1,12 @@
 /** The role settings page that fills the `plugins.bundle.config` slot of this bundle. */
 
 import { type ReactNode, useId, useState } from 'react'
+import { cliDescriptor } from '../shared/cli/index.ts'
 import { MAX_ROLES } from '../shared/roles.ts'
+import { CliSection } from './CliSection.tsx'
 import { ControllerProvider, useController, usePageState, useT } from './context.tsx'
 import type { Controller, PageState } from './controller.ts'
-import { type DraftRow, routeLabel, templates } from './draft.ts'
+import { type DraftRow, routeLabel, runnerModelLabel, templates } from './draft.ts'
 import { languageOf, issueText } from './i18n.ts'
 import { RoleEditor, WorkflowModelFields } from './RoleEditor.tsx'
 import { Badge, Button, Switch } from './ui.tsx'
@@ -64,6 +66,7 @@ function Page() {
       <section className="dshrs-section">
         <WorkflowModelFields state={state} />
       </section>
+      <CliSection state={state} />
       <RoleList state={state} rows={draft.rows} />
       {state.writable ? <Footer state={state} /> : null}
     </Frame>
@@ -153,7 +156,12 @@ function RoleRow(props: { row: DraftRow; index: number; count: number; state: Pa
   const { role, uid } = row
   const open = state.expanded === uid
   const fork = role.context === 'fork'
-  const route = routeLabel(role.model)
+  const runner = role.runner
+  const cli = runner === undefined ? undefined : cliDescriptor(runner.cli).displayName
+  const modelText =
+    runner === undefined || cli === undefined
+      ? (routeLabel(role.model) ?? t('row.modelParent'))
+      : `${cli} · ${runnerModelLabel(runner) ?? t('row.cliDefault')}`
   const preset = state.presets.options.find(option => option.id === role.agentPreset)?.name ?? role.agentPreset
   const broken = state.issues.some(issue => issue.uid === uid)
   const classes = ['dshrs-row', role.enabled ? '' : 'dshrs-off', open ? 'dshrs-open' : ''].filter(Boolean).join(' ')
@@ -169,15 +177,21 @@ function RoleRow(props: { row: DraftRow; index: number; count: number; state: Pa
         <div className="dshrs-row-title">
           <span className="dshrs-row-id">{role.id === '' ? '…' : role.id}</span>
           {role.builtin === undefined ? null : <Badge tone="quiet">{t('row.builtin')}</Badge>}
-          <Badge tone={fork ? 'fork' : undefined} title={t(fork ? 'row.forkTitle' : 'row.freshTitle')}>
-            {t(fork ? 'row.fork' : 'row.fresh')}
-          </Badge>
+          {cli === undefined ? (
+            <Badge tone={fork ? 'fork' : undefined} title={t(fork ? 'row.forkTitle' : 'row.freshTitle')}>
+              {t(fork ? 'row.fork' : 'row.fresh')}
+            </Badge>
+          ) : (
+            <Badge tone="cli" title={t('row.cliTitle', { cli })}>
+              {cli}
+            </Badge>
+          )}
           {fork && role.forkScope === 'task' ? <Badge>{t('row.taskOnly')}</Badge> : null}
           {role.readOnly ? <Badge tone="ro">{t('row.readOnly')}</Badge> : null}
           {preset === undefined ? null : <Badge>{t('row.preset', { preset })}</Badge>}
           {broken ? <Badge tone="err">{t('row.needsFix')}</Badge> : null}
         </div>
-        <p className="dshrs-row-model">{t('row.model', { model: route ?? t('row.modelParent') })}</p>
+        <p className="dshrs-row-model">{t('row.model', { model: modelText })}</p>
       </div>
       <div className="dshrs-row-actions">
         <Button
@@ -253,7 +267,11 @@ function Footer({ state }: { state: PageState }) {
           <p>{t('foot.fix')}</p>
           <ul>
             {state.issues.map(issue => (
-              <li key={`${issue.code}:${issue.uid ?? ''}:${issue.roleId ?? ''}`}>{issueText(issue, t)}</li>
+              <li
+                key={`${issue.code}:${issue.uid ?? ''}:${issue.roleId ?? ''}:${issue.cli ?? ''}:${issue.field ?? ''}`}
+              >
+                {issueText(issue, t)}
+              </li>
             ))}
           </ul>
         </div>

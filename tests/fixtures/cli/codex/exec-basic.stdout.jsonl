@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a1528d-4cbf-7340-9c66-736081ee3857"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `fake-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"HELLO_FROM_FAKE"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}

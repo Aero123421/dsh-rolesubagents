@@ -12,6 +12,7 @@
  */
 
 import type { ComponentType } from 'react'
+import type { CliId } from '../shared/cli/index.ts'
 
 /** Id of this plugin's profile entry (`cordis.patch.yml`); also the settings namespace. */
 export const ENTRY_ID = 'rolesubagents'
@@ -80,6 +81,38 @@ export interface DshRemote {
   $on(event: string, listener: () => void): () => unknown
 }
 
+/** One model a CLI listed in a connection test. */
+export interface ProbeModelLike {
+  readonly id: string
+  readonly name?: string
+  readonly efforts?: readonly string[]
+}
+
+/**
+ * `rolesubagentsCli/probe` answer (the Host's `ProbeResult` in src/host/external/types.ts).
+ * `message` is a fixed word: `subprocess-unavailable`, `not-found` or `probe-failed`.
+ */
+export interface ProbeResultLike {
+  readonly cli: CliId
+  readonly found: boolean
+  readonly path?: string
+  readonly version?: string
+  readonly auth?: 'ok' | 'missing' | 'unknown'
+  readonly models?: readonly ProbeModelLike[]
+  readonly message?: string
+}
+
+/**
+ * The `connection` client service, reduced to its generic unary RPC caller
+ * (packages/client/connection/src/rpc.ts `ClientConnectionRpc.call`). A failed
+ * transport (e.g. HTTP 404 from a Host without the Gateway route) rejects.
+ */
+export interface ConnectionLike {
+  readonly rpc: {
+    call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RemoteResult<unknown>>
+  }
+}
+
 export interface DshLocale {
   getLocale(): { readonly active: string }
   subscribe(listener: () => void): () => void
@@ -96,5 +129,10 @@ export interface DshClientContext {
   readonly remote: DshRemote
   readonly configForms: { get(entryId: string): ConfigFormLike }
   on(event: 'connection/reset', listener: () => void): () => unknown
+  /**
+   * Cordis' reflect mixin: reads a service that is not in `inject`, or undefined while
+   * it is not provided. Used for the optional `connection` service (CLI connection test).
+   */
+  get?(name: string): unknown
   effect(execute: () => () => unknown, label?: string): unknown
 }
