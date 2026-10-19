@@ -31,4 +31,4 @@ jobs:
       - name: Committed lib/ matches a fresh build
         run: node scripts/check-lib.mjs
       - name: Source and lib do not call addLanguage
-        run: '! rg -n "addLanguage" src lib'
+        run: rc=0; grep -rnF addLanguage src lib || rc=$?; test "$rc" -eq 1
