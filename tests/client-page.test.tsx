@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type Controller, createController, type ProbeCall } from '../src/client/controller.ts'
 import { RolesPage } from '../src/client/RolesPage.tsx'
 import { DEFAULT_ROLES } from '../src/shared/roles.ts'
@@ -726,5 +726,63 @@ describe('external CLIs section', () => {
     ])
     expect(within(rowOf('worker')).getByText('モデル: Codex · CLI の既定')).toBeTruthy()
     expect(screen.getByText(/1回だけ実行されます/)).toBeTruthy()
+  })
+
+  it('scrolls a connection test into view only after the user runs it', async () => {
+    const probe = fakeProbe()
+    let release: (value: Awaited<ReturnType<ProbeCall>>) => void = () => {}
+    probe.mockImplementation(() => new Promise(resolve => (release = resolve)))
+    const scrolled: Element[] = []
+    const original = HTMLElement.prototype.scrollIntoView
+    HTMLElement.prototype.scrollIntoView = function scrollIntoView(this: HTMLElement) {
+      scrolled.push(this)
+    }
+    try {
+      const { controller } = await mount({ probe, preload: false })
+      expect(scrolled).toHaveLength(0)
+      fireEvent.click(button('Test connection to Codex'))
+      await settle()
+      expect(scrolled).toHaveLength(0)
+      release(probeAnswer('codex', { version: '0.200.0' }))
+      await settle()
+      expect(cardOf('Codex').getByText(/Found: \/usr\/local\/bin\/codex/)).toBeTruthy()
+      expect(scrolled).toHaveLength(1)
+      expect(scrolled[0]?.classList.contains('dshrs-probe-result')).toBe(true)
+      cleanup()
+      render(<RolesPage controller={controller} view="page" />)
+      await settle()
+      expect(cardOf('Codex').getByText(/Found: \/usr\/local\/bin\/codex/)).toBeTruthy()
+      expect(scrolled).toHaveLength(1)
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original
+    }
+  })
+})
+
+describe('scroll clearance binding', () => {
+  afterEach(() => {
+    document.body.style.overflowY = ''
+    document.body.style.paddingBottom = ''
+    document.body.style.scrollPaddingBottom = ''
+  })
+
+  it('binds from the page root once a late draft arrives, without querying the document', async () => {
+    document.body.style.overflowY = 'scroll'
+    document.body.style.paddingBottom = '48px'
+    const queried = vi.spyOn(document, 'querySelector')
+    try {
+      const { fake } = await mount({ form: { status: 'loading' }, preload: false })
+      expect(document.querySelector('.dshrs-footer')).toBeNull()
+      expect(document.body.style.scrollPaddingBottom).toBe('')
+      update(() => fake.set({ status: 'ready' }))
+      await settle()
+      const footer = document.querySelector<HTMLElement>('.dshrs-footer')
+      expect(footer).toBeTruthy()
+      const bar = footer?.getBoundingClientRect().height ?? 0
+      expect(document.body.style.scrollPaddingBottom).toBe(`${Math.ceil(bar + 48)}px`)
+      expect(queried.mock.calls.some(call => call[0] === '.dshrs-root')).toBe(false)
+    } finally {
+      queried.mockRestore()
+    }
   })
 })

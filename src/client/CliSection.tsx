@@ -1,11 +1,13 @@
 /** The "External CLIs" section: per-CLI executable, forwarded variable names, and the connection test. */
 
+import { useEffect, useRef } from 'react'
 import { CLI_IDS, type CliId, cliDescriptor } from '../shared/cli/index.ts'
 import type { CliSettings } from '../shared/roles.ts'
 import { useController, useT } from './context.tsx'
 import type { PageState, ProbeState } from './controller.ts'
 import { type IssueField, parseEnvNames } from './draft.ts'
 import { issueText } from './i18n.ts'
+import { shouldRevealProbe } from './scroll-clearance.ts'
 import { Button, Field, TextInput } from './ui.tsx'
 
 export function CliSection({ state }: { state: PageState }) {
@@ -122,8 +124,17 @@ function ProbeOutcome({ probe, cli }: { probe: ProbeState; cli: string }) {
     if (result.auth === 'missing') lines.push({ text: t('probe.authMissing', { cli }), tone: ' dshrs-bad' })
     if (result.message === 'probe-failed') lines.push({ text: t('probe.checksFailed'), tone: '' })
   }
+  const resultRef = useRef<HTMLDivElement>(null)
+  const statusRef = useRef(probe.status)
+  const signature = lines.map(line => line.text).join('\n')
+  useEffect(() => {
+    const previous = statusRef.current
+    statusRef.current = probe.status
+    if (!shouldRevealProbe(previous, probe.status) || signature === '') return
+    resultRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [probe.status, signature])
   return (
-    <div className="dshrs-probe-result" aria-live="polite">
+    <div className="dshrs-probe-result" aria-live="polite" ref={resultRef}>
       {lines.map(line => (
         <p key={line.text} className={`dshrs-probe${line.tone}`}>
           {line.text}
