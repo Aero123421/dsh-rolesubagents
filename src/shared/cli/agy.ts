@@ -1,6 +1,8 @@
 /**
- * Antigravity CLI (`agy`). Each run uses a generated custom agent whose tool
- * allowlist implements the preset; instructions are that agent's body.
+ * Antigravity CLI (`agy`). Read-only and edit-files runs use a generated custom
+ * agent whose tool allowlist implements the preset; instructions are that agent's
+ * body (system prompt). Full access keeps agy's default agent (a custom agent drops
+ * its default tools and prompt sections), so there the instructions are a prompt prefix.
  */
 
 import type { CliDescriptor } from './types.ts'
