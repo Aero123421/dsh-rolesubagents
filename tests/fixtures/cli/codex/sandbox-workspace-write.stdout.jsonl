@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a1528f-b6be-74e1-ad43-8a4bf4ffbc6f"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `fake-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'printf a > inside.txt; echo in=$?; printf b > ../home/outside.txt; echo out=$?; printf c > /tmp/codex-research-tmp-probe.txt; echo tmp=$?'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'printf a > inside.txt; echo in=$?; printf b > ../home/outside.txt; echo out=$?; printf c > /tmp/codex-research-tmp-probe.txt; echo tmp=$?'","aggregated_output":"in=0\nout=0\ntmp=0\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"DONE"}}
+{"type":"turn.completed","usage":{"input_tokens":20,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0}}

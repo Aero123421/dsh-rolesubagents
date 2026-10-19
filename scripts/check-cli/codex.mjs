@@ -1,0 +1,300 @@
+/**
+ * Real-CLI integration cases for the Codex adapter (`pnpm check:cli codex`).
+ *
+ * Every run uses an isolated HOME and CODEX_HOME whose config.toml selects a
+ * custom `fake` model provider pointing at tests/support/fake-models/codex.mjs;
+ * the fake key travels through the CLI's `envPassthrough` (the provider's
+ * `env_key`), so Codex never contacts api.openai.com and no sandbox credential
+ * is used. Retries are off so failures are immediate.
+ */
+
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+const FAKE_KEY = 'sk-fake-codex-check-0000'
+const SERVER = 'tests/support/fake-models/codex.mjs'
+
+/**
+ * Start a fake Responses server for `script` and an isolated Codex home configured for it.
+ * @returns the server, its request log reader and the env/clis options for `h.world`.
+ */
+async function fakeCodex(h, script, { forwardKey = true } = {}) {
+  const dir = h.workspace()
+  const scriptPath = join(dir, 'script.json')
+  const logPath = join(dir, 'requests.jsonl')
+  writeFileSync(scriptPath, JSON.stringify(script))
+  writeFileSync(logPath, '')
+  const server = await h.server(SERVER, ['--script', scriptPath, '--log', logPath])
+  const home = h.workspace()
+  const codexHome = h.workspace({
+    'config.toml': [
+      'model = "fake-model"',
+      'model_provider = "fake"',
+      'check_for_update_on_startup = false',
+      '',
+      '[model_providers.fake]',
+      'name = "Fake Responses"',
+      `base_url = "${server.url}/v1"`,
+      'env_key = "FAKE_CODEX_KEY"',
+      'wire_api = "responses"',
+      'request_max_retries = 0',
+      'stream_max_retries = 0',
+      '',
+      '[analytics]',
+      'enabled = false',
+      '',
+    ].join('\n'),
+  })
+  const passthrough = ['CODEX_HOME', 'NO_PROXY', 'no_proxy', ...(forwardKey ? ['FAKE_CODEX_KEY'] : [])]
+  return {
+    server,
+    codexHome,
+    requests: () =>
+      readFileSync(logPath, 'utf8')
+        .split('\n')
+        .filter(line => line !== '')
+        .map(line => JSON.parse(line)),
+    env: {
+      HOME: home,
+      CODEX_HOME: codexHome,
+      FAKE_CODEX_KEY: FAKE_KEY,
+      NO_PROXY: '127.0.0.1,localhost',
+      no_proxy: '127.0.0.1,localhost',
+    },
+    clis: { codex: { envPassthrough: passthrough } },
+  }
+}
+
+/** Every process whose command line mentions `marker` (the run's unique workspace path). */
+function processesMentioning(marker) {
+  const pids = []
+  for (const entry of readdirSync('/proc')) {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue
+    try {
+      if (readFileSync(`/proc/${entry}/cmdline`, 'utf8').includes(marker)) pids.push(Number(entry))
+    } catch {}
+  }
+  return pids
+}
+
+function textOfInput(body, role) {
+  return (body.input ?? [])
+    .filter(item => item.role === role)
+    .flatMap(item => item.content ?? [])
+    .map(part => part.text ?? '')
+}
+
+function functionOutputs(body) {
+  return (body.input ?? []).filter(item => item.type === 'function_call_output').map(item => String(item.output))
+}
+
+const coder = (h, runner, patch = {}) =>
+  h.role('coder', { description: 'Codex coder.', runner: { cli: 'codex', ...runner }, ...patch })
+
+export async function cases(h) {
+  h.case('answer reaches the parent; instructions, model and effort reach the model', async () => {
+    const fake = await fakeCodex(h, [{ kind: 'complete', text: 'CODEX_FAKE_ANSWER ✓' }])
+    const ws = h.workspace({ 'README.md': 'hello' })
+    const instructions = 'Be terse.\nQuote: "x" \\ ✓ and = signs'
+    const w = await h.world({
+      cwd: ws,
+      roles: [coder(h, { permission: 'workspace-write', model: 'gpt-5.5', effort: 'high' }, { instructions })],
+      clis: fake.clis,
+      env: fake.env,
+    })
+    try {
+      const { childId } = await w.delegate({ role: 'coder', prompt: 'TASK_MARKER say hi' })
+      const notice = await w.notice(childId, 60_000)
+      h.assert.match(notice, new RegExp(`Background subagent ${childId} finished`))
+      h.assert.ok(notice.includes('CODEX_FAKE_ANSWER ✓'), notice)
+      const [request] = fake.requests()
+      h.assert.equal(request.headers.authorization, `Bearer ${FAKE_KEY}`)
+      h.assert.equal(request.body.model, 'gpt-5.5')
+      h.assert.equal(request.body.reasoning?.effort, 'high')
+      const developer = textOfInput(request.body, 'developer')
+      const role = developer.find(text => text.startsWith('Your role: coder.'))
+      h.assert.ok(role !== undefined, `role instructions in a developer message: ${JSON.stringify(developer)}`)
+      h.assert.ok(role.includes(instructions), 'instructions arrive byte-exact')
+      h.assert.ok(textOfInput(request.body, 'user').some(text => text.includes('TASK_MARKER say hi')))
+    } finally {
+      await w.close()
+    }
+  })
+
+  h.case('read-only role: a write attempted by the model is blocked', async () => {
+    const fake = await fakeCodex(h, [
+      { kind: 'tool', name: 'exec_command', arguments: { cmd: 'printf pwned > created.txt; echo rc=$?' } },
+      { kind: 'complete', text: 'RO_DONE' },
+    ])
+    const ws = h.workspace({ 'README.md': 'hello' })
+    const w = await h.world({
+      cwd: ws,
+      roles: [coder(h, { permission: 'read-only' }, { readOnly: true })],
+      clis: fake.clis,
+      env: fake.env,
+    })
+    try {
+      const { childId } = await w.delegate({ role: 'coder', prompt: 'Create created.txt' })
+      const notice = await w.notice(childId, 60_000)
+      h.assert.ok(notice.includes('RO_DONE'), notice)
+      h.assert.equal(existsSync(join(ws, 'created.txt')), false, 'the read-only sandbox blocked the write')
+      const outputs = functionOutputs(fake.requests()[1]?.body ?? {})
+      h.assert.ok(
+        outputs.some(output => /Read-only file system/.test(output)),
+        `tool output: ${outputs}`,
+      )
+    } finally {
+      await w.close()
+    }
+  })
+
+  h.case('workspace-write role (default preset) can write inside the workspace', async () => {
+    const fake = await fakeCodex(h, [
+      { kind: 'tool', name: 'exec_command', arguments: { cmd: 'printf hello > created.txt' } },
+      { kind: 'complete', text: 'WRITE_DONE' },
+    ])
+    const ws = h.workspace()
+    const w = await h.world({
+      cwd: ws,
+      roles: [coder(h, { permission: 'workspace-write' })],
+      clis: fake.clis,
+      env: fake.env,
+    })
+    try {
+      const { childId } = await w.delegate({ role: 'coder', prompt: 'Create created.txt' })
+      const notice = await w.notice(childId, 60_000)
+      h.assert.ok(notice.includes('WRITE_DONE'), notice)
+      h.assert.equal(readFileSync(join(ws, 'created.txt'), 'utf8'), 'hello')
+    } finally {
+      await w.close()
+    }
+  })
+
+  h.case('a read-only parent sandbox lowers a workspace-write role to read-only', async () => {
+    const fake = await fakeCodex(h, [
+      { kind: 'tool', name: 'exec_command', arguments: { cmd: 'printf x > created.txt' } },
+      { kind: 'complete', text: 'CEILING_DONE' },
+    ])
+    const ws = h.workspace()
+    const w = await h.world({
+      cwd: ws,
+      sandboxMode: 'read-only',
+      roles: [coder(h, { permission: 'workspace-write' })],
+      clis: fake.clis,
+      env: fake.env,
+    })
+    try {
+      const { childId } = await w.delegate({ role: 'coder', prompt: 'Create created.txt' })
+      h.assert.ok((await w.notice(childId, 60_000)).includes('CEILING_DONE'))
+      h.assert.equal(existsSync(join(ws, 'created.txt')), false)
+    } finally {
+      await w.close()
+    }
+  })
+
+  h.case('interrupt_agent aborts the run and leaves no Codex process behind', async () => {
+    const fake = await fakeCodex(h, [{ kind: 'hold' }])
+    const ws = h.workspace()
+    const w = await h.world({
+      cwd: ws,
+      roles: [coder(h, { permission: 'workspace-write' })],
+      clis: fake.clis,
+      env: fake.env,
+    })
+    try {
+      const { childId } = await w.delegate({ role: 'coder', prompt: 'wait forever' })
+      await h.wait(() => fake.requests().length > 0, 30_000, 'the model request')
+      const pids = processesMentioning(ws)
+      h.assert.ok(pids.length > 0, 'the Codex processes are visible')
+      w.interrupt(childId)
+      const notice = await w.notice(childId, 30_000)
+      h.assert.match(notice, /was stopped before it finished/)
+      await h.wait(() => pids.every(pid => !h.alive(pid)), 10_000, 'every Codex process to exit')
+      h.assert.deepEqual(processesMentioning(ws), [])
+    } finally {
+      await w.close()
+    }
+  })
+
+  h.case('a rejected API key yields a safe auth diagnostic', async () => {
+    const fake = await fakeCodex(h, [
+      {
+        kind: 'error',
+        status: 401,
+        body: { error: { message: `Incorrect API key provided: ${FAKE_KEY}`, type: 'invalid_request_error' } },
+      },
+    ])
+    const w = await h.world({
+      cwd: h.workspace(),
+      roles: [coder(h, { permission: 'workspace-write' })],
+      clis: fake.clis,
+      env: fake.env,
+    })
+    try {
+      const { childId } = await w.delegate({ role: 'coder', prompt: 'hi' })
+      const notice = await w.notice(childId, 60_000)
+      h.assert.match(notice, /failed before it finished/)
+      h.assert.match(notice, /Subagent failure \(CLI: Codex; category: auth; exit code: 1; http status: 401\)/)
+      for (const leak of ['127.0.0.1', 'sk-fake', 'Incorrect API key', '/v1/responses']) {
+        h.assert.equal(notice.includes(leak), false, `notice leaks ${leak}: ${notice}`)
+      }
+    } finally {
+      await w.close()
+    }
+  })
+
+  h.case('an unforwarded provider key and an upstream 500 map to auth and service', async () => {
+    const missing = await fakeCodex(h, [], { forwardKey: false })
+    const w = await h.world({
+      cwd: h.workspace(),
+      roles: [coder(h, { permission: 'workspace-write' })],
+      clis: missing.clis,
+      env: missing.env,
+    })
+    try {
+      const { childId } = await w.delegate({ role: 'coder', prompt: 'hi' })
+      const notice = await w.notice(childId, 60_000)
+      h.assert.match(notice, /category: auth; exit code: 1; reason: missing-api-key\)/)
+      h.assert.equal(missing.requests().length, 0)
+    } finally {
+      await w.close()
+    }
+    const upstream = await fakeCodex(h, [
+      { kind: 'error', status: 500, body: { error: { message: 'boom at http://internal', type: 'server_error' } } },
+    ])
+    const v = await h.world({
+      cwd: h.workspace(),
+      roles: [coder(h, { permission: 'workspace-write' })],
+      clis: upstream.clis,
+      env: upstream.env,
+    })
+    try {
+      const { childId } = await v.delegate({ role: 'coder', prompt: 'hi' })
+      const notice = await v.notice(childId, 60_000)
+      h.assert.match(notice, /category: service/)
+      h.assert.equal(notice.includes('internal'), false, notice)
+    } finally {
+      await v.close()
+    }
+  })
+
+  h.case('probe: version, sign-in state and model list without a model call', async () => {
+    const fake = await fakeCodex(h, [])
+    const w = await h.world({ cwd: h.workspace(), roles: [], clis: fake.clis, env: fake.env })
+    try {
+      const service = await h.wait(() => w.ctx.get('rolesubagentsCli'), 5_000, 'the rolesubagentsCli service')
+      const result = await service.probe({ cli: 'codex' }, new AbortController().signal)
+      h.assert.equal(result.found, true)
+      h.assert.match(result.version ?? '', /^\d+\.\d+\.\d+/)
+      h.assert.equal(result.auth, 'missing', 'the isolated CODEX_HOME is not signed in')
+      h.assert.ok((result.models ?? []).length > 0, 'models are listed')
+      h.assert.ok(
+        result.models.every(model => !(model.efforts ?? []).includes('ultra')),
+        'ultra is never offered',
+      )
+      h.assert.equal(fake.requests().length, 0, 'no model request')
+    } finally {
+      await w.close()
+    }
+  })
+}

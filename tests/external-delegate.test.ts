@@ -194,8 +194,17 @@ describe('delegate: external roles', () => {
     await full.call({ role: 'coder', cwd: join(full.root, 'elsewhere') })
   })
 
-  it('reports unimplemented adapters, missing CLIs and a missing subprocess service safely', async () => {
-    const stub = boot({ adapter: CLI_ADAPTERS.codex })
+  it('reports failing adapters, missing CLIs and a missing subprocess service safely', async () => {
+    const failing: CliAdapter = {
+      descriptor: CODEX,
+      plan() {
+        throw new Error('Codex runner is not implemented yet')
+      },
+      createSession() {
+        throw new Error('Codex runner is not implemented yet')
+      },
+    }
+    const stub = boot({ adapter: failing })
     await expect(stub.call({ role: 'coder' })).rejects.toThrow(/^Codex runner is not implemented yet$/)
     expect(stub.world.externalProviders.size).toBe(0)
 

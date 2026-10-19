@@ -24,17 +24,30 @@ describe('adapter registry', () => {
     expect(CLI_ADAPTERS[id].descriptor).toBe(cliDescriptor(id))
   })
 
-  it('stubs refuse to plan with a safe message until implemented', () => {
+  it.each(CLI_IDS)('%s plans a read-only run without throwing', id => {
+    const descriptor = cliDescriptor(id)
+    const runner = {
+      cli: id,
+      permission: descriptor.presetForAccess['read-only'],
+      ...(descriptor.needsProvider ? { provider: 'p', model: 'm' } : {}),
+    }
     const input = {
-      runner: { cli: 'codex' as const, permission: 'read-only' },
-      preset: 'read-only',
+      runner,
+      preset: runner.permission,
       access: 'read-only' as const,
-      instructions: '',
+      instructions: 'Your role: r.',
       task: 't',
       cwd: '/',
     }
-    expect(() => CLI_ADAPTERS.codex.plan(input, 'n')).toThrow(/^Codex runner is not implemented yet$/)
-    expect(() => CLI_ADAPTERS['claude-code'].createSession(input, 'n')).toThrow(/Claude Code runner/)
+    let plan: ReturnType<(typeof CLI_ADAPTERS)[typeof id]['plan']> | undefined
+    try {
+      plan = CLI_ADAPTERS[id].plan(input, 'n0n0n0n0n0n0')
+    } catch (error) {
+      // An adapter still being implemented refuses with a safe, fixed message.
+      expect(String(error)).toMatch(/runner is not implemented yet/)
+      return
+    }
+    expect(plan.argv.length).toBeGreaterThan(0)
   })
 })
 
