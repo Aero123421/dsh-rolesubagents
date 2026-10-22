@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Optional integration check against a real installed DSH host (no network or disk writes).
+ * Optional integration check against a real installed DSH host (no network; disposable HOME).
  * Run with Node 24: node scripts/check-workflow-host.mjs
  * Node 22 also works with --experimental-strip-types.
  * Override the installation root with DSH_CHECKOUT=/path/to/dsh.
@@ -13,8 +13,10 @@ import assert from 'node:assert/strict'
 import { createRequire, registerHooks } from 'node:module'
 import { resolve } from 'node:path'
 import { hostResolveHook } from './host-resolve-hook.mjs'
+import { isolateCheckEnvironment } from './check-environment.mjs'
 
 const checkout = resolve(process.env.DSH_CHECKOUT || '/usr/lib/node_modules/@deepseek-ai/dsh')
+const checkEnvironment = isolateCheckEnvironment()
 const hostRequire = createRequire(resolve(checkout, 'package.json'))
 // Resolve host peers from one installation, as DSH does when loading a plugin.
 // This also avoids accidentally testing different dev-dependency service classes.
@@ -327,4 +329,5 @@ try {
   console.log(`Completed ${assertions} installed-host integration checks.`)
 } finally {
   resolutionHook.deregister()
+  checkEnvironment.dispose()
 }

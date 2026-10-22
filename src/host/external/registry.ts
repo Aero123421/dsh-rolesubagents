@@ -9,6 +9,8 @@ import { agyAdapter } from '../cli/agy/index.ts'
 import { claudeCodeAdapter } from '../cli/claude-code/index.ts'
 import { codexAdapter } from '../cli/codex/index.ts'
 import { opencodeAdapter } from '../cli/opencode/index.ts'
+import { grokBuildAdapter } from '../cli/grok-build/index.ts'
+import { piAdapter } from '../cli/pi/index.ts'
 import type { CliAdapter } from './types.ts'
 
 /** Every adapter by CLI id. */
@@ -17,6 +19,8 @@ export const CLI_ADAPTERS: Readonly<Record<CliId, CliAdapter>> = Object.freeze({
   'claude-code': claudeCodeAdapter,
   agy: agyAdapter,
   opencode: opencodeAdapter,
+  'grok-build': grokBuildAdapter,
+  pi: piAdapter,
 })
 
 /** Looks up the adapter for one CLI; injectable so tests and the integration harness can substitute adapters. */

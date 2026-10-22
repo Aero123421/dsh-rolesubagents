@@ -13,7 +13,8 @@
  * agy's telemetry / feature-flag / updater traffic to Google hosts never leaves the machine and never stalls.
  *
  * `GET /__requests` returns a summary of every model request so far:
- * `[{ path, model, scenario, title, tools, system, user, generationConfig }]`.
+ * `[{ path, authenticated, model, scenario, title, tools, system, user, generationConfig }]`.
+ * Model endpoints reject anything except FAKE_AGY_KEY; summaries retain only an authentication boolean.
  *
  * Behaviour is selected by a marker in the latest user text:
  *   [[scenario:text]]     (default) streamed answer "FAKE_ANSWER: ok (prompt=...)"
@@ -30,6 +31,9 @@
 
 import http from 'node:http'
 import { pathToFileURL } from 'node:url'
+
+/** Deliberately invalid outside this local fixture; never accept ambient credentials. */
+export const FAKE_AGY_KEY = 'fake-gemini-key-rolesubagents-check'
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -130,13 +134,22 @@ function plan(body) {
         EndLine: 3,
         ...meta('Editing file', 'Greeting edit'),
       })
-    case 'command':
+    case 'command': {
+      // 1.4.4's default agent no longer declares Cwd/toolAction for run_command.
+      // Like a real model, follow the offered schema; retain 1.4.2's arguments when declared.
+      const declaration = (body.tools ?? [])
+        .flatMap(tool => tool.functionDeclarations ?? [])
+        .find(tool => tool.name === 'run_command')
+      const properties = declaration?.parameters?.properties ?? declaration?.parametersJsonSchema?.properties
+      const offered = name => properties === undefined || Object.hasOwn(properties, name)
       return one('run_command', {
         CommandLine: 'echo FAKE_CMD > fake_cmd.txt',
-        Cwd: ws,
+        ...(offered('Cwd') ? { Cwd: ws } : {}),
         WaitMsBeforeAsync: 5000,
-        ...meta('Running command', 'Echo test'),
+        ...(offered('toolAction') ? { toolAction: 'Running command' } : {}),
+        toolSummary: 'Echo test',
       })
+    }
     case 'read':
       return one('view_file', { AbsolutePath: `${ws}/README.md`, ...meta('Reading file', 'Readme') })
     case 'preamble':
@@ -242,6 +255,7 @@ export function startFakeAgyModel(port = 0) {
     if (req.method === 'POST' && route && body) {
       requests.push({
         path: url.pathname,
+        authenticated: req.headers['x-goog-api-key'] === FAKE_AGY_KEY || url.searchParams.get('key') === FAKE_AGY_KEY,
         model: route[2],
         scenario: scenarioOf(body),
         title: isTitleRequest(body),
@@ -250,6 +264,13 @@ export function startFakeAgyModel(port = 0) {
         user: lastUserText(body),
         generationConfig: body.generationConfig ?? null,
       })
+      if (!requests.at(-1).authenticated) {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({ error: { code: 401, message: 'expected fixture credential', status: 'UNAUTHENTICATED' } }),
+        )
+        return
+      }
       if (route[3] === 'countTokens') {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ totalTokens: Math.ceil(raw.length / 4) }))

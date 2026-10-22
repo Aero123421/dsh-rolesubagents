@@ -256,7 +256,10 @@ export function patchRole(draft: Draft, uid: number, patch: RolePatch): Draft {
 
 function switchedPermission(cli: CliId, readOnly: boolean): string {
   const descriptor = cliDescriptor(cli)
-  return readOnly ? descriptor.presetForAccess['read-only'] : descriptor.defaultPermission
+  // Unsupported read-only combinations remain visibly invalid; validation blocks saving them.
+  return readOnly
+    ? (descriptor.presetForAccess['read-only'] ?? descriptor.defaultPermission)
+    : descriptor.defaultPermission
 }
 
 /**

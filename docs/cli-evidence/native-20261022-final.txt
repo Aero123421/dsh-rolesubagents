@@ -1,0 +1,34 @@
+
+> dsh-rolesubagents@0.2.1 check:cli /home/admister/dev/dshplugin/dsh-rolesubagents
+> node scripts/check-cli.mjs grok-build pi
+
+DSH runtime: /usr/lib/node_modules/@deepseek-ai/dsh
+BINARY grok-build: grok-1.0.62-linux-x86_64; version 1.0.62
+PASS grok-build: native Grok returns final text and uses configured local model and role instructions (617 ms)
+PASS grok-build: native Grok real stream tolerates synthetic unknown and malformed line injection (613 ms)
+PASS grok-build: native Grok tool loop keeps only final response (645 ms)
+PASS grok-build: native Grok max token limit is not success (609 ms)
+PASS grok-build: native Grok parallel runs settle independently (631 ms)
+PASS grok-build: native Grok provider errors cannot be mistaken for success (605 ms)
+    log: rolesubagents: Grok Build run 3a1759f9-90be-4e82-ba2e-88b47d470615 ended with error (Subagent failure (CLI: Grok Build; category: timeout; exit code: 143))
+PASS grok-build: native Grok wall-clock timeout terminates streaming process and owned descendants (2256 ms)
+PASS grok-build: restricted parent refuses native Grok before backend startup (148 ms)
+PASS grok-build: native Grok missing key is diagnosed before inference (501 ms)
+PASS grok-build: native Grok cancellation stops streaming and owned descendants (648 ms)
+BINARY pi: cli.js; version 1.3.0
+PASS pi: native Pi returns final text and preserves instructions and configured provider (410 ms)
+PASS pi: native Pi real stream tolerates synthetic unknown and malformed line injection (360 ms)
+PASS pi: native Pi retains extensions and handles prompt disposition handled (402 ms)
+PASS pi: native Pi tool loop keeps only final answer (406 ms)
+PASS pi: native Pi max token limit is not success (395 ms)
+PASS pi: native Pi extension dialogs are denied without approving (458 ms)
+PASS pi: native Pi parallel runs settle independently (406 ms)
+PASS pi: native Pi reports provider errors without leaking raw output (402 ms)
+    log: rolesubagents: Pi run ff56f121-8cd9-443b-afea-199e63cfc66f ended with error (Subagent failure (CLI: Pi; category: timeout; exit code: 0))
+PASS pi: native Pi wall-clock timeout terminates streaming process and owned descendants (2199 ms)
+PASS pi: restricted parent refuses native Pi before extension startup (143 ms)
+PASS pi: native Pi missing key is diagnosed before inference (380 ms)
+PASS pi: native Pi cancellation stops streaming and owned descendants (402 ms)
+REPORT artifacts/native-evidence-20261022-1956.json
+
+22 passed, 0 failed, 0 skipped

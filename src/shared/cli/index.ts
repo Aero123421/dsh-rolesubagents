@@ -8,6 +8,8 @@ import { AGY } from './agy.ts'
 import { CLAUDE_CODE } from './claude-code.ts'
 import { CODEX } from './codex.ts'
 import { OPENCODE } from './opencode.ts'
+import { GROK_BUILD } from './grok-build.ts'
+import { PI } from './pi.ts'
 import { type AccessLevel, CLI_IDS, type CliDescriptor, type CliId, type PermissionPreset } from './types.ts'
 
 export * from './types.ts'
@@ -18,6 +20,8 @@ export const CLI_DESCRIPTORS: Readonly<Record<CliId, CliDescriptor>> = Object.fr
   'claude-code': CLAUDE_CODE,
   agy: AGY,
   opencode: OPENCODE,
+  'grok-build': GROK_BUILD,
+  pi: PI,
 })
 
 /**

@@ -1,0 +1,17 @@
+{
+  "evidenceId": "pi-1.3.0-e79626f2dd6f-2026-10-22T10:54:07.610Z",
+  "rawReport": "docs/cli-evidence/native-20261022-final.raw.json",
+  "rawReportSha256": "e0a25732e44b9ffbaf2f7a19184009587c5b516ac025f6e97227fac5494ca7b7",
+  "binary": {
+    "path": "cli.js",
+    "sha256": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
+    "version": "1.3.0",
+    "expectedVersion": "1.3.0"
+  },
+  "mappingSource": "scripts/record-cli-evidence.mjs",
+  "limitations": [
+    "Native preset requires full-access parent; permission-boundary checks refusal under a restricted parent, not OS confinement.",
+    "Only these scripted localhost cases are covered, not arbitrary native extensions, every protocol variant, live authentication, or paid providers.",
+    "Binary hash identifies the executable entry file; dynamically loaded dependencies and user extensions are not fingerprinted."
+  ]
+}

@@ -4,7 +4,7 @@ English | [日本語](README.ja.md)
 
 Role-based subagents for DeepSeek Harness (DSH). Define roles such as worker, reviewer, and explorer, each with its own model, child instructions, context (fresh or fork), and read-only mode, from the Plugins page. The parent agent picks a role every time it delegates.
 
-A role can also run its child on a coding-agent CLI installed on the DSH host instead of inside DSH: **Codex CLI**, **Claude Code**, **Antigravity CLI** (`agy`), or **OpenCode**. The parent uses the same `delegate` tool either way.
+A role can also run its child on a coding-agent CLI installed on the DSH host instead of inside DSH: **Codex CLI**, **Claude Code**, **Antigravity CLI** (`agy`), **OpenCode**, **Grok Build** (`grok`), or **Pi** (`pi`). The parent uses the same `delegate` tool either way.
 
 ## Features
 
@@ -13,7 +13,7 @@ A role can also run its child on a coding-agent CLI installed on the DSH host in
 - **Templates**: `worker`, `explorer`, and `reviewer` ship as templates.
 - **Read-only**: pins the child's file sandbox to `read-only` and appends `read-only` again if a later `sandbox/mode` selects a wider mode. While that role is active, write-like tools from MCP and other plugins are refused. Requests for wider sandbox access are still rejected automatically, even when the parent runs in Full access or Auto review.
 - **Cache-friendly**: role instructions reach the child as runtime context, not as system prompt. A role that keeps the parent's model and preset leaves the child's system prompt and tool definitions identical to the parent's. Fork roles also keep the inherited conversation cached.
-- **External CLI runners**: set a role's **Runs on** to Codex, Claude Code, Antigravity, or OpenCode and its child runs once as that CLI on the host, with the CLI's own model, reasoning effort, and permission preset. The preset never exceeds what the parent session may do. See [External CLI runners](#external-cli-runners).
+- **External CLI runners**: set a role's **Runs on** to Codex, Claude Code, Antigravity, OpenCode, Grok Build, or Pi and its child runs once as that CLI on the host, with the CLI's own model, reasoning effort, and permission preset. The preset never exceeds what the parent session may do. See [External CLI runners](#external-cli-runners).
 - **Fixed per session**: changes apply to new sessions; a running session keeps the role list it started with. The **External CLIs** settings (executable path, forwarded variables) are the exception: they are read at each delegation.
 
 ## Requirements
@@ -88,7 +88,7 @@ A role whose **Runs on** is a CLI runs its child once as a separate program on t
 ### Requirements
 
 - Install the CLI on the DSH host and sign in with it there, as the same OS user that runs DSH (or forward the variable that holds its API key, see [External CLIs](#external-clis-settings)).
-- Tested versions: Codex CLI `codex-cli 0.163.0`, Claude Code `2.1.303`, Antigravity CLI `agy 1.4.2`, OpenCode `1.19.3`. Other versions usually work; the parsers ignore unknown events, but flags and output formats can change between releases.
+- Compatibility is evidence-scoped, not a semver promise. Historical documentation names Codex `0.163.0`, Claude Code `2.1.303`, Antigravity `1.4.2`, and OpenCode `1.19.3`, but does not record a complete dated environment/preset/suite matrix. A version probe alone is not validation. See [compatibility evidence and comparison](docs/cli-compatibility.md) for the exact conditions required for a tested result; unknown/missing/failed/skipped checks must not be treated as success.
 
 ### Setting up a role
 
@@ -103,7 +103,7 @@ A role whose **Runs on** is a CLI runs its child once as a separate program on t
    | Permission | One of the CLI's permission presets (below). A delegated run never stops to ask for approval, so this decides what it may do |
    | Timeout (minutes) | The run is stopped after this long; 1–1440, empty for 30 |
 
-3. **Read-only** keeps its meaning: only the CLI's read-only preset can be selected (see [Read-only](#read-only-on-a-cli)).
+3. **Read-only** permits only a verified read-only preset (see [Read-only](#read-only-on-a-cli)). Grok Build and Pi have no such native preset: this combination is rejected in the editor and a stored incompatible role is switched off during normalization.
 4. Save, then start a new session.
 
 Switching a role to a CLI drops its fork context, DSH model, and Agent preset; switching back to DSH drops the CLI fields.
@@ -127,13 +127,15 @@ Every run gets the task text through the CLI's input, and the role's instruction
 
 | | |
 |---|---|
-| How it is driven | `claude -p --output-format stream-json --verbose --no-session-persistence --strict-mcp-config [--model <model>] [--effort <effort>] <preset flags> [--append-system-prompt <instructions>]`, task on stdin. No session is saved, and MCP servers from config files are not loaded |
-| Presets | **Read-only** → `--permission-mode dontAsk --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch --disallowedTools Write,Edit,NotebookEdit`; **Edit files (no shell)** (default, `acceptEdits`) → `--permission-mode acceptEdits --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch,Edit,Write,NotebookEdit`; **Auto (classifier)** (full access) → `--permission-mode auto` (the classifier makes extra model calls and can approve any command); **Bypass permissions** (full access) → `--permission-mode bypassPermissions`. Read-only and Edit files have no shell and load no settings files (see [Read-only](#read-only-on-a-cli) and [Workspace confinement](#workspace-confinement)) |
+| How it is driven | `claude -p --output-format stream-json --verbose --no-session-persistence [--model <model>] [--effort <effort>] <preset flags> [--append-system-prompt <instructions>]`, task on stdin. No session is saved. Legacy presets additionally pass `--strict-mcp-config`; the explicit native preset does not |
+| Presets | **Read-only** → `--permission-mode dontAsk --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch --disallowedTools Write,Edit,NotebookEdit`; **Edit files (no shell)** (default, `acceptEdits`) → `--permission-mode acceptEdits --setting-sources "" --tools Read,Glob,Grep,WebFetch,WebSearch,Edit,Write,NotebookEdit`; **Native accept-edits** (`nativeAcceptEdits`, full-access parent required) → `--permission-mode acceptEdits`, with native tools, settings, MCP and hooks intact; **Auto (classifier)** (full access) → `--permission-mode auto` (the classifier makes extra model calls and can approve any command); **Bypass permissions** (full access) → `--permission-mode bypassPermissions`. Read-only and Edit files have no shell and load no settings files (see [Read-only](#read-only-on-a-cli) and [Workspace confinement](#workspace-confinement)) |
 | Instructions | `--append-system-prompt` (appended to Claude Code's system prompt) |
-| Environment | Sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`; removes `CLAUDECODE` and every inherited `CLAUDE_CODE_*` variable unless you forward it by name |
+| Environment | Sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`; removes `CLAUDECODE`. Legacy presets also remove inherited `CLAUDE_CODE_*` variables unless forwarded by name; `nativeAcceptEdits` keeps them (the adapter's own fixed environment values still apply) |
 | Credentials | Claude Code's own sign-in on the host. `ANTHROPIC_API_KEY` is never passed automatically (in print mode it would override a subscription sign-in); forward it by name if you want key authentication. Read-only and Edit files do not load settings files, so an `apiKeyHelper`, model, or `env` set there applies only to the full-access presets |
 | Model and effort | A model alias or full model ID; empty uses Claude Code's default. Efforts: low, medium, high, xhigh, max |
 | Connection test | Version and a built-in model list. Sign-in state shows as unknown (Claude Code has no side-effect-free check); the first run reports a sign-in problem |
+
+**Native editing and Python venvs:** choose `nativeAcceptEdits` explicitly when native Claude settings/tools are intended. It skips the recursive workspace-link preflight, so an ordinary `.venv` with interpreter symlinks need not be deleted. This is not a confined workspace-write mode: native hooks/extensions can act as the Host user, so the parent must already be full access. It uses `acceptEdits`, never an automatic switch to `bypassPermissions`; the existing restricted default remains unchanged.
 
 #### Antigravity CLI (`agy`)
 
@@ -157,12 +159,34 @@ Every run gets the task text through the CLI's input, and the role's instruction
 | Model and effort | **Provider and Model are both required**; a role without them is switched off instead of falling back to OpenCode's own default model. Effort is a variant name of the model (for example `high`). Permission prompts are always answered with "reject"; a turn that ends without an answer after a rejection is reported as a permission failure |
 | Connection test | Version and the model list with each model's variants. Sign-in state shows as unknown |
 
+#### Grok Build (`grok`)
+
+| | |
+|---|---|
+| How it is driven | `grok --output-format streaming-json --cwd <cwd> --prompt-file <private task file> [--model <model>] [--reasoning-effort <effort>] [--rules <instructions>]`; task file removed after the run |
+| Preset | **Native harness** only (`native`): keeps native tools, settings, authentication and extensions. Requires a full-access parent; read-only/workspace-write are unsupported and refused before startup. No blanket extension disabling, new sandbox, or automatic permission bypass |
+| Instructions | `--rules`, appended to the native instructions |
+| Model and credentials | Native Grok configuration/authentication; optionally select a model/effort or forward a required key variable by name. `GROK_DISABLE_AUTOUPDATER=1` prevents adapter-triggered updater activity |
+| Connection test | Version only. Authentication and model catalog remain unknown |
+
+#### Pi (`pi`)
+
+| | |
+|---|---|
+| How it is driven | `pi --mode rpc --no-session [--model <provider/model>] [--thinking <effort>] [--append-system-prompt <private instructions file>]`; task sent as an RPC prompt on stdin |
+| Preset | **Native harness** only (`native`): keeps native configuration, authentication, tools and extensions; requires a full-access parent. No read-only/workspace-write guarantee is fabricated |
+| Completion and cancellation | Waits for `agent_settled`, not merely `agent_end`, and returns the final assistant message. Cancellation requests `clear_queue`, waits for its acknowledgment, requests `abort`, then closes stdin after acknowledgment (with engine termination fallback). Interactive extension requests are canceled, never automatically approved |
+| Model and credentials | Native Pi settings/authentication and extensions; optionally select `provider/model` and thinking level. No persistent session is requested; `PI_SKIP_VERSION_CHECK=1` is set |
+| Connection test | Version only. Pi 1.3.0's help/model-list commands can initialize extensions, so they are not used as supposedly side-effect-free discovery |
+
+Native CLI settings, hooks and extensions are intentionally retained, so their own side effects and network access remain possible. This is not an OS sandbox or a claim that arbitrary extension code is confined.
+
 ### Access ceiling
 
 DSH's sandbox and approvals do not reach inside a CLI, so the plugin decides the preset before it starts:
 
 - The ceiling is **read-only** when the calling agent's role is read-only. Otherwise it follows the parent session's sandbox mode: `read-only` → read-only, `danger-full-access` → full access, anything else (including approval modes such as Auto review, or no sandbox service) → workspace write.
-- If the role's preset allows more than the ceiling, the run uses the CLI's preset for the ceiling level instead (the host log records it). A preset is never widened.
+- A legacy preset above the ceiling is lowered only when a verified preset exists for that level (and logged). Missing mappings refuse the run. An explicit native preset above the ceiling is refused, not silently changed to a different restricted harness. The parent is never promoted and the plugin does not automatically enable permission bypass.
 - Below full access, the child's working directory must be inside the parent's workspace root; a `cwd` outside it is refused. When the parent's workspace root is unknown (no sandbox service), an explicit `cwd` is refused unless the run is read-only; without `cwd` the child uses the parent's directory as usual.
 - A read-only agent can delegate only to read-only roles, CLI roles included.
 - DSH does not count external children toward its depth limit, so the plugin refuses the delegation itself when the next depth would exceed DSH's limit. The CLI's own sub-agents are not counted.
@@ -181,7 +205,7 @@ For the second kind, the plugin checks the working directory before a workspace-
 - the directory tree contains a symbolic link that leads outside the parent's workspace (or outside the directory when the workspace is unknown); the CLI's file tools would follow it. The check includes `.git` and follows internal directory links once per real path. Unreadable directories are refused. A directory too large to check (over 100,000 entries or 2 seconds) is refused too;
 - OpenCode only: the directory lies below the top-level of a git repository. OpenCode's file tools reach the whole repository, not just the directory (verified: a write to a sibling directory succeeds, and `apply_patch` can move a file anywhere in the repository), so delegate with the repository's top-level as `cwd`.
 
-Claude Code and Antigravity keep their file tools inside the run's directory (verified: writes to a sibling directory, the repository's top-level, or elsewhere are refused). The scan is a startup check; it does not prevent another process changing links during a run. Hard links are not detected: a file hard-linked into the workspace is changed in place. Use a read-only role, or a parent with full access, when a refused directory is intended.
+Claude Code and Antigravity keep their file tools inside the run's directory (verified: writes to a sibling directory, the repository's top-level, or elsewhere are refused). The scan is a startup check; it does not prevent another process changing links during a run. Hard links are not detected: a file hard-linked into the workspace is changed in place. For a deliberately unconfined edit, explicitly select a native/full-access preset under a full-access parent; a full-access parent alone does not change the role's restricted preset. A read-only role remains an alternative when no edits are needed.
 
 Below full access OpenCode also refuses a project that has `.opencode/plugin` or `.opencode/plugins` code: OpenCode 1.19.3 runs it at start even with the project configuration disabled.
 
@@ -192,15 +216,16 @@ Below full access OpenCode also refuses a project that has `.opencode/plugin` or
 | Codex | Runs in Codex's `read-only` sandbox |
 | Claude Code | Only the read tools (`Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`), no shell, in `dontAsk` mode: anything that would need approval is refused. No setting sources are loaded (user, project, and local settings, allow rules, hooks, `CLAUDE.md`), so they cannot widen it; this also skips a model, environment, or `apiKeyHelper` set in those settings |
 | Antigravity | Only the read tools (view files, search, list folders); no shell |
+| Grok Build / Pi | Unsupported in the native harness. A read-only role is rejected/disabled rather than started with broader access |
 | OpenCode | Every tool denied except reading, searching, and listing files; `.env` files stay unreadable. The project's OpenCode configuration and `AGENTS.md` are not loaded; a project with `.opencode/plugin(s)` code is refused |
 
 ### External CLIs settings
 
 The **External CLIs** section of the Plugins page has one card per CLI, shared by every role on it:
 
-- **Executable**: an absolute path, or a command name looked up on the host's `PATH`. Empty uses `codex`, `claude`, `agy`, or `opencode`.
+- **Executable**: an absolute path, or a command name looked up on the host's `PATH`. Empty uses `codex`, `claude`, `agy`, `opencode`, `grok`, or `pi`.
 - **Forwarded environment variables**: variable names only (commas or spaces). Values are read from the DSH host process environment when the CLI starts and are never stored. Up to 32 names. **Test connection** counts only those that are set on the host.
-- **Test connection**: checks the saved settings: whether the executable is found, its version, sign-in state where the CLI can report it cheaply, and the models it lists (used as suggestions in the role editor). It never calls a model. The button is hidden when the Host does not offer the RPC path it uses (this is not a documented DSH API); the editor then uses built-in suggestions.
+- **Test connection**: checks the saved settings: whether the executable is found, its version, sign-in state where the CLI can report it cheaply, and the models it lists (used as suggestions in the role editor). It never calls a model. Failures remain retryable and do not disable other CLI cards or ordinary role execution. Diagnostics distinguish missing client connection, structured Remote failures, ambiguous HTTP 404, Host authentication, and transport/malformed responses from CLI not-found/authentication results. HTTP 404 alone cannot tell whether the Gateway or Remote endpoint is missing. The RPC path is not a documented stable DSH API; the real HTTP bridge/Gateway integration was checked only on DSH `0.2.1-rc.2`. Grok/Pi probes read only the version: authentication and model discovery remain unknown, not falsely verified.
 
 These settings apply to the next delegation, also in running sessions.
 
@@ -210,7 +235,7 @@ These settings apply to the next delegation, also in running sessions.
 - **Always fresh**: no fork of the parent conversation and no Agent Preset.
 - **No rollback**: files changed before a cancel or timeout stay changed.
 - **Host restart**: a run in progress when DSH stops is stopped, and its completion notice is lost.
-- **Timeout** per role (default 30 minutes). A stop first asks the CLI to cancel where it supports that (OpenCode), then terminates the process; DSH kills it after a short grace. Background processes the CLI leaves behind are stopped too when the run ends.
+- **Timeout** per role (default 30 minutes). A stop first asks the CLI to cancel where it supports that (OpenCode and Pi), then terminates the process; DSH kills it after a short grace. Background processes the CLI leaves behind are stopped too when the run ends.
 - **The CLI's own side effects** still happen:
   - Antigravity records each run in its own history (about 0.4 MB under `~/.gemini`), so a delegated run becomes the target of `agy --continue` in that directory. agy also always contacts Google's feature-flag and telemetry hosts.
   - OpenCode may create `<repo>/.git/opencode` in your repository. It retries rate-limit and server errors for about a minute before failing.
@@ -278,7 +303,11 @@ pnpm check:host # optional real installed-DSH workflow integration checks
 pnpm check:cli  # optional real-CLI integration checks (see below)
 ```
 
-`pnpm check:cli [self|codex|claude-code|agy|opencode …]` runs the external runners against a real DSH runtime and the real CLIs. It is opt-in and not part of `pnpm check`: it needs DSH installed (`DSH_CHECKOUT`, default `/opt/dsh`) and the CLIs on `PATH` (or in `CLI_PATH_DIR`); a CLI that is not found is skipped. Every case points the CLI at a local fake model server under `tests/support/fake-models/` with fake keys and an isolated home directory, so no real credentials or model calls are used.
+`pnpm check:cli [self|codex|claude-code|agy|opencode|grok-build|pi …]` runs the external runners against a real DSH runtime and real CLIs. It is opt-in, not part of `pnpm check`, and needs DSH (`DSH_CHECKOUT`, default `/opt/dsh`) plus CLI binaries. The harness uses disposable HOME/XDG/DSH_HOME before runtime initialization, local fake model endpoints and dummy keys; it does not copy real credentials. This is not an OS network sandbox or proof that native telemetry/extensions never run.
+
+Pin a binary with `CHECK_CLI_EXECUTABLE_<UPPER_ID>` and its expected version with `CHECK_CLI_VERSION_<UPPER_ID>` (e.g. `CHECK_CLI_EXECUTABLE_CLAUDE_CODE`). `CHECK_CLI_REPORT` creates a new raw JSON record and refuses an existing path; it does not by itself certify compatibility. `CHECK_CLI_REQUIRE_ALL=1` rejects skips. Missing explicitly requested CLIs/suites, unknown IDs and zero-match filters fail; only optional discovery may skip missing binaries. Known Snap launch wrappers are refused because they can rewrite HOME: use a direct official binary rather than real credentials. See [harness controls and limitations](docs/external-cli.md#reproducible-harness-controls) and [exact compatibility evidence](docs/cli-compatibility.md).
+
+`DSH_CHECKOUT=/path/to/dsh node scripts/check-probe-host.mjs` separately tests the actual installed HTTP bridge/Gateway with an isolated loopback server and a fixture subprocess boundary; it does not deploy or restart DSH.
 
 `lib/` is committed. After changing sources, run `pnpm build` and commit `lib/` with them.
 

@@ -154,6 +154,14 @@ const en = {
   'preset.workspace-write': 'Workspace write',
   'preset.danger-full-access': 'Full access (no sandbox)',
   'preset.acceptEdits': 'Edit files (no shell)',
+  'preset.nativeAcceptEdits': 'Native accept-edits (keep settings and extensions)',
+  'preset.native': 'Native harness (keep settings and extensions)',
+  'confinement.native':
+    "Keeps {cli}'s native tools, settings and extensions. This is not an OS sandbox and requires an explicitly full-access parent; it does not enable bypass-permissions. No whole-workspace scan is required.",
+  'ed.readOnlyHelp.grok-build':
+    'The native Grok Build harness cannot guarantee read-only execution with its extensions. This combination is unsupported.',
+  'ed.readOnlyHelp.pi':
+    'The native Pi harness cannot guarantee read-only execution with its extensions. This combination is unsupported.',
   'preset.auto': 'Auto (classifier)',
   'preset.bypassPermissions': 'Bypass permissions',
   'preset.edit-files': 'Edit files (no shell)',
@@ -161,6 +169,7 @@ const en = {
   'access.read-only': 'no file changes',
   'access.workspace-write': 'edits in the workspace',
   'access.full-access': 'no restrictions',
+  'access.native': 'requires full-access parent; native CLI checks apply',
 
   'clis.heading': 'External CLIs',
   'clis.hint':
@@ -188,6 +197,19 @@ const en = {
   'probe.noSubprocess': 'This Host cannot start programs for plugins, so CLI roles cannot run here.',
   'probe.checksFailed': 'The version and sign-in checks did not answer.',
   'probe.error': 'The test could not run. Check the connection and try again.',
+  'probe.connection-unavailable':
+    'The Web connection service is unavailable or still loading. Retry when connected; this does not mean the CLI is missing.',
+  'probe.remote-unavailable':
+    'The Host reports that the diagnostic Remote service or method is unavailable. Check plugin compatibility or retry after loading. Role settings and delegation are independent.',
+  'probe.endpoint-unavailable':
+    'The diagnostic endpoint returned HTTP 404. The Gateway or Remote endpoint may be unavailable; this response cannot distinguish them. Check compatibility and retry.',
+  'probe.host-auth':
+    'The Host denied access to diagnostics. Check your DSH sign-in or access permissions, not the CLI credentials, then retry.',
+  'probe.transport':
+    'Diagnostics could not reach the Host reliably. Check the connection and retry; the CLI installation has not been determined.',
+  'probe.malformed': 'The Host returned an invalid diagnostic response. Check Web/Host/plugin compatibility and retry.',
+  'probe.remote-error':
+    'The Host diagnostic service reported an error. Retry or check Host logs. This does not establish that the CLI is missing.',
 
   'foot.clean': 'No changes',
   'foot.unsaved': 'Unsaved changes',
@@ -380,6 +402,14 @@ const ja: Record<Key, string> = {
   'preset.workspace-write': 'ワークスペースへの書き込み',
   'preset.danger-full-access': 'フルアクセス（サンドボックスなし）',
   'preset.acceptEdits': 'ファイル編集のみ（シェルなし）',
+  'preset.nativeAcceptEdits': 'ネイティブ編集（設定・拡張を維持）',
+  'preset.native': 'ネイティブハーネス（設定・拡張を維持）',
+  'confinement.native':
+    '{cli} 本来のツール・設定・拡張を維持します。OSサンドボックスではないため、明示的にフルアクセスにした親が必要です。権限確認の一括省略は有効にせず、ワークスペース全体の走査も行いません。',
+  'ed.readOnlyHelp.grok-build':
+    'Grok Build のネイティブハーネスは拡張を維持したまま読み取り専用を保証できないため、この組み合わせは未対応です。',
+  'ed.readOnlyHelp.pi':
+    'Pi のネイティブハーネスは拡張を維持したまま読み取り専用を保証できないため、この組み合わせは未対応です。',
   'preset.auto': '自動判定',
   'preset.bypassPermissions': '権限確認をすべて省略',
   'preset.edit-files': 'ファイル編集のみ（シェルなし）',
@@ -387,6 +417,7 @@ const ja: Record<Key, string> = {
   'access.read-only': 'ファイルを変更しない',
   'access.workspace-write': 'ワークスペース内を編集',
   'access.full-access': '制限なし',
+  'access.native': '親はフルアクセス必須・CLI本来の権限設定に従う',
 
   'clis.heading': '外部 CLI',
   'clis.hint':
@@ -414,6 +445,19 @@ const ja: Record<Key, string> = {
   'probe.noSubprocess': 'このホストではプラグインからプログラムを起動できないため、CLI のロールは実行できません。',
   'probe.checksFailed': 'バージョンとサインイン状態の確認に応答がありませんでした。',
   'probe.error': 'テストを実行できませんでした。接続を確認して、もう一度お試しください。',
+  'probe.connection-unavailable':
+    'Web の接続サービスが未提供、または読み込み中です。接続後に再試行してください。CLI の未検出を意味するものではありません。',
+  'probe.remote-unavailable':
+    'ホストの診断用 Remote サービスまたはメソッドを利用できません。プラグインの互換性を確認するか、読み込み後に再試行してください。役割設定・委任とは独立した診断です。',
+  'probe.endpoint-unavailable':
+    '診断先が HTTP 404 を返しました。Gateway または Remote の経路が利用できない可能性がありますが、この応答だけでは区別できません。互換性を確認して再試行してください。',
+  'probe.host-auth':
+    'ホストへの診断アクセスが拒否されました。CLI の認証ではなく、DSH のサインイン・アクセス権限を確認して再試行してください。',
+  'probe.transport':
+    'ホストとの診断通信に失敗しました。接続を確認して再試行してください。CLI のインストール状態は未確認です。',
+  'probe.malformed': 'ホストの診断応答が不正です。Web・ホスト・プラグインの互換性を確認して再試行してください。',
+  'probe.remote-error':
+    'ホストの診断サービスがエラーを返しました。再試行するかホストのログを確認してください。CLI がないとは断定できません。',
 
   'foot.clean': '変更はありません',
   'foot.unsaved': '未保存の変更があります',
@@ -600,6 +644,7 @@ export function confinementHelp(t: Translator, cli: CliId, preset: string): stri
   const found = descriptor.permissions.find(entry => entry.id === preset)
   if (found === undefined) return ''
   const name = descriptor.displayName
+  if (found.nativeHarness) return t('confinement.native', { cli: name })
   if (found.confinement !== 'tool-scope') return t(`confinement.${found.confinement}`, { cli: name })
   if (found.access !== 'workspace-write') return t('confinement.tool-scope', { cli: name })
   const key =

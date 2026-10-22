@@ -174,6 +174,14 @@ function normalizePermission(
   }
   if (owner.readOnly && presetAccess(descriptor, permission) !== 'read-only') {
     const readOnly = descriptor.presetForAccess['read-only']
+    if (readOnly === undefined) {
+      if (owner.enabled)
+        report(
+          'runner-readonly-permission',
+          `role "${owner.id}" is read-only, but ${descriptor.displayName} has no verified read-only preset; the role is switched off`,
+        )
+      return permission
+    }
     report(
       'runner-readonly-permission',
       `role "${owner.id}" is read-only, so it uses ${descriptor.displayName}'s ${readOnly} permission`,
@@ -222,7 +230,7 @@ export function normalizeRunner(raw: unknown, owner: RunnerOwner, report: Report
     permission,
     ...(timeoutMinutes === undefined ? {} : { timeoutMinutes }),
   }
-  return { runner, disable }
+  return { runner, disable: disable || (owner.readOnly && descriptor.presetForAccess['read-only'] === undefined) }
 }
 
 /**

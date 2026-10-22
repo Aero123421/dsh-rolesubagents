@@ -9,8 +9,8 @@
  * it is a conflict, and the only ways out are to discard or reload.
  *
  * It also runs the External CLIs connection test (`rolesubagentsCli/probe`)
- * when the page was given a way to call it, and treats a Host without that
- * service as "no connection test" rather than as an error.
+ * when the page was given a way to call it. Diagnostic capability, transport,
+ * authentication and CLI-result failures remain separate, retryable per-CLI states.
  */
 
 import { CLI_IDS, type CliId, cliDescriptor, isCliId } from '../shared/cli/index.ts'
@@ -108,13 +108,24 @@ export class ProbeUnavailableError extends Error {
   }
 }
 
-/** One CLI's connection test. `result` keeps the last answer while a new test runs. */
+/** Fixed UI diagnostics; never render transport/Host exception text (it may contain secrets). */
+export type ProbeIssue =
+  | 'connection-unavailable'
+  | 'remote-unavailable'
+  | 'endpoint-unavailable'
+  | 'host-auth'
+  | 'transport'
+  | 'malformed'
+  | 'remote-error'
+
+/** One CLI's connection test. Errors are retryable and never disable other CLI cards. */
 export interface ProbeState {
   readonly status: 'idle' | 'loading' | 'ready' | 'error'
   readonly result?: ProbeResultLike
+  readonly issue?: ProbeIssue
 }
 
-/** Connection tests of every CLI. `available` is false once the Host turned out not to offer them. */
+/** Connection tests of every CLI. `available` means a caller was supplied, not that the Host is compatible. */
 export interface ProbesState {
   readonly available: boolean
   readonly clis: Readonly<Record<CliId, ProbeState>>
@@ -213,11 +224,45 @@ const PROBE_ABSENT = new Set([
   'gateway/invocation-unavailable',
   'gateway/method-unavailable',
   'gateway/service-unavailable',
+  'gateway/definition-unavailable',
 ])
 
-/** Whether a rejected probe call means "this Host has no probe" rather than "this test failed". */
-function probeAbsent(error: unknown): boolean {
-  return error instanceof ProbeUnavailableError || (error instanceof Error && /\bHTTP 404\b/.test(error.message))
+/** The installed Connection rejects non-2xx with `...: HTTP NNN` (no typed HTTP error). */
+export function probeFailureOf(error: unknown): ProbeIssue {
+  if (error instanceof ProbeUnavailableError) return 'connection-unavailable'
+  if (
+    error instanceof SyntaxError ||
+    (error instanceof Error &&
+      /^(?:connection: invalid (?:server-response|binary response)|rpcId mismatch for )/.test(error.message))
+  )
+    return 'malformed'
+  const status = error instanceof Error ? /\bHTTP (\d{3})\b/.exec(error.message)?.[1] : undefined
+  if (status === '401' || status === '403') return 'host-auth'
+  // A 404 alone cannot tell whether Gateway or its Remote endpoint is absent.
+  if (status === '404') return 'endpoint-unavailable'
+  return 'transport'
+}
+
+function probeAnswerOf(cli: CliId, answer: unknown): ProbeState {
+  if (typeof answer !== 'object' || answer === null) return { status: 'error', issue: 'malformed' }
+  const wire = answer as Record<string, unknown>
+  if (wire.ok === true) {
+    const result = probeResultOf(cli, wire.value)
+    return result === undefined ? { status: 'error', issue: 'malformed' } : { status: 'ready', result }
+  }
+  if (wire.ok !== false || typeof wire.error !== 'object' || wire.error === null)
+    return { status: 'error', issue: 'malformed' }
+  const error = wire.error as Record<string, unknown>
+  if (typeof error.code !== 'string' || typeof error.message !== 'string')
+    return { status: 'error', issue: 'malformed' }
+  return {
+    status: 'error',
+    issue: PROBE_ABSENT.has(error.code)
+      ? 'remote-unavailable'
+      : error.code === 'remote-access/denied'
+        ? 'host-auth'
+        : 'remote-error',
+  }
 }
 
 function text(value: unknown): string | undefined {
@@ -479,25 +524,15 @@ export function createController(options: ControllerOptions): Controller {
     probeRuns.set(cli, run)
     setProbe(cli, { ...probes.clis[cli], status: 'loading' })
     publish()
-    let next: ProbeState | 'absent'
+    let next: ProbeState
     try {
-      const answer = await probe(cli, run.signal)
-      const result = answer.ok ? probeResultOf(cli, answer.value) : undefined
-      next =
-        result !== undefined
-          ? { status: 'ready', result }
-          : !answer.ok && PROBE_ABSENT.has(answer.error.code)
-            ? 'absent'
-            : { status: 'error' }
+      next = probeAnswerOf(cli, await probe(cli, run.signal))
     } catch (error) {
-      next = probeAbsent(error) ? 'absent' : { status: 'error' }
+      next = { status: 'error', issue: probeFailureOf(error) }
     }
     if (disposed || probeRuns.get(cli) !== run) return
     probeRuns.delete(cli)
-    if (next === 'absent') {
-      stopProbes()
-      probes = idleProbes(false)
-    } else setProbe(cli, next)
+    setProbe(cli, next)
     publish()
   }
 

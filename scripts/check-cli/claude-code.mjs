@@ -13,6 +13,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createOwnedEnvironmentScanner } from '../../tests/support/process-ownership.mjs'
 
 const FAKE_SERVER = 'tests/support/fake-models/claude-code.mjs'
 const FAKE_KEY = 'sk-ant-fake-rolesubagents-check'
@@ -34,17 +35,8 @@ async function isolatedEnv(env, fn) {
   }
 }
 
-/** Pids of live processes whose environment carries `entry` (e.g. this case's fake base URL). */
-function pidsWithEnv(entry) {
-  const pids = []
-  for (const name of readdirSync('/proc')) {
-    if (!/^\d+$/.test(name) || Number(name) === process.pid) continue
-    try {
-      if (readFileSync(`/proc/${name}/environ`, 'latin1').split('\0').includes(entry)) pids.push(Number(name))
-    } catch {}
-  }
-  return pids
-}
+/** Only harness-owned descendants are eligible for environment inspection. */
+const pidsWithEnv = createOwnedEnvironmentScanner()
 
 export async function cases(h) {
   /**
@@ -109,6 +101,29 @@ export async function cases(h) {
     }
   }
 
+  // Observed in 2.1.306: a deferred-loading sentinel, not an exposed executable tool.
+  // Validate its entire advertised shape before excluding it; unknown tools still fail.
+  function assertRestrictedTools(requests, expected) {
+    for (const request of requests) {
+      const tools = request.body.tools ?? []
+      for (const tool of tools.filter(t => t.name === 'DeferredToolPlaceholder')) {
+        h.assert.deepEqual(tool, {
+          name: 'DeferredToolPlaceholder',
+          description: 'Reserved placeholder that keeps deferred tool loading active; never call this tool.',
+          input_schema: { type: 'object', properties: {} },
+          defer_loading: true,
+        })
+      }
+      h.assert.deepEqual(
+        tools
+          .filter(t => t.name !== 'DeferredToolPlaceholder')
+          .map(t => t.name)
+          .sort(),
+        expected,
+      )
+    }
+  }
+
   const coder = (runner = {}) =>
     h.role('coder', {
       description: 'Claude Code coder.',
@@ -157,9 +172,107 @@ export async function cases(h) {
       h.assert.equal(existsSync(join(x.ws, 'denied-bash.txt')), false)
       assertOnlyFake(x.mainRequests)
       h.assert.equal(x.mainRequests().length, 3, 'the scripted turns all ran')
-      const tools = (x.mainRequests()[0].body.tools ?? []).map(t => t.name).sort()
-      h.assert.deepEqual(tools, ['Glob', 'Grep', 'Read', 'WebFetch', 'WebSearch'], 'only read tools, no Bash')
+      assertRestrictedTools(x.mainRequests(), ['Glob', 'Grep', 'Read', 'WebFetch', 'WebSearch'])
     })
+  })
+
+  for (const permission of ['read-only', 'acceptEdits']) {
+    h.case(`${permission}: deferred placeholder calls cannot unlock tools or smuggle writes`, async () => {
+      const outside = h.workspace()
+      const target = join(outside, 'placeholder-escape.txt')
+      const steps = () => [
+        { tool_use: { id: 'toolu_placeholder_empty', name: 'DeferredToolPlaceholder', input: {} } },
+        {
+          tool_use: {
+            id: 'toolu_placeholder_smuggle',
+            name: 'DeferredToolPlaceholder',
+            input: {
+              name: 'Write',
+              file_path: target,
+              content: 'escape',
+              command: `touch '${target}'`,
+              tool: 'Bash',
+              input: { command: `touch '${target}'` },
+            },
+          },
+        },
+        { tool_use: { name: 'Bash', input: { command: `touch '${target}'` } } },
+        { tool_use: { name: 'Write', input: { file_path: target, content: 'escape' } } },
+        { text: 'PLACEHOLDER_REJECTED' },
+      ]
+      await withClaude({ steps, roles: [coder({ permission })] }, async x => {
+        const { childId } = await x.w.delegate({ role: 'coder', prompt: 'Attempt the scripted deferred tool calls.' })
+        const notice = await x.w.notice(childId, 60_000)
+        h.assert.ok(notice.includes('PLACEHOLDER_REJECTED'), notice)
+        const requests = x.mainRequests()
+        assertOnlyFake(x.mainRequests)
+        h.assert.equal(requests.length, 5)
+        h.assert.equal(existsSync(target), false, 'no placeholder, shell, or Write escape was executed')
+        assertRestrictedTools(
+          requests,
+          permission === 'read-only'
+            ? ['Glob', 'Grep', 'Read', 'WebFetch', 'WebSearch']
+            : ['Edit', 'Glob', 'Grep', 'NotebookEdit', 'Read', 'WebFetch', 'WebSearch', 'Write'],
+        )
+        const results = requests
+          .at(-1)
+          .body.messages.flatMap(m => (Array.isArray(m.content) ? m.content : []))
+          .filter(c => c.type === 'tool_result' && c.tool_use_id?.startsWith('toolu_placeholder_'))
+        h.assert.equal(results.length, 2)
+        for (const result of results) {
+          h.assert.equal(result.is_error, true)
+          h.assert.match(String(result.content), /No such tool available: DeferredToolPlaceholder/)
+        }
+      })
+    })
+  }
+
+  h.case('native acceptEdits edits a Python venv workspace and preserves user hooks', async () => {
+    const steps = ws => [
+      { tool_use: { name: 'Write', input: { file_path: join(ws, 'native-out.txt'), content: 'native edit\n' } } },
+      { text: 'NATIVE_VENV_OK' },
+    ]
+    const homeFiles = ws => ({
+      '.claude/settings.json': JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `touch '${join(ws, 'native-hook-ran')}'` }] }] },
+      }),
+    })
+    await withClaude(
+      {
+        steps,
+        roles: [coder({ permission: 'nativeAcceptEdits' })],
+        homeFiles,
+        world: { sandboxMode: 'danger-full-access' },
+      },
+      async x => {
+        execFileSync('python3', ['-m', 'venv', '--without-pip', join(x.ws, '.venv')])
+        const { childId } = await x.w.delegate({ role: 'coder', prompt: 'Write native-out.txt in this workspace.' })
+        const notice = await x.w.notice(childId, 90_000)
+        h.assert.ok(notice.includes('NATIVE_VENV_OK'), notice)
+        h.assert.equal(readFileSync(join(x.ws, 'native-out.txt'), 'utf8'), 'native edit\n')
+        h.assert.equal(existsSync(join(x.ws, 'native-hook-ran')), true, 'native user settings hook remains enabled')
+        h.assert.equal(existsSync(join(x.ws, '.venv', 'bin', 'python')), true, 'venv was not removed or rewritten')
+        h.assert.ok(
+          x.mainRequests().some(r => (r.body.tools ?? []).some(t => t.name === 'Bash')),
+          'native tools are preserved',
+        )
+        assertOnlyFake(x.mainRequests)
+      },
+    )
+  })
+
+  h.case('native acceptEdits refuses a restricted parent without spawning or elevating access', async () => {
+    await withClaude(
+      { steps: () => [{ text: 'MUST_NOT_RUN' }], roles: [coder({ permission: 'nativeAcceptEdits' })] },
+      async x => {
+        execFileSync('python3', ['-m', 'venv', '--without-pip', join(x.ws, '.venv')])
+        await h.assert.rejects(
+          x.w.delegate({ role: 'coder', prompt: 'edit' }),
+          /native harness cannot guarantee workspace-write/,
+        )
+        h.assert.equal(x.mainRequests().length, 0)
+      },
+    )
   })
 
   h.case('workspace-write default preset (acceptEdits) writes inside the workspace', async () => {
@@ -217,8 +330,16 @@ export async function cases(h) {
         for (const name of ['bash', 'user-hook', 'user-hook-start', 'project-hook', 'project-hook-start', 'cwd-hook']) {
           h.assert.equal(existsSync(marker(name)), false, `${name} ran`)
         }
-        const tools = (x.mainRequests()[0].body.tools ?? []).map(t => t.name).sort()
-        h.assert.deepEqual(tools, ['Edit', 'Glob', 'Grep', 'NotebookEdit', 'Read', 'WebFetch', 'WebSearch', 'Write'])
+        assertRestrictedTools(x.mainRequests(), [
+          'Edit',
+          'Glob',
+          'Grep',
+          'NotebookEdit',
+          'Read',
+          'WebFetch',
+          'WebSearch',
+          'Write',
+        ])
         assertOnlyFake(x.mainRequests)
         // Control: the same preset with Claude Code's default setting sources runs the hooks.
         const { claudeCodeAdapter } = await import('../../src/host/cli/claude-code/index.ts')

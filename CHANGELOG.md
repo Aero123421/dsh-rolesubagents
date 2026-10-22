@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add native Grok Build (`grok`, streaming JSON) and Pi (`pi`, RPC) runners. Preserve native settings/authentication/tools/extensions; only the `native` full-access preset is supported. Restricted parents refuse before startup; incompatible read-only roles are disabled, never elevated.
+- Add explicit Claude `nativeAcceptEdits`: keep native settings/tools/MCP/hooks and skip recursive workspace-link preflight (including ordinary Python venv workspaces). Requires a full-access parent but uses `acceptEdits`, not automatic bypass. Existing restricted defaults remain unchanged.
+- Keep CLI diagnostics retryable after RPC/transport failures. Distinguish local connection, structured Remote, Host auth, malformed response and CLI errors; 404 remains ambiguous between absent Gateway and Remote. Real HTTP integration covers DSH 0.2.1-rc.2, not all versions or a stable-public-API promise.
+- Add exact-scope compatibility evidence and old/new report comparison. Version observations/historical lists never confer a tested badge; see [the evidence contract](docs/cli-compatibility.md). No automatic CLI update RPC.
+- Harden opt-in checks with disposable HOME before plugin initialization, exact binary/version controls, SHA256/raw JSON records, failures for missing requested suites and zero matched cases, and refusal of known HOME-rewriting Snap launchers. Preserve failures/skips; current Codex sandbox-capability failures are not successes.
+- Validate Claude 2.1.306's reserved deferred-tool placeholder with actual rejected misuse and retain strict executable-tool checks. Limit process-environment scans to owned test descendants. Update the Antigravity fake model for its 1.4.4 tool schema and require dummy-key authentication.
+
 ## 0.2.1
 
 - The sticky save bar stays at the bottom of the settings page, and the last row is no longer hidden behind it. DSH Web scrolls this page in an ancestor (`overflow: auto`) that also has a bottom padding, so `position: sticky; bottom: 0` sits on that padding edge: the last lines slide under the bar and into the padding. The page sets `scroll-padding-bottom` on that scroller to the bar's height plus the scroller's padding, and scrolls a connection-test result into view (`scrollIntoView({ block: 'nearest' })`) only after the user runs that test.

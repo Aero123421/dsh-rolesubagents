@@ -207,11 +207,13 @@ describe('CLI connection test wiring', () => {
     await expect(probe?.('codex', new AbortController().signal)).rejects.toBeInstanceOf(ProbeUnavailableError)
   })
 
-  it('offers the test only when the context can read optional services, and resets it on reconnect', async () => {
+  it('reports missing connection per attempt and resets diagnostics on reconnect', async () => {
     const plain = fakeContext()
     apply(plain.ctx)
-    expect(probeCaller(plain.ctx)).toBeUndefined()
-    expect(controllerOf(plain.registrations[0]).getSnapshot().probes.available).toBe(false)
+    await expect(probeCaller(plain.ctx)('codex', new AbortController().signal)).rejects.toBeInstanceOf(
+      ProbeUnavailableError,
+    )
+    expect(controllerOf(plain.registrations[0]).getSnapshot().probes.available).toBe(true)
 
     const call = vi.fn(async () => ({ ok: false as const, error: { code: 'gateway/method-unavailable', message: '' } }))
     const wired = fakeContext('en', { connection: { rpc: { call } } })
@@ -220,7 +222,8 @@ describe('CLI connection test wiring', () => {
     expect(controller.getSnapshot().probes.available).toBe(true)
     controller.probeCli('codex')
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(controller.getSnapshot().probes.available).toBe(false)
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'error', issue: 'remote-unavailable' })
+    expect(controller.getSnapshot().probes.available).toBe(true)
     wired.eventListeners.get('connection/reset')?.()
     expect(controller.getSnapshot().probes.available).toBe(true)
   })

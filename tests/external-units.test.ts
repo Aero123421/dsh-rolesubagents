@@ -25,25 +25,28 @@ describe('adapter registry', () => {
     expect(CLI_ADAPTERS[id].descriptor).toBe(cliDescriptor(id))
   })
 
-  it.each(CLI_IDS)('%s plans a read-only run without throwing', id => {
-    const descriptor = cliDescriptor(id)
-    const runner = {
-      cli: id,
-      permission: descriptor.presetForAccess['read-only'],
-      ...(descriptor.needsProvider ? { provider: 'p', model: 'm' } : {}),
-    }
-    const input = {
-      runner,
-      preset: runner.permission,
-      access: 'read-only' as const,
-      instructions: 'Your role: r.',
-      task: 't',
-      cwd: '/',
-    }
-    const plan = CLI_ADAPTERS[id].plan(input, 'n0n0n0n0n0n0')
-    expect(plan.argv.length).toBeGreaterThan(0)
-    expect(plan.cancelGraceMs).toBeGreaterThanOrEqual(0)
-  })
+  it.each(CLI_IDS.filter(id => cliDescriptor(id).presetForAccess['read-only'] !== undefined))(
+    '%s plans a supported read-only run without throwing',
+    id => {
+      const descriptor = cliDescriptor(id)
+      const runner = {
+        cli: id,
+        permission: descriptor.presetForAccess['read-only']!,
+        ...(descriptor.needsProvider ? { provider: 'p', model: 'm' } : {}),
+      }
+      const input = {
+        runner,
+        preset: runner.permission,
+        access: 'read-only' as const,
+        instructions: 'Your role: r.',
+        task: 't',
+        cwd: '/',
+      }
+      const plan = CLI_ADAPTERS[id].plan(input, 'n0n0n0n0n0n0')
+      expect(plan.argv.length).toBeGreaterThan(0)
+      expect(plan.cancelGraceMs).toBeGreaterThanOrEqual(0)
+    },
+  )
 })
 
 describe('access ceiling', () => {
@@ -80,8 +83,17 @@ describe('access ceiling', () => {
     const descriptor = cliDescriptor(id)
     for (const preset of descriptor.permissions) {
       for (const ceiling of levels) {
-        const result = effectivePermission(descriptor, { cli: id, permission: preset.id }, ceiling)
         const order = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 }
+        if (
+          order[preset.access] > order[ceiling] &&
+          (preset.nativeHarness || descriptor.presetForAccess[ceiling] === undefined)
+        ) {
+          expect(() => effectivePermission(descriptor, { cli: id, permission: preset.id }, ceiling)).toThrow(
+            /cannot guarantee|does not provide/,
+          )
+          continue
+        }
+        const result = effectivePermission(descriptor, { cli: id, permission: preset.id }, ceiling)
         if (order[preset.access] <= order[ceiling]) {
           expect(result).toEqual({ preset: preset.id, access: preset.access, lowered: false })
         } else {

@@ -1,0 +1,17 @@
+{
+  "evidenceId": "grok-build-1.0.62-2a46d9e4d7eb-2026-10-22T10:54:07.610Z",
+  "rawReport": "docs/cli-evidence/native-20261022-final.raw.json",
+  "rawReportSha256": "e0a25732e44b9ffbaf2f7a19184009587c5b516ac025f6e97227fac5494ca7b7",
+  "binary": {
+    "path": "grok-1.0.62-linux-x86_64",
+    "sha256": "2a46d9e4d7ebd7a9cff7f95716714b19dad5f21dd2a497822400b1fb128969aa",
+    "version": "1.0.62",
+    "expectedVersion": "1.0.62"
+  },
+  "mappingSource": "scripts/record-cli-evidence.mjs",
+  "limitations": [
+    "Native preset requires full-access parent; permission-boundary checks refusal under a restricted parent, not OS confinement.",
+    "Only these scripted localhost cases are covered, not arbitrary native extensions, every protocol variant, live authentication, or paid providers.",
+    "Binary hash identifies the executable entry file; dynamically loaded dependencies and user extensions are not fingerprinted."
+  ]
+}

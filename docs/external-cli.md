@@ -1,7 +1,7 @@
 # External CLI runners: design notes for maintainers
 
 This document describes how a role with a `runner` runs its child on a host-installed coding-agent CLI
-(Codex CLI, Claude Code, Antigravity CLI `agy`, OpenCode), and what to touch when adding or updating a CLI.
+(Codex CLI, Claude Code, Antigravity CLI `agy`, OpenCode, Grok Build `grok`, Pi `pi`), and what to touch when adding or updating a CLI.
 User-facing behaviour is documented in the README ("External CLI runners").
 
 ## Principles
@@ -13,7 +13,7 @@ User-facing behaviour is documented in the README ("External CLI runners").
    settlement and diagnostics are written once in `src/host/external/`. Adapters are pure functions plus a small
    synchronous session, unit-testable from recorded transcripts.
 3. **Fail closed.** A child never gets more access than its role's preset and the delegating parent allow. When
-   in doubt (unknown preset, unknown access) adapters pick the read-only behaviour.
+   in doubt, refuse unsupported access. A CLI without a verified read-only preset must not fabricate one. Native harnesses require a full-access parent because retained hooks/extensions are not confined.
 4. **No secrets in config.** The CLIs use their own sign-in, or the user forwards variable *names*
    (`envPassthrough`) whose values are read from the Host process at spawn time.
 5. **Version-tolerant parsing.** Unknown events and non-JSON lines are ignored; success is decided only from
@@ -54,7 +54,7 @@ src/host/
 `CliDescriptor` is pure data: `id`, `displayName`, default `executable` (PATH name), `needsProvider` (OpenCode:
 model is provider + model, both required), `modelSuggestions` (static fallback for the editor), `efforts` (allowed
 ids, or `[]`), `effortFreeText` (any non-empty effort accepted, OpenCode), `permissions` (presets in display order,
-each with an `AccessLevel` and a `confinement`), `defaultPermission`, `presetForAccess` (one preset per access level,
+each with an `AccessLevel`, a `confinement`, and optional `nativeHarness`), `defaultPermission`, `presetForAccess` (a partial mapping containing only supported access levels,
 used to lower a preset to the ceiling and to switch a read-only role), `instructionsChannel` (documentation only),
 `toolScope` and the optional `startupCodeDirs` (see [Workspace checks](#workspace-checks)).
 
@@ -65,7 +65,7 @@ preset's file tools reach: `cwd`, or `git-worktree` (OpenCode: the whole worktre
 
 Access levels are ordered `read-only < workspace-write < full-access`. Normalization (`runner.ts`) relies on the
 descriptor: unknown permission → `defaultPermission`; read-only role with a wider preset →
-`presetForAccess['read-only']`; effort not in `efforts` (unless free text) → cleared; `needsProvider` with a missing
+`presetForAccess['read-only']` when present, otherwise retain native settings but switch the incompatible role off; effort not in `efforts` (unless free text) → cleared; `needsProvider` with a missing
 half → cleared and the role switched off; `model`, `provider` and `effort` must match `RUNNER_NAME_PATTERN` (letters,
 digits, `. _ : @ / + - [ ]`, no leading `-`, at most 128 characters), otherwise `invalid-runner-model` /
 `invalid-runner-effort` (this keeps OpenCode `{env:…}` / `{file:…}` references and option-like values out). Every rule
@@ -147,7 +147,7 @@ write the CLI's state.
      else the parent's sandbox mode (`read-only` → read-only, `danger-full-access` → full-access, anything else or
      no service → workspace-write), plus the parent's `workspaceRoot`;
    - `effectivePermission(descriptor, runner, ceiling)`: the role's preset when its level fits, else
-     `presetForAccess[ceiling]` (logged). Never widened;
+     `presetForAccess[ceiling]` for a legacy preset when supported (logged). Missing mappings refuse. An explicit `nativeHarness` preset above the ceiling refuses instead of silently changing harness. Never widened;
    - `assertExplicitCwdCheckable(args.cwd, access, workspaceRoot)`: an explicit `cwd` cannot be checked when the
      workspace root is unknown (no `sandboxPolicy`, a throwing one, or no root), so it is refused unless the run is
      read-only or full access (where containment does not apply). Without `cwd`, DSH's default is kept.
@@ -269,28 +269,36 @@ answers.
 - `probe-service.ts` mounts a Typert Remote service `rolesubagentsCli` with `probe(request, signal)`, called from
   the browser as `ctx.connection.rpc.call('/api', 'rolesubagentsCli/probe', { args: { request } }, signal)`.
   `@deepseek-ai/dsh-typert-protocol` is an optional peer loaded with a dynamic `import()`; when it is missing the
-  feature is skipped and logged once, and the editor hides **Test connection** and uses the descriptor's
-  `modelSuggestions`. This RPC path is not a documented DSH API. `@Remote('probe')` is applied by hand in the
+  Host mounting is skipped and logged once. The client reports each attempt separately, retains retry controls, and uses descriptor suggestions when discovery is unavailable. Failures never globally disable diagnostics or ordinary role execution. This RPC path is not a documented stable DSH API. `@Remote('probe')` is applied by hand in the
   constructor, so the method's parameter names are part of the wire contract and the Host bundle must stay
   unminified.
+
+### Probe diagnostics and runtime scope
+
+Local connection absence, structured Remote errors, HTTP endpoint 404, Host authentication (401/403), transport failure and malformed carriers are separate client states. CLI executable/authentication results are distinct from RPC failures. HTTP 404 is intentionally ambiguous: both absent Gateway and absent Remote method produce it. No inference, update or permission change follows a probe failure.
+
+`scripts/check-probe-host.mjs` exercises installed browser Connection, Host HTTP bridge/auth, Typert Registry/Gateway and actual decorated plugin Remote in an isolated in-process loopback server. It verifies 404 ambiguity, 401/403, argument errors and recovery on DSH `0.2.1-rc.2`; this is not a deployed `dsh web` profile/GUI test or stable-public-API guarantee. The subprocess seam is a fixture, not an actual CLI/model call. Grok/Pi probes run only `--version`; Pi help/model-list commands initialize extensions and are unsuitable for side-effect-free discovery.
 
 ## Per-CLI summary
 
 | CLI | Protocol | Instructions channel | Presets (read-only / workspace-write / full-access) | Pre-flight | Graceful cancel |
 |---|---|---|---|---|---|
 | Codex | `codex exec --json`, task on stdin | `-c developer_instructions=…` | `read-only` / `workspace-write` (+ `writable_roots=[]`) / `danger-full-access` (`-s`); OS sandbox | none | no |
-| Claude Code | `claude -p --output-format stream-json --verbose`, task on stdin | `--append-system-prompt` | `read-only` (dontAsk + `--tools` read tools + no setting sources) / `acceptEdits` ("Edit files (no shell)": `--tools` read tools + Edit/Write/NotebookEdit, no setting sources) / `auto`, `bypassPermissions` | none | no |
+| Claude Code | `claude -p --output-format stream-json --verbose`, task on stdin | `--append-system-prompt` | `read-only` (dontAsk + `--tools` read tools + no setting sources) / `acceptEdits` ("Edit files (no shell)": `--tools` read tools + Edit/Write/NotebookEdit, no setting sources) / `nativeAcceptEdits`, `auto`, `bypassPermissions` | none | no |
 | Antigravity | stream-json in and out, one user event on stdin | generated agent body; full-access: task prefix | `read-only` / `edit-files` (generated agent tool allowlists; edit-files adds `--mode accept-edits`) / `full-access` (default agent + skip permissions) | `--output-format json models` → `auth` | no (SIGTERM is handled) |
+| Grok Build | `--output-format streaming-json --prompt-file` | `--rules` | unsupported / unsupported / `native`; native config/auth/extensions retained | none | process termination |
+| Pi | `--mode rpc --no-session` | `--append-system-prompt` private file | unsupported / unsupported / `native`; native config/auth/extensions retained | none | `clear_queue` ack → `abort` ack → stdin EOF, then engine fallback |
 | OpenCode | `opencode acp` (ACP JSON-RPC) | `instructions` file in `${RUN_DIR}` | `read-only` / `edit-files` / `full-access` (permission profiles on agent `dsh-<nonce>`; below full access `OPENCODE_DISABLE_PROJECT_CONFIG=1`) | none | `session/cancel` + EOF |
 
 What each preset loads from the project: Codex reads `AGENTS.md` and, for a trusted project, `.codex/config.toml`
 (`-s` and `writable_roots=[]` still win). Claude Code's `read-only` and `acceptEdits` load no setting sources (no
 user/project/local settings, hooks, allow rules, `additionalDirectories`, `CLAUDE.md`; verified: user and project
-hooks and allow rules have no effect, while a control run with default sources runs them); `auto` and
-`bypassPermissions` load the defaults. OpenCode below full access loads only the user's global config (no project
+hooks and allow rules have no effect, while a control run with default sources runs them); `auto`, `bypassPermissions`, and explicit `nativeAcceptEdits` load default settings. Only `nativeAcceptEdits` also omits `--strict-mcp-config` and retains inherited `CLAUDE_CODE_*` variables (fixed adapter overlays still apply). It preserves native tools/MCP/hooks and skips recursive tool-scope preflight. It requires an already full-access parent but passes `--permission-mode acceptEdits`, not automatic bypass. OpenCode below full access loads only the user's global config (no project
 `opencode.json` MCP servers, `.opencode` agents/commands/tools, `AGENTS.md`/`CLAUDE.md` — a trade-off: project
 instructions are not seen; verified that a project MCP server and tool file do not run), at full access everything;
 project plugins are refused (above). Antigravity reads the project's `AGENTS.md`.
+
+Pi waits for `agent_settled`, not `agent_end`, because retries/continuations can follow. Prompt acknowledgments are correlated; handled/unknown dispositions terminate explicitly rather than hanging or pretending an answer exists. Interactive extension requests receive cancellation, never automatic approval. Grok's observed `max_tokens_truncation` error/nonzero exit is truncation, not success; preserve its sanitized fixture.
 
 The adapters' header comments hold the exact flags and the evidence for each choice; keep them current.
 
@@ -310,16 +318,12 @@ The adapters' header comments hold the exact flags and the evidence for each cho
    - `tests/client-*.test.ts`: editor drafts, save payload with `clis`, page rendering, i18n completeness.
 2. **Fake model servers** in `tests/support/fake-models/<id>.mjs` (Node ESM, no dependencies): each speaks the API
    its CLI calls (OpenAI Responses for Codex, Anthropic Messages for Claude Code, Gemini for agy, OpenAI Chat
-   Completions for OpenCode), prints its port as the first stdout line, scripts behaviour per request, and logs
+   Completions for OpenCode, Grok Build and Pi), prints its port as the first stdout line, scripts behaviour per request, and logs
    requests so a check can assert that instructions, model and effort reached the model.
 3. **Real-CLI integration** (`pnpm check:cli [suites…]`, opt-in, not in CI): `scripts/check-cli.mjs` builds a real
    DSH runtime from `DSH_CHECKOUT` (default `/opt/dsh`) with this plugin loaded from `src/`, finds CLIs on `PATH`
    (with `CLI_PATH_DIR` prepended), and runs `scripts/check-cli/<id>.mjs` (`export async function cases(h)`; the
-   helpers are documented in the script header). A suite whose CLI is not found is skipped. Cases always use an
-   isolated HOME, the fake server and fake keys, never real credentials. Each CLI's suite covers: answer delivered
-   to the parent notice, read-only blocks a write, the default preset writes in the workspace, cancellation ends
-   as aborted with no leftover process, an auth/upstream error gives a safe diagnostic, and model + effort reach
-   the CLI. `pnpm check:cli self` checks the harness with `tests/support/fake-cli/fake-cli.mjs`.
+   helpers are documented in the script header). Missing explicitly requested suites/binaries fail; optional discovery may skip unavailable CLIs. The harness isolates HOME/XDG/DSH_HOME and scrubs credential/config overrides before loading DSH, so housekeeping cannot use the real home. Cases use disposable native configuration, localhost fake servers and dummy keys. Native Grok/Pi tests prove restricted-parent refusal, not a nonexistent read-only execution mode. Consult actual outcomes and the [evidence contract](cli-compatibility.md), not just a suite exit code. `pnpm check:cli self` checks the harness with `tests/support/fake-cli/fake-cli.mjs`.
    `CHECK_CLI_CASE=<text>` runs only cases whose name contains the text. Write boundaries must be checked in a
    workspace outside `/tmp` (`h.workspace(files, { outsideTmp: true })`, default `/var/tmp`, override with
    `CHECK_CLI_OUTSIDE_TMP`): Codex and agy always allow writes under the temp dir, which hides a wrong preset. DSH
@@ -328,19 +332,34 @@ The adapters' header comments hold the exact flags and the evidence for each cho
    `GIT_CONFIG_COUNT=0`. The `@deepseek-ai/*` resolve hook (`scripts/host-resolve-hook.mjs`) guards against
    re-entry, since on Node 24 `require.resolve` runs the registered hooks again.
 
+### Reproducible harness controls
+
+```sh
+DSH_CHECKOUT=/path/to/dsh CHECK_CLI_EXECUTABLE_PI=/absolute/path/to/pi \
+CHECK_CLI_VERSION_PI=1.3.0 CHECK_CLI_REPORT=artifacts/pi-unique-run.json \
+pnpm check:cli pi
+```
+
+- `CHECK_CLI_EXECUTABLE_<UPPER_ID>` chooses the exact binary (replace hyphens with underscores, e.g. `CLAUDE_CODE`, `GROK_BUILD`); `CLI_PATH_DIR` still prepends PATH.
+- `CHECK_CLI_VERSION_<UPPER_ID>` requires an exact detected version. Reports record resolved executable path/SHA256/version, expected version, DSH version, platform/architecture and case outcomes.
+- `CHECK_CLI_REPORT` exclusively creates raw JSON; an existing output path fails instead of overwriting evidence. Raw case reports are not automatically complete `CompatibilityEvidence` qualifications.
+- `CHECK_CLI_REQUIRE_ALL=1` makes skips fail. Unknown requested CLI IDs and zero-case filters fail too. Missing explicitly requested suites/binaries fail even without that switch.
+- Known Snap launch wrappers are refused because they can replace disposable HOME. Choose the direct official CLI binary; never copy real credentials to repair fixture authentication. This guard is not proof that arbitrary custom wrappers preserve isolation.
+- Environment scrubbing and localhost model endpoints are not an OS network sandbox. CLI telemetry and native extensions may have independent side effects; never copy production extensions into tests.
+
+Validation has explicit limits: Claude 2.1.306 has 13 passing cases and one root-only skip (non-root runner), without a dedicated real wall-timeout case; Grok 1.0.62 has 10 passing cases, Pi 1.3.0 has 12, direct Antigravity 1.4.4 has 16, OpenCode 1.19.3 has 13. Only the reviewed native Grok/Pi records currently qualify all six groups; totals alone are not compatibility badges. Codex 0.162.0 and 0.163.0 each have 6 passes and 5 filesystem-check failures because the sandbox cannot configure loopback (`RTM_NEWADDR: Operation not permitted`); selecting legacy Landlock also failed. Identical failures do not prove backward compatibility. See the [verification report](external-cli-validation-20261022.md), [Codex comparison](codex-local-regression-20261022.md), and [published native evidence](cli-evidence/README.md). Do not turn failures/skips/missing groups into validation.
+
 ## Adding a new CLI
 
 1. **Id**: add it to `CliId` and `CLI_IDS` in `src/shared/cli/types.ts`.
-2. **Descriptor**: `src/shared/cli/<id>.ts` (frozen object `satisfies CliDescriptor`). Every access level must map
-   in `presetForAccess` to a preset of that level; ids unique; `defaultPermission` a workspace-write preset. Put the
-   reasoning for presets in the file's header comment.
+2. **Descriptor**: `src/shared/cli/<id>.ts` (frozen object `satisfies CliDescriptor`). Present `presetForAccess` entries must map to presets of that level; unsupported levels stay absent. IDs must be unique and `defaultPermission` must exist. Native-only Grok/Pi default to `native` (full access), not a fictitious workspace-write preset. Mark native presets `nativeHarness: true` and document limitations.
 3. **Descriptor registry**: import it and add the entry to `CLI_DESCRIPTORS` in `src/shared/cli/index.ts`.
 4. **Adapter**: `src/host/cli/<id>/index.ts` exporting `<name>Adapter: CliAdapter`, plus `parser.ts` (and
    `probe.ts` if large). Header comment: exact invocation, how each preset is enforced, the instructions channel,
    cancellation, and the CLI version it was verified against. Rules:
    - `plan` and the session are pure and synchronous; sessions never throw;
    - pass instructions through the CLI's native instruction channel, never as user text unless unavoidable;
-   - unknown preset or access → read-only behaviour;
+   - unknown/unsupported preset or access → refuse; native extensions prevent tool allowlists from proving confinement;
    - success only from a documented terminal event with a non-blank answer;
    - map failures to `FailureCategory` with fixed rules; facts are safe tokens only;
    - disable auto-update, telemetry and session persistence where the CLI allows; keep the run from writing the
@@ -367,7 +386,7 @@ The adapters' header comments hold the exact flags and the evidence for each cho
    (use the argv the unit tests assert for `plan()`), and replace the old files when the format changed. Keep
    fixtures for older formats that the parser should still accept.
 3. Run `pnpm test`, then `pnpm check:cli <id>` with the new binary on `PATH` (or in `CLI_PATH_DIR`).
-4. Update the tested version in the README (both languages), the adapter header, and the CHANGELOG.
+4. Record exact CLI/DSH versions, platform, architecture, preset, protocol and required-suite outcomes following [CLI compatibility](cli-compatibility.md). Preserve failures/skips, distinguish environment failures from reviewed incompatibility, and compare genuinely distinct old/new binaries with expected versions pinned. Update both READMEs, adapter header and CHANGELOG with actual scope, not a blanket tested-version claim.
 
 What to watch for:
 
@@ -395,3 +414,5 @@ What to watch for:
   keys (`edit`, `bash`, `external_directory`, `doom_loop`, `question`, `plan_enter`, `plan_exit`); how
   `OPENCODE_CONFIG_CONTENT` merges; `error.data.errorName` values; the `opencode models --verbose` format; whether
   it still writes `<repo>/.git/opencode`.
+
+- **Grok Build / Pi**: preserve native config/extensions and refuse unsupported ceilings before startup. Check Grok terminal/truncation events and usage aggregation; Pi prompt acknowledgments, final `message_end`, `agent_settled`, extension-dialog rejection and cancel acknowledgment ordering. Ignoring unknown protocol events does not prove compatibility.

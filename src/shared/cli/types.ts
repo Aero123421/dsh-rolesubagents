@@ -9,10 +9,17 @@
  */
 
 /** Identifier of one supported external CLI. */
-export type CliId = 'codex' | 'claude-code' | 'agy' | 'opencode'
+export type CliId = 'codex' | 'claude-code' | 'agy' | 'opencode' | 'grok-build' | 'pi'
 
 /** Every supported CLI, in the order the editor lists them. */
-export const CLI_IDS: readonly CliId[] = Object.freeze(['codex', 'claude-code', 'agy', 'opencode'] as const)
+export const CLI_IDS: readonly CliId[] = Object.freeze([
+  'codex',
+  'claude-code',
+  'agy',
+  'opencode',
+  'grok-build',
+  'pi',
+] as const)
 
 /** How much a child may change. Ordered: read-only < workspace-write < full-access. */
 export type AccessLevel = 'read-only' | 'workspace-write' | 'full-access'
@@ -43,6 +50,8 @@ export interface PermissionPreset {
   readonly access: AccessLevel
   /** What enforces it. */
   readonly confinement: Confinement
+  /** Preserves native settings/extensions; never silently substitute a restricted harness for this choice. */
+  readonly nativeHarness?: boolean
 }
 
 /** Static description of one CLI. Pure data, shared by the Host and the browser. */
@@ -64,8 +73,8 @@ export interface CliDescriptor {
   readonly permissions: readonly PermissionPreset[]
   /** Preset a role gets when it switches to this CLI. */
   readonly defaultPermission: string
-  /** Preset used when the effective access must be lowered to a level. Every level maps to a preset of that level. */
-  readonly presetForAccess: Readonly<Record<AccessLevel, string>>
+  /** Preset used to lower access. Missing levels are unsupported and must be refused, never widened. */
+  readonly presetForAccess: Readonly<Partial<Record<AccessLevel, string>>>
   /** Where the role's instructions reach the CLI (documentation for the preview and README). */
   readonly instructionsChannel: 'system' | 'prompt'
   /**
