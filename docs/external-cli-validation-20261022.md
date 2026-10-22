@@ -1,6 +1,6 @@
 # Local external-CLI verification — 2026-10-22
 
-Status: final packaging checks pending. No deployment, running-GUI reload, restart, installed-CLI update, or real authentication setup change was performed for this branch.
+Status: implementation and local verification completed. `pnpm check` passed: lint, all three TypeScript configurations, **1035 tests**, and committed-bundle reproducibility. `pnpm pack` succeeded with both bundles and the evidence documents included. No deployment, running-GUI reload, restart, installed-CLI update, or real authentication setup change was performed for this branch.
 
 ## Implementation
 

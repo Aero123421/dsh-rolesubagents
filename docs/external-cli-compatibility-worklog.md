@@ -30,6 +30,6 @@ The user replaced the original VM request with local testing. No active DSH rest
 - Repository Host/client bundles build successfully; building does not install/restart the active GUI.
 - Existing three CLIs plus self under the strengthened allowlist: **49 pass / 0 fail / 1 skip**.
 - Actual installed HTTP probe checks pass; installed workflow/registry integration: **15 pass**.
-- Packaging/committed-bundle consistency is recorded in the verification report after the final check.
+- Final `pnpm check` passes, including committed-bundle reproducibility; `pnpm pack` succeeds with the generated bundles and evidence documents.
 
 The later `manage_roles` tool request was discussed as a separate design only; it is not silently included in this change.
