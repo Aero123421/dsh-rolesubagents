@@ -14,6 +14,7 @@ import { CLI_ADAPTERS } from '../src/host/external/registry.ts'
 import type { CliAdapter } from '../src/host/external/types.ts'
 import { apply } from '../src/host/index.ts'
 import type { DomainPort, HostContext } from '../src/host/ports.ts'
+import { createRoleState } from '../src/host/state.ts'
 import { EXTERNAL_ROLES_NOTE, toolDescription } from '../src/host/tool.ts'
 import { CODEX } from '../src/shared/cli/codex.ts'
 import { type RoleDefinition, roleContextText } from '../src/shared/roles.ts'
@@ -117,6 +118,12 @@ describe('delegate: external roles', () => {
     expect(world.externalProviders.size).toBe(0)
     // No DSH child is reserved or created.
     expect(world.children).toEqual([])
+    // External children have no Session, but their role survives a state reload by child id.
+    await world.settle()
+    const reopened = createRoleState(world.ctx)
+    await reopened.ready
+    expect(reopened.readRoleById(value.subagentId)).toEqual(CODER)
+    await reopened.close()
     expect(world.subagents.getProvider).not.toHaveBeenCalled()
     expect(world.services.llm?.resolveCallConfig).not.toHaveBeenCalled()
     const [planInput] = (adapter as ReturnType<typeof testAdapter>).inputs

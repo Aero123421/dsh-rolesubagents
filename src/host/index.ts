@@ -35,6 +35,7 @@ import { mountProbeService } from './external/probe-service.ts'
 import { type AdapterLookup, CLI_ADAPTERS, defaultAdapterLookup } from './external/registry.ts'
 import type { AgentPort, HostContext, SessionPort } from './ports.ts'
 import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
+import { mountRoleDisplayService } from './role-display-service.ts'
 import { createRoleState } from './state.ts'
 import { buildTool, type PendingChild, TOOL_NAME } from './tool.ts'
 import { workflowTool } from './workflow.ts'
@@ -357,6 +358,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
         )
       })
   }
+
+  void mountRoleDisplayService(ctx, { state, isDisposed: () => disposed })
 
   void mountProbeService(ctx, {
     subprocess: () => ctx.get('subprocess'),

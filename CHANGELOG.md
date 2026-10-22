@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Show recorded role ids with local preset SVG icons in a plugin-owned Web subagent catalog. Custom roles receive a neutral icon; unknown roles are not inferred from task labels.
+- Add a bounded, read-only role-display RPC that exposes only role identity. Record roles for newly started external CLI activations as well as DSH children.
+- Keep deployment separate from development: this update does not automatically install or restart DSH.
+
 ## 0.2.1
 
 - The sticky save bar stays at the bottom of the settings page, and the last row is no longer hidden behind it. DSH Web scrolls this page in an ancestor (`overflow: auto`) that also has a bottom padding, so `position: sticky; bottom: 0` sits on that padding edge: the last lines slide under the bar and into the padding. The page sets `scroll-padding-bottom` on that scroller to the bar's height plus the scroller's padding, and scrolls a connection-test result into view (`scrollIntoView({ block: 'nearest' })`) only after the user runs that test.
