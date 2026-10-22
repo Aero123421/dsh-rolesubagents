@@ -41,6 +41,7 @@
     "README.ja.md",
     "LICENSE",
     "docs/external-cli.md",
+    "docs/role-catalog.md",
     "CHANGELOG.md"
   ],
   "dsh": {

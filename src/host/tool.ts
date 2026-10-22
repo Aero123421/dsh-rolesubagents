@@ -278,5 +278,6 @@ async function delegateExternal(
     signal: call.signal,
     engine: external.engine,
   })
+  deps.state.writeRoleById(started.childId, role)
   return { kind: 'activation', subagentId: started.childId }
 }

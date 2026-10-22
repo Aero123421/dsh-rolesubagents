@@ -90,6 +90,10 @@ export interface RoleState {
    * @returns the role, or undefined for Sessions this plugin did not start.
    */
   readRole(session: SessionPort): RoleDefinition | undefined
+  /** Read durable/in-memory role metadata by child id, with a loaded-session legacy fallback; never opens a Session. */
+  readRoleById(childId: string): RoleDefinition | undefined
+  /** Record a child role without requiring a Session (external CLI children have none). */
+  writeRoleById(childId: string, role: RoleDefinition): void
   /**
    * Record the role a child was started as.
    * @param session - the child's Session.
@@ -135,7 +139,7 @@ function roleOf(data: unknown): RoleDefinition | undefined {
  * the background; until it is ready (and whenever it is unavailable) an
  * in-memory image serves reads and accepts writes, and a successful open
  * adopts writes already made.
- * @param ctx - the plugin's Host context (only `get('storageDomain')` and the logger are used).
+ * @param ctx - the plugin's Host context (storage, already loaded Sessions, and the logger).
  * @returns the store; call {@link RoleState.close} when the plugin unloads.
  */
 export function createRoleState(ctx: HostContext): RoleState {
@@ -182,6 +186,12 @@ export function createRoleState(ctx: HostContext): RoleState {
     }
   })()
 
+  const writeRoleById = (childId: string, role: RoleDefinition): void => {
+    const record: RoleRecord = { version: 1, role }
+    roles.set(childId, record)
+    persist(ROLES_TABLE, childId, record)
+  }
+
   return {
     ready,
     get degraded() {
@@ -201,10 +211,15 @@ export function createRoleState(ctx: HostContext): RoleState {
     readRole(session) {
       return roleOf(roles.get(session.id)) ?? roleOf(legacyRecord(session, ROLE_RECORD))
     },
+    readRoleById(childId) {
+      const stored = roleOf(roles.get(childId))
+      if (stored !== undefined) return stored
+      const loaded = ctx.get('sessions')?.get(childId)
+      return loaded === undefined ? undefined : roleOf(legacyRecord(loaded, ROLE_RECORD))
+    },
+    writeRoleById,
     writeRole(session, role) {
-      const record: RoleRecord = { version: 1, role }
-      roles.set(session.id, record)
-      persist(ROLES_TABLE, session.id, record)
+      writeRoleById(session.id, role)
     },
     async flush() {
       await ready
