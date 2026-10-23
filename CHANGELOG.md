@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0
+
 - Add opt-in `manage_roles` administration of this Host/profile's role definitions: list/get, capability/model references, bounded create/update/delete previews, revision-fenced apply, and explicit caller-only current-catalog refresh. The separate **Allow AI role management** switch defaults OFF, persists immediately through the Host form, and is not part of a Session's role snapshot or the master Subagents switch.
 - Enforce live caller/child/read-only/permission checks even on captured tool definitions. No management operation can edit its gate, the master switch, CLI executables/environment/authentication, workflow model or provider routes. Built-in identity/deletion and arbitrary Agent Preset changes remain protected; a CLI preset cannot exceed the caller's ceiling. Canonical roles-only `settings.mutate` uses the same authoritative descriptor/revision as the gate and never retries a stale write or silently repairs invalid role changes.
 - Preserve unedited opaque role/model/runner metadata in literal JSON catalogs across UI/API saves, including custom-role rename, while exposing only known role projections to the model. Gate-only Host changes advance a dirty editor's fence without losing its inputs; actual role/opaque-metadata changes retain conflict protection.

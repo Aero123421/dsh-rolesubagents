@@ -6,11 +6,13 @@
 # context. Its browser half (lib/client.js, declared under `dsh.client` in
 # package.json) adds the role editor to this bundle's page under Plugins.
 # A role can instead run its child once on an external coding-agent CLI
-# installed on the Host (Codex CLI, Claude Code, Antigravity CLI, OpenCode).
+# installed on the Host (Codex CLI, Claude Code, Antigravity CLI, OpenCode,
+# Grok Build, Pi).
 #
 # Roles are edited from the Plugins page and stored as this row's settings.
-# Changes apply to Sessions created afterwards; a running Session keeps the
-# role list it started with.
+# Saves apply to new root Sessions; existing Sessions and their children/forks
+# retain their catalog. Opt-in manage_roles apply_current explicitly refreshes
+# only the calling parent's future delegation catalog, never existing children.
 #
 # Turn off the official `subagent` / `subagent_fork` tools so the model sees
 # one delegation tool. If they stay on, both kinds of tools coexist: this
