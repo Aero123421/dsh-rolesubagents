@@ -1,0 +1,65 @@
+# Temporary research runner; remove from the final design diff after recording results.
+name: VM design research
+on:
+  push:
+    branches: [docs/vm-execution-kiss-design]
+    paths: [.github/workflows/vm-design-research.yml]
+permissions:
+  contents: read
+jobs:
+  installed-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+      - name: Install pinned DSH in disposable runner directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/dsh-vm-runtime" --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.2 pnpm@10.28.0
+          echo "$RUNNER_TEMP/dsh-vm-runtime/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "DSH_CHECKOUT=$RUNNER_TEMP/dsh-vm-runtime/node_modules/@deepseek-ai/dsh" >> "$GITHUB_ENV"
+          echo "DSH_HOME=$RUNNER_TEMP/dsh-vm-home" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/dsh-vm-runtime/node_modules/.bin/dsh" --version
+      - name: Install plugin development dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Installed DSH orchestration checks (no model or credentials)
+        run: node scripts/check-workflow-host.mjs
+      - name: Boot disposable DSH Web and check local HTTP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dsh-web-workspace"
+          cd "$RUNNER_TEMP/dsh-web-workspace"
+          dsh web --port 19873 > "$RUNNER_TEMP/dsh-web.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ok=false
+          for i in $(seq 1 90); do
+            status=$(curl --max-time 2 -s -o "$RUNNER_TEMP/dsh-web.html" -w '%{http_code}' http://127.0.0.1:19873/ || true)
+            if [ "$status" = 200 ]; then ok=true; break; fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          if [ "$ok" != true ]; then
+            echo 'DSH_WEB_HTTP_NOT_READY (raw log retained only in disposable runner; not printed to avoid auth disclosure)'
+            exit 1
+          fi
+          echo 'PASS installed DSH Web responds HTTP 200 on loopback'
+      - name: Install and inspect pinned Lima CLI (not a VM boot claim)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dsh-lima-bin"
+          curl --fail --location --retry 2 --max-time 120 https://github.com/lima-vm/lima/releases/download/v2.2.1/lima-2.2.1-Linux-x86_64.tar.gz -o "$RUNNER_TEMP/lima.tar.gz"
+          echo "b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb  $RUNNER_TEMP/lima.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/lima.tar.gz" -C "$RUNNER_TEMP/dsh-lima-bin"
+          export LIMA_HOME="$RUNNER_TEMP/dsh-lima-home"
+          "$RUNNER_TEMP/dsh-lima-bin/bin/limactl" --version
+          "$RUNNER_TEMP/dsh-lima-bin/bin/limactl" list --json
+          if test -r /dev/kvm && test -w /dev/kvm; then echo 'KVM_ACCESSIBLE'; else echo 'KVM_UNAVAILABLE'; fi
+          if command -v qemu-system-x86_64; then qemu-system-x86_64 --version; else echo 'QEMU_NOT_INSTALLED'; fi
