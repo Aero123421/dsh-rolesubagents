@@ -296,6 +296,7 @@ export interface FakeWorld {
     subprocess?: SubprocessPort
     sandboxPolicy?: SandboxPolicyPort
     sandbox?: SandboxPort
+    settings?: unknown
   }
   /** The fake storage-domain backend every state instance in this world shares. */
   readonly storage: FakeStorage
@@ -320,12 +321,14 @@ export interface FakeWorld {
   emitCreated(agent: AgentPort, source?: string): void
   emitDisposed(agent: AgentPort): void
   emitToolsChange(): void
+  emitVolatileUpdate(): void
+  emitModelCatalogUpdate(): void
   /** Append a sandbox mode and publish it on `session/event`, as a live Session does. */
   emitSandbox(session: FakeSession, mode: string): void
   /** The text the plugin's runtime-context provider contributes for an Agent (or for none). */
   runtimeContext(agent?: AgentPort): string
   /** Run the plugin's `ctx.effect` cleanups, as the Host does when the plugin is unloaded. */
-  teardown(): void
+  teardown(): Promise<void>
 }
 
 /**
@@ -337,7 +340,9 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
   const disposed: ((payload: DisposedPayload) => void)[] = []
   const sessionEvents: SessionListener[] = []
   const toolsChanged: (() => void)[] = []
-  const cleanups: (() => void)[] = []
+  const volatileChanged: (() => void)[] = []
+  const catalogChanged: (() => void)[] = []
+  const cleanups: (() => void | Promise<void>)[] = []
   const providers = new Map<string, SubagentProviderPort>([
     ['spawn', fakeProvider('spawn')],
     [
@@ -424,6 +429,12 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
     emitToolsChange() {
       for (const listener of [...toolsChanged]) listener()
     },
+    emitVolatileUpdate() {
+      for (const listener of [...volatileChanged]) listener()
+    },
+    emitModelCatalogUpdate() {
+      for (const listener of [...catalogChanged]) listener()
+    },
     emitSandbox(session, mode) {
       session.append('sandbox/mode', { mode })
       const event = { type: 'sandbox/mode', data: { mode } }
@@ -434,8 +445,8 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
       if (context === undefined) throw new Error('the plugin registered no runtime context')
       return context.text(agent === undefined ? {} : { agent })
     },
-    teardown() {
-      for (const cleanup of cleanups.splice(0)) cleanup()
+    async teardown() {
+      await Promise.all(cleanups.splice(0).map(cleanup => cleanup()))
     },
   }
 
@@ -453,6 +464,7 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
     if (name === 'subprocess') return services.subprocess
     if (name === 'sandboxPolicy') return services.sandboxPolicy
     if (name === 'sandbox') return services.sandbox
+    if (name === 'settings') return services.settings
     return undefined
   }
 
@@ -469,6 +481,14 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
       return () => {
         const index = toolsChanged.indexOf(fn)
         if (index >= 0) toolsChanged.splice(index, 1)
+      }
+    } else if (event === 'loader/volatile-update' || event === 'llm/adapters-updated') {
+      const list = event === 'loader/volatile-update' ? volatileChanged : catalogChanged
+      const fn = listener as () => void
+      list.push(fn)
+      return () => {
+        const i = list.indexOf(fn)
+        if (i >= 0) list.splice(i, 1)
       }
     } else if (event === 'session/event') {
       const fn = listener as SessionListener

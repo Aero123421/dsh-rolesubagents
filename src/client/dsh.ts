@@ -102,6 +102,15 @@ export interface ProbeResultLike {
   readonly message?: string
 }
 
+/** Metadata-only Host check; no raw or interpolated role/config values are returned. */
+export type RoleWriteSafetyLike =
+  | { readonly safe: true; readonly revision: number; readonly reason: 'literal-role-settings' }
+  | {
+      readonly safe: false
+      readonly revision?: number
+      readonly reason: 'expression-backed-role-settings' | 'safety-unavailable' | 'revision-conflict'
+    }
+
 /**
  * The `connection` client service, reduced to its generic unary RPC caller
  * (packages/client/connection/src/rpc.ts `ClientConnectionRpc.call`). A failed

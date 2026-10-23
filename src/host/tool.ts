@@ -43,6 +43,11 @@ export interface ToolDeps {
   readonly pending: Map<string, PendingChild>
   /** Per-Session role state (child roles and role-list snapshots). */
   readonly state: RoleState
+  /** Agent ownership and catalog epoch fence; captured/restricted ancestor definitions cannot bypass refresh. */
+  readonly isCurrent?: (agent: AgentPort) => boolean
+  /** Unlike the catalog epoch, owner/plugin liveness also fences already-admitted asynchronous starts. */
+  readonly isAlive?: (agent: AgentPort) => boolean
+  readonly lifetime?: AbortSignal
   /** What runner roles need; without it, a runner role is refused. */
   readonly external?: ExternalDeps
 }
@@ -171,6 +176,16 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       const args = rawArgs as unknown as ToolArgs
       const parent = (exec as { agent?: AgentPort }).agent
       if (parent === undefined) throw new Error('subagent tool requires a calling agent')
+      if (deps.isCurrent?.(parent) === false)
+        throw new Error(
+          'the role catalog or calling agent changed; use the refreshed delegate tool on the next model/tool turn',
+        )
+      const signal = deps.lifetime ? AbortSignal.any([exec.signal, deps.lifetime]) : exec.signal
+      const checkAlive = () => {
+        signal.throwIfAborted()
+        if (deps.isAlive?.(parent) === false) throw new Error('the calling Agent or roles plugin is no longer active')
+      }
+      checkAlive()
       const role = resolveRole(roles, args.role)
       const parentReadOnly = deps.state.readRole(parent.session)?.readOnly === true
       if (parentReadOnly) {
@@ -178,7 +193,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
         if (denial !== undefined) throw new Error(denial)
       }
       if (isRunnerRole(role)) {
-        return delegateExternal(role, { args, parent, parentReadOnly, signal: exec.signal, deps })
+        return delegateExternal(role, { args, parent, parentReadOnly, signal, deps })
       }
       const inheritsHistory = forkInheritsHistory(role)
       if (inheritsHistory) {
@@ -201,7 +216,8 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
         if (provider.capabilities.agentOptions !== true) {
           throw new Error(`role "${role.id}": provider "${providerName}" cannot set the child model`)
         }
-        await deps.ctx.get('llm')?.resolveCallConfig(agentOptions, exec.signal)
+        await deps.ctx.get('llm')?.resolveCallConfig(agentOptions, signal)
+        checkAlive()
       }
       if (
         role.agentPreset !== undefined &&
@@ -216,6 +232,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
       }
       const maxDepth = deps.ctx.subagents.resolveMaxDepth(undefined)
       const childId = randomUUID()
+      checkAlive()
       deps.pending.set(childId, { role, snapshot })
       try {
         const started = await deps.ctx.subagents.startActivation({
@@ -230,7 +247,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
             ...(agentOptions === undefined ? {} : { agentOptions }),
             ...(maxDepth === undefined ? {} : { maxDepth }),
           },
-          signal: exec.signal,
+          signal,
           delivery: 'parent',
         })
         return { kind: 'activation' as const, subagentId: started.childId }

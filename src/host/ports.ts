@@ -35,6 +35,8 @@ export interface AgentPort {
       /** Resolve only tools already visible to this Agent; never add workflow to a preset without it. */
       get?(name: string, scope?: AgentPort): ToolDefinition | undefined
       register(definition: ToolDefinition): () => void
+      /** Hide inherited management tools from delegated children; execution authorization is still mandatory. */
+      restrict?(patch: { readonly deny: readonly string[] }): () => void
       guard(guard: (call: ToolGuardCall) => string | undefined): () => void
     }
   }
@@ -281,7 +283,8 @@ export interface HostContext {
     event: 'session/event',
     listener: (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void,
   ): unknown
-  effect(execute: () => () => void, label?: string): unknown
+  /** Cordis awaits asynchronous disposers before the owning plugin can restart. */
+  effect(execute: () => () => void | Promise<void>, label?: string): unknown
   /** Cordis child-plugin loading; used only to mount the optional probe service. */
   plugin?(plugin: unknown, config?: unknown): unknown
 }

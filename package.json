@@ -49,6 +49,9 @@
     "docs/grok-sandbox-upstream-review.md",
     "docs/grok-sandbox-investigation.md",
     "docs/host-confined-cli-validation.md",
+    "docs/role-management.md",
+    "docs/role-management-validation-20261023.md",
+    "docs/role-management-evidence/",
     "docs/cli-evidence/",
     "CHANGELOG.md"
   ],
@@ -73,13 +76,14 @@
     "typecheck": "tsc -p tsconfig.host.json && tsc -p tsconfig.client.json && tsc -p tsconfig.test.json",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "test": "vitest run",
+    "test": "node scripts/test-isolated.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm test && node scripts/check-lib.mjs",
     "check:lib": "node scripts/check-lib.mjs",
     "check:host": "node scripts/check-workflow-host.mjs",
     "check:cli": "node scripts/check-cli.mjs",
     "check:probe": "node scripts/check-probe-host.mjs",
     "check:sandbox": "node scripts/check-host-sandbox.mjs",
+    "check:management": "node scripts/check-role-management-host.mjs",
     "compare:cli": "node scripts/compare-cli-evidence.mjs"
   },
   "peerDependencies": {

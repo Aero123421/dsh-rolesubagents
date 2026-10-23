@@ -14,6 +14,7 @@
  */
 
 import { CLI_IDS, type CliId, cliDescriptor, isCliId } from '../shared/cli/index.ts'
+import { mergeKnownRoles } from '../shared/role-management.ts'
 import {
   type CliSettings,
   type ForkScope,
@@ -41,6 +42,7 @@ import {
   type RunnerPatch,
   removeRow,
   sameSettings,
+  sameRawRoles,
   setAgentPreset,
   setCliSettings,
   setContext,
@@ -97,6 +99,23 @@ export interface PresetState {
 
 export type SavePhase = 'idle' | 'saving' | 'saved' | 'failed'
 
+/** Fixed role-write diagnostics; never render Host or transport exception text. */
+export type RoleSaveIssue =
+  | 'expression-backed-role-settings'
+  | 'role-write-safety-unavailable'
+  | 'role-write-safety-conflict'
+
+/** Check raw Host syntax safety at the exact revision about to be written. */
+export type RoleWriteSafetyCall = (expectedRevision: number, signal: AbortSignal) => Promise<RemoteResult<unknown>>
+
+/** Live, separately persisted permission; never part of a role draft or Session snapshot. */
+export interface ManagementState {
+  readonly enabled: boolean
+  readonly save: SavePhase | 'conflict'
+  readonly hasRevision: boolean
+  readonly canToggle: boolean
+}
+
 /** Calls the Host's `rolesubagentsCli/probe`. Throws {@link ProbeUnavailableError} when there is no way to call it. */
 export type ProbeCall = (cli: CliId, signal: AbortSignal) => Promise<RemoteResult<unknown>>
 
@@ -147,6 +166,8 @@ export interface PageState {
   /** The Host revision moved while the draft held edits. */
   readonly conflict: boolean
   readonly save: SavePhase
+  readonly saveIssue: RoleSaveIssue | undefined
+  readonly management: ManagementState
   /** The row whose editor is open. */
   readonly expanded: number | undefined
   readonly canEdit: boolean
@@ -164,12 +185,16 @@ export interface ControllerOptions {
   locale: string
   /** The CLI connection test; omitted when the page has no way to call it (the button is then hidden). */
   probe?: ProbeCall
+  /** Production always supplies this; omission is a backwards-compatible unit-test/embedding seam. */
+  roleWriteSafety?: RoleWriteSafetyCall
 }
 
 export interface Controller {
   subscribe(listener: () => void): () => void
   getSnapshot(): PageState
   setEnabled(enabled: boolean): void
+  /** Save only the live management gate immediately, using the current Host revision. */
+  setAllowAiRoleManagement(enabled: boolean): Promise<void>
   setWorkflowModel(model: RoleSettings['workflowModel']): void
   /** Load only the workflow model catalog; explicit calls retry failures. */
   loadWorkflowCatalog(): void
@@ -202,6 +227,8 @@ export interface Controller {
   invalidateReference(): void
   /** Forget the connection tests and whether the Host offers them (a new connection may reach another Host). */
   resetProbes(): void
+  /** Invalidate syntax checks across a transport/Host reset; wait for a fresh accepted form. */
+  resetRoleWriteSafety(): void
   setLocale(locale: string): void
   dispose(): void
 }
@@ -358,13 +385,39 @@ function catalogOf(value: ModelCatalogLike): { groups: ProviderOption[]; partial
   }
 }
 
+function roleWriteSafetyIssue(reply: unknown, expectedRevision: number): RoleSaveIssue | undefined {
+  if (typeof reply !== 'object' || reply === null || !('ok' in reply) || reply.ok !== true || !('value' in reply))
+    return 'role-write-safety-unavailable'
+  const value = reply.value
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    !('safe' in value) ||
+    typeof value.safe !== 'boolean' ||
+    !('reason' in value)
+  )
+    return 'role-write-safety-unavailable'
+  if (value.reason === 'revision-conflict') return 'role-write-safety-conflict'
+  const revision = 'revision' in value ? value.revision : undefined
+  if (revision !== undefined && (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0))
+    return 'role-write-safety-unavailable'
+  if (typeof revision === 'number' && revision !== expectedRevision) return 'role-write-safety-conflict'
+  if (value.safe === false && value.reason === 'expression-backed-role-settings')
+    return 'expression-backed-role-settings'
+  return value.safe === true && value.reason === 'literal-role-settings' && revision === expectedRevision
+    ? undefined
+    : 'role-write-safety-unavailable'
+}
+
 /**
  * Create the page controller.
  * @param options - the Host form, the Remote namespaces, and the active locale.
  * @returns the controller; call `dispose` to release its subscriptions.
  */
 export function createController(options: ControllerOptions): Controller {
-  const { form, remote, probe } = options
+  const { form, remote, probe, roleWriteSafety } = options
+  const lifetime = new AbortController()
   const listeners = new Set<() => void>()
   let disposed = false
   let locale = options.locale
@@ -372,6 +425,9 @@ export function createController(options: ControllerOptions): Controller {
   let repaired: SettingsProblem[] = []
   let conflict = false
   let save: SavePhase = 'idle'
+  let saveIssue: RoleSaveIssue | undefined
+  let managementSave: ManagementState['save'] = 'idle'
+  let lastManagementEnabled = false
   let expanded: number | undefined
   let catalog = IDLE_CATALOG
   let presets = IDLE_PRESETS
@@ -382,15 +438,38 @@ export function createController(options: ControllerOptions): Controller {
   let probes = idleProbes(probe !== undefined)
   const probeRuns = new Map<CliId, AbortController>()
   let state: PageState
+  let observedForm = form.getSnapshot()
+  let formEpoch = 0
+  let roleSafetyWaitForForm = false
+  let activeRoleSafety: AbortController | undefined
 
   const hostSettings = (snapshot: FormSnapshot) => normalizeSettings(snapshot.value)
+  const rawRoles = (snapshot: FormSnapshot): readonly unknown[] => {
+    const value = snapshot.value
+    if (typeof value === 'object' && value !== null && 'roles' in value && Array.isArray(value.roles))
+      return value.roles
+    // The draft also uses normalized defaults when an old Host omitted a literal roles array.
+    return hostSettings(snapshot).settings.roles
+  }
+  const managementEnabled = (snapshot: FormSnapshot): boolean => {
+    const value = snapshot.value
+    return (
+      snapshot.status === 'ready' &&
+      typeof value === 'object' &&
+      value !== null &&
+      'allowAiRoleManagement' in value &&
+      value.allowAiRoleManagement === true
+    )
+  }
+  const hasRevision = (snapshot: FormSnapshot): boolean =>
+    typeof snapshot.revision === 'number' && Number.isSafeInteger(snapshot.revision) && snapshot.revision >= 0
 
   function build(): PageState {
     const snapshot = form.getSnapshot()
     const current = snapshot.status === 'ready' ? draft : undefined
     const issues = current === undefined ? [] : analyseDraft(current).issues
     const dirty = current !== undefined && isDirty(current)
-    const canEdit = current !== undefined && snapshot.writable && save !== 'saving'
+    const canEdit = current !== undefined && snapshot.writable && save !== 'saving' && managementSave !== 'saving'
     return {
       locale,
       status: snapshot.status,
@@ -401,9 +480,22 @@ export function createController(options: ControllerOptions): Controller {
       repaired,
       conflict,
       save,
+      saveIssue,
+      management: {
+        enabled: managementEnabled(snapshot),
+        save: managementSave,
+        hasRevision: hasRevision(snapshot),
+        canToggle:
+          snapshot.status === 'ready' &&
+          snapshot.writable &&
+          hasRevision(snapshot) &&
+          (save !== 'saving' || managementEnabled(snapshot)) &&
+          (!roleSafetyWaitForForm || managementEnabled(snapshot)) &&
+          managementSave !== 'saving',
+      },
       expanded,
       canEdit,
-      canSave: canEdit && dirty && issues.length === 0 && !conflict,
+      canSave: canEdit && dirty && issues.length === 0 && !conflict && !roleSafetyWaitForForm,
       canAdd: canEdit && canAddRole(current),
       catalog,
       presets,
@@ -419,26 +511,59 @@ export function createController(options: ControllerOptions): Controller {
 
   /** Start a fresh draft from what the Host holds now. */
   function rebase(snapshot: FormSnapshot): void {
+    saveIssue = undefined
     const host = hostSettings(snapshot)
-    draft = createDraft(host.settings, snapshot.revision)
+    draft = createDraft(host.settings, snapshot.revision, rawRoles(snapshot))
     repaired = host.problems
     conflict = false
     expanded = undefined
   }
 
+  const origins = (current: Draft) =>
+    current.rows.flatMap(row => (row.sourceId === undefined ? [] : [{ id: row.role.id, sourceId: row.sourceId }]))
+
   function onForm(): void {
     if (disposed) return
     const snapshot = form.getSnapshot()
+    const dataChanged = snapshot.value !== observedForm.value || snapshot.revision !== observedForm.revision
+    const becameReady = snapshot.status === 'ready' && observedForm.status !== 'ready'
+    if (dataChanged || snapshot.status !== observedForm.status || snapshot.writable !== observedForm.writable) {
+      formEpoch++
+      if (activeRoleSafety !== undefined) {
+        saveIssue = 'role-write-safety-conflict'
+        activeRoleSafety.abort()
+      }
+    }
+    if (snapshot.status !== 'ready') roleSafetyWaitForForm = true
+    else if (dataChanged || becameReady) roleSafetyWaitForForm = false
+    observedForm = snapshot
+    const acceptedGate = managementEnabled(snapshot)
+    if (acceptedGate !== lastManagementEnabled && managementSave !== 'saving') managementSave = 'idle'
+    lastManagementEnabled = acceptedGate
     if (snapshot.status !== 'ready') {
-      draft = undefined
+      if (save !== 'saving' && saveIssue !== 'role-write-safety-conflict') draft = undefined
       conflict = false
     } else if (save !== 'saving') {
       if (draft === undefined) {
         rebase(snapshot)
         save = 'idle'
-      } else if (snapshot.revision !== draft.revision) {
-        // The Host moved. Follow it unless the draft holds edits the Host does not already have.
-        if (!isDirty(draft) || sameSettings(draftSettings(draft), hostSettings(snapshot).settings)) {
+      } else if (snapshot.revision !== draft.revision || dataChanged || becameReady) {
+        const host = hostSettings(snapshot)
+        const raw = rawRoles(snapshot)
+        const rawUnchanged = sameRawRoles(draft.rawBaseRoles, raw)
+        if (!isDirty(draft)) {
+          rebase(snapshot)
+          save = 'idle'
+        } else if (sameSettings(draft.base, host.settings) && rawUnchanged) {
+          // A disjoint live setting (notably the management gate) changed. Keep every input/editor.
+          draft = { ...draft, revision: snapshot.revision }
+          repaired = host.problems
+          conflict = false
+        } else if (
+          sameSettings(draftSettings(draft), host.settings) &&
+          sameRawRoles(mergeKnownRoles(draft.rawBaseRoles, draftSettings(draft).roles, origins(draft)), raw)
+        ) {
+          // Another writer accepted exactly this draft, including its untouched opaque metadata.
           rebase(snapshot)
           save = 'idle'
         } else {
@@ -457,6 +582,7 @@ export function createController(options: ControllerOptions): Controller {
     if (next === previous) return
     draft = next
     save = 'idle'
+    saveIssue = roleSafetyWaitForForm ? 'role-write-safety-conflict' : undefined
     after?.(next, previous)
     publish()
   }
@@ -551,6 +677,7 @@ export function createController(options: ControllerOptions): Controller {
   {
     const snapshot = form.getSnapshot()
     if (snapshot.status === 'ready') rebase(snapshot)
+    lastManagementEnabled = managementEnabled(snapshot)
   }
   state = build()
 
@@ -563,6 +690,41 @@ export function createController(options: ControllerOptions): Controller {
     },
     getSnapshot: () => state,
     setEnabled: enabled => edit(current => setEnabled(current, enabled)),
+    async setAllowAiRoleManagement(enabled) {
+      const sent = form.getSnapshot()
+      const revision = sent.revision
+      if (
+        !state.management.canToggle ||
+        sent.status !== 'ready' ||
+        !sent.writable ||
+        typeof revision !== 'number' ||
+        !hasRevision(sent) ||
+        ((save === 'saving' || roleSafetyWaitForForm) && enabled) ||
+        managementEnabled(sent) === enabled
+      )
+        return
+      managementSave = 'saving'
+      publish()
+      let landed = false
+      try {
+        landed = await form.mutate([{ op: 'set', path: ['allowAiRoleManagement'], value: enabled }], revision)
+      } catch {
+        landed = false
+      }
+      if (disposed) return
+      const accepted = form.getSnapshot()
+      managementSave =
+        landed &&
+        accepted.status === 'ready' &&
+        hasRevision(accepted) &&
+        accepted.revision !== revision &&
+        managementEnabled(accepted) === enabled
+          ? 'saved'
+          : accepted.revision !== revision
+            ? 'conflict'
+            : 'failed'
+      publish()
+    },
     setWorkflowModel: model => edit(current => setWorkflowModel(current, model)),
     loadWorkflowCatalog,
     patchRole: (uid, patch) => edit(current => patchRole(current, uid, patch)),
@@ -597,21 +759,66 @@ export function createController(options: ControllerOptions): Controller {
     async save() {
       if (draft === undefined || !state.canSave) return
       const sent = draft
+      const sentForm = form.getSnapshot()
+      const sentEpoch = formEpoch
       const { settings, issues } = analyseDraft(sent)
       if (issues.length > 0) return
-      if (form.getSnapshot().revision !== sent.revision) {
+      if (sentForm.revision !== sent.revision || sentForm.value !== observedForm.value || sentForm.status !== 'ready') {
         conflict = true
         publish()
         return
       }
+      saveIssue = undefined
       save = 'saving'
       publish()
+      if (roleWriteSafety !== undefined) {
+        const request = new AbortController()
+        activeRoleSafety = request
+        let blocked: RoleSaveIssue | undefined
+        const revision = sent.revision
+        if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) {
+          blocked = 'role-write-safety-unavailable'
+        } else {
+          try {
+            blocked = roleWriteSafetyIssue(await roleWriteSafety(revision, request.signal), revision)
+          } catch {
+            blocked = 'role-write-safety-unavailable'
+          }
+        }
+        if (activeRoleSafety === request) activeRoleSafety = undefined
+        if (disposed || lifetime.signal.aborted) return
+        const accepted = form.getSnapshot()
+        if (formEpoch !== sentEpoch || draft !== sent || accepted.value !== sentForm.value || roleSafetyWaitForForm)
+          blocked = 'role-write-safety-conflict'
+        if (blocked === undefined && (accepted.status !== 'ready' || !accepted.writable))
+          blocked = 'role-write-safety-unavailable'
+        if (blocked === undefined && accepted.revision !== sent.revision) blocked = 'role-write-safety-conflict'
+        if (blocked !== undefined) {
+          saveIssue = blocked
+          save = 'failed'
+          if (
+            draft !== undefined &&
+            accepted.status === 'ready' &&
+            (accepted.revision !== sent.revision || accepted.value !== sentForm.value || formEpoch !== sentEpoch)
+          ) {
+            if (
+              sameSettings(draft.base, hostSettings(accepted).settings) &&
+              sameRawRoles(draft.rawBaseRoles, rawRoles(accepted))
+            ) {
+              draft = { ...draft, revision: accepted.revision }
+              conflict = false
+            } else conflict = true
+          }
+          publish()
+          return
+        }
+      }
       let landed = false
       try {
         landed = await form.mutate(
           [
             { op: 'set', path: ['enabled'], value: settings.enabled },
-            { op: 'set', path: ['roles'], value: settings.roles },
+            { op: 'set', path: ['roles'], value: mergeKnownRoles(sent.rawBaseRoles, settings.roles, origins(sent)) },
             { op: 'set', path: ['workflowModel'], value: settings.workflowModel ?? null },
             { op: 'set', path: ['clis'], value: settings.clis ?? {} },
           ],
@@ -626,16 +833,18 @@ export function createController(options: ControllerOptions): Controller {
         if (snapshot.status === 'ready') rebase(snapshot)
         save = 'saved'
       } else if (snapshot.revision !== sent.revision) {
-        // The Host refused because the fence moved: someone else saved first.
-        conflict = true
+        // Reconcile the refused write, but never retry it. A gate-only change can safely
+        // advance the draft fence; real role/metadata changes still produce a conflict.
         save = 'idle'
+        onForm()
+        return
       } else {
         save = 'failed'
       }
       publish()
     },
     discard() {
-      if (save === 'saving') return
+      if (save === 'saving' || managementSave === 'saving') return
       const snapshot = form.getSnapshot()
       if (snapshot.status === 'ready') rebase(snapshot)
       save = 'idle'
@@ -651,6 +860,13 @@ export function createController(options: ControllerOptions): Controller {
       else if (workflowCatalogWanted) loadWorkflowCatalog()
       else publish()
     },
+    resetRoleWriteSafety() {
+      formEpoch++
+      roleSafetyWaitForForm = true
+      activeRoleSafety?.abort()
+      if (save === 'saving' || (draft !== undefined && isDirty(draft))) saveIssue = 'role-write-safety-conflict'
+      publish()
+    },
     resetProbes() {
       stopProbes()
       probes = idleProbes(probe !== undefined)
@@ -663,6 +879,8 @@ export function createController(options: ControllerOptions): Controller {
     },
     dispose() {
       disposed = true
+      lifetime.abort()
+      activeRoleSafety?.abort()
       catalogRun++
       presetRun++
       stopProbes()

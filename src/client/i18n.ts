@@ -21,11 +21,23 @@ import { ID_MAX_LENGTH, type Issue } from './draft.ts'
 const en = {
   'master.label': 'Subagents',
   'master.hint':
-    'Turns role-based subagents and the workflow default model on or off for new sessions. The depth limit and parallelism are set in the official Subagent settings.',
+    'Turns role-based subagents and the workflow default model on or off for new root conversations. The depth limit and parallelism are set in the official Subagent settings.',
+
+  'management.label': 'Allow AI role management',
+  'management.hint':
+    'Grants eligible parent sessions permission to administer role configuration for this Host/profile, including ordinary workspace-write parents. Children do not inherit it. It does not allow CLI installation or updates, authentication changes, or changes to this permission itself.',
+  'management.immediate':
+    'Saved immediately, separately from role edits. The switch shows only the Host-accepted permission.',
+  'management.noRevision': 'A current Host settings revision is required to change this permission.',
+  'management.saving': 'Saving AI role-management permission…',
+  'management.saved': 'AI role-management permission saved.',
+  'management.failed': 'Could not confirm the permission change. The switch shows the Host’s current value; try again.',
+  'management.conflict':
+    'Settings changed before this permission could be saved. The switch shows the Host’s current value; try again.',
 
   'workflow.heading': 'Workflow model',
   'workflow.hint':
-    "Explicit workflow model overrides take priority over this setting, then the parent's model. Clear the provider to fall back to the parent unless the workflow specifies a model. This setting is captured per session; changes apply to new sessions only.",
+    "Explicit workflow model overrides take priority over this setting, then the parent's model. Clear the provider to fall back to the parent unless the workflow specifies a model. This setting is captured per session; changes apply to new root conversations only.",
   'issue.workflowModel': 'The workflow model needs both a provider and a model, or both empty.',
 
   'roles.heading': 'Roles',
@@ -219,8 +231,15 @@ const en = {
   'foot.save': 'Save',
   'foot.saving': 'Saving…',
   'foot.discard': 'Discard',
-  'foot.saved': 'Saved. Changes apply to new sessions; running sessions keep their roles and workflow default model.',
+  'foot.saved':
+    'Saved. New root conversations use these settings. AI can explicitly use apply_current to update its own roles for future delegations, never existing children. Running sessions keep their workflow default model.',
   'foot.failed': 'Could not save. Check the connection and try again.',
+  'foot.expression-backed-role-settings':
+    'Executable expressions or other unsupported role settings cannot be safely saved from this page. Edit the native profile configuration instead. Your draft is unchanged.',
+  'foot.role-write-safety-unavailable':
+    'The Host could not confirm that these role settings are safe to write. Nothing was written by this attempt; check the connection or Host support and try again.',
+  'foot.role-write-safety-conflict':
+    'Settings changed before role-write safety could be confirmed. Nothing was written by this attempt; review the current settings and try again.',
   'foot.conflict': 'The settings changed on the Host after you started editing, so nothing was saved.',
   'foot.reload': 'Reload latest settings',
   'foot.fix': 'Fix these before saving:',
@@ -273,11 +292,22 @@ export type Key = keyof typeof en
 const ja: Record<Key, string> = {
   'master.label': 'サブエージェント',
   'master.hint':
-    '新しいセッションでロール別サブエージェントとワークフローの既定モデルを使うかどうかを切り替えます。深さの上限と並列数は、公式のサブエージェント設定で変更します。',
+    '新しい親の会話でロール別サブエージェントとワークフローの既定モデルを使うかどうかを切り替えます。深さの上限と並列数は、公式のサブエージェント設定で変更します。',
+
+  'management.label': 'AIによるロール管理を許可',
+  'management.hint':
+    'このHost／プロファイルのロール設定を管理する権限を、対象の親セッションに与えます。通常のworkspace-writeの親でも利用でき、子には継承しません。CLIの導入・更新、認証設定、この許可自体の変更はできません。',
+  'management.immediate': 'ロールの編集とは別に即時保存します。スイッチにはHostが受理した許可だけを表示します。',
+  'management.noRevision': 'この許可を変更するには、Hostの現在の設定リビジョンが必要です。',
+  'management.saving': 'AIによるロール管理の許可を保存しています…',
+  'management.saved': 'AIによるロール管理の許可を保存しました。',
+  'management.failed': '許可の変更を確認できませんでした。スイッチはHostの現在値です。再試行してください。',
+  'management.conflict':
+    '許可を保存する前に設定が変更されました。スイッチはHostの現在値です。確認して再試行してください。',
 
   'workflow.heading': 'ワークフローのモデル',
   'workflow.hint':
-    'ワークフローでの明示的なモデル指定、この設定、親のモデルの順に優先します。プロバイダーを空にすると、明示指定がない限り親のモデルを使います。この設定はセッションごとに保持され、変更は新しいセッションにのみ適用されます。',
+    'ワークフローでの明示的なモデル指定、この設定、親のモデルの順に優先します。プロバイダーを空にすると、明示指定がない限り親のモデルを使います。この設定はセッションごとに保持され、変更は新しい親の会話にのみ適用されます。',
   'issue.workflowModel': 'ワークフローのモデルは、プロバイダーとモデルの両方を指定するか、両方を空にしてください。',
 
   'roles.heading': 'ロール',
@@ -471,8 +501,14 @@ const ja: Record<Key, string> = {
   'foot.saving': '保存中…',
   'foot.discard': '破棄',
   'foot.saved':
-    '保存しました。変更は新しいセッションに適用され、実行中のセッションは今のロールとワークフローの既定モデルのままです。',
+    '保存しました。設定は新しい親の会話に適用されます。AIが明示的にapply_currentを使うと、自分の今後の委任用ロールだけを更新でき、既存の子は変更しません。実行中セッションのワークフローの既定モデルは変わりません。',
   'foot.failed': '保存できませんでした。接続を確認して、もう一度お試しください。',
+  'foot.expression-backed-role-settings':
+    '実行可能な式や、対応外の形式・規模を含むロール設定は、この画面から安全に保存できません。ネイティブのプロファイル設定で編集してください。入力中の内容は保持しています。',
+  'foot.role-write-safety-unavailable':
+    'Hostがロール設定を書き込んでよいか確認できませんでした。この試行では何も書き込んでいません。接続やHostの対応を確認して再試行してください。',
+  'foot.role-write-safety-conflict':
+    'ロールの書き込み安全性を確認する前に設定が変更されました。この試行では何も書き込んでいません。現在の設定を確認して再試行してください。',
   'foot.conflict': '編集を始めたあとにホスト側の設定が変更されたため、保存しませんでした。',
   'foot.reload': '最新の設定を読み込む',
   'foot.fix': '保存する前に次を修正してください:',

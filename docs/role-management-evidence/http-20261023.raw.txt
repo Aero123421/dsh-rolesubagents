@@ -1,0 +1,16 @@
+
+> dsh-rolesubagents@0.2.1 check:probe /home/admister/dev/dshplugin/dsh-rolesubagents
+> node scripts/check-probe-host.mjs
+
+FIXTURE loopback HTTP: http://127.0.0.1:33853
+PASS real client Connection → HTTP → Gateway → decorated probe returns subprocess-unavailable
+PASS CLI absent and CLI authentication missing are distinct successful diagnostic results (fixture subprocess/adapter)
+PASS real client rejects malformed envelopes; transport failure remains retryable
+PASS real Connection authentication and Host/Origin fence (401/403)
+PASS real Gateway validates argument names and returns structured Remote error
+PASS real client Connection → HTTP → Gateway → writeSafety uses args.request and returns canonical revision with AI gate OFF
+PASS writeSafety wire refuses stale revision, opaque expressions and caller namespace fields without returning source values
+PASS writeSafety actual HTTP authentication/Origin fence rejects ownerless and cross-origin calls (401/403)
+PASS missing, unavailable and unloaded writeSafety service cannot produce a positive attestation
+PASS missing Gateway and missing Remote both produce ambiguous HTTP 404; no false attribution
+PASS installed DSH 0.2.1-rc.2; isolated HOME/profile, no real CLI/model calls

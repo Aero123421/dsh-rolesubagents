@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Optional installed-DSH integration: real Connection HTTP carrier + Typert Gateway + plugin probe.
+ * Optional installed-DSH integration: real Connection HTTP + Typert Gateway + probe and role-write safety.
  * Node >=22.19 (tested 22.23.4). No GUI, real CLI, inference, installed profile or production settings are used.
- * Only the HTTP listener, in-memory credential store, and subprocess boundary are fixtures.
+ * HTTP listener, in-memory owner credentials, subprocess boundary and read-only role-safety settings are fixtures.
  */
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
@@ -25,6 +25,8 @@ try {
   const { default: Gateway } = await import('@deepseek-ai/dsh-api-gateway')
   const { default: Registry } = await import('@deepseek-ai/dsh-typert-registry')
   const { mountProbeService } = await import('../src/host/external/probe-service.ts')
+  const { mountManagementRemote } = await import('../src/host/management/remote.ts')
+  const { managementSettings } = await import('../src/host/management/settings.ts')
   const { probeFailureOf } = await import('../src/client/controller.ts')
   const routes = new Map()
   const records = new Map()
@@ -80,6 +82,7 @@ try {
     server.listen(0, '127.0.0.1', resolve)
   })
   const origin = `http://127.0.0.1:${server.address().port}`
+  console.log(`FIXTURE loopback HTTP: ${origin}`)
   const login = await fetch(ctx.connection.authenticatedUrl(`${origin}/`), { redirect: 'manual' })
   assert.equal(login.status, 303)
   const cookie = login.headers.get('set-cookie').split(';')[0]
@@ -170,6 +173,109 @@ try {
   assert.equal(invalidBody.ok, false)
   assert.equal(invalidBody.error.code, 'gateway/arguments-invalid')
   console.log('PASS real Gateway validates argument names and returns structured Remote error')
+
+  // Production writeSafety wire contract: one named `request` parameter, independent of the AI gate.
+  const safetyEndpoint = 'rolesubagentsManagement/writeSafety'
+  const safetyRevision = 41
+  let safetyDisposed = false
+  let safetyAvailable = true
+  let rawRoles = { roles: [] }
+  const safetyReader = managementSettings({
+    namespace: () => (safetyAvailable ? 'rolesubagents' : undefined),
+    rawConfig: () => rawRoles,
+    settings: () => ({
+      writable: true,
+      describe: () => [
+        { ns: 'rolesubagents', revision: safetyRevision, value: { allowAiRoleManagement: false, roles: [] } },
+      ],
+      mutate: () => {
+        throw new Error('Read-only safety RPC must never mutate settings')
+      },
+    }),
+  })
+  const safetyCall = (request = { expectedRevision: safetyRevision }) =>
+    client.connection.rpc.call('/api', safetyEndpoint, { args: { request } }, AbortSignal.timeout(5000))
+  const safetyInvoke = (request = { expectedRevision: safetyRevision }, headers = {}) =>
+    fetch(`${origin}/api/${safetyEndpoint}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, ...headers },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'role-safety-check',
+        method: safetyEndpoint,
+        payload: { args: { request } },
+      }),
+      signal: AbortSignal.timeout(5000),
+    })
+  await assert.rejects(safetyCall(), error => probeFailureOf(error) === 'endpoint-unavailable')
+  await mountManagementRemote(ctx, {
+    writeSafety: revision => safetyReader.writeSafety(revision),
+    isDisposed: () => safetyDisposed,
+  })
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+  const safetyService = ctx.get('rolesubagentsManagement')
+  assert(safetyService, 'actual source Remote service must be published')
+  const safetyRuntime = [...ctx.registry.values()].find(
+    runtime =>
+      runtime.name === 'RolesubagentsManagementService' || runtime.callback.name === 'RolesubagentsManagementService',
+  )
+  const safetyFiber = safetyRuntime && [...safetyRuntime.fibers][0]
+  assert(safetyFiber, 'actual source Remote service must have a disposable plugin fiber')
+  const positiveSafety = { ok: true, value: { safe: true, revision: safetyRevision, reason: 'literal-role-settings' } }
+  assert.deepEqual(await safetyCall(), positiveSafety)
+  console.log(
+    'PASS real client Connection → HTTP → Gateway → writeSafety uses args.request and returns canonical revision with AI gate OFF',
+  )
+  assert.deepEqual(await safetyCall({ expectedRevision: safetyRevision - 1 }), {
+    ok: true,
+    value: { safe: false, revision: safetyRevision, reason: 'revision-conflict' },
+  })
+  rawRoles = { roles: [{ opaque: { __jsExpr: '"SYNTHETIC_WIRE_MARKER"' } }] }
+  const unsafeSafety = await safetyCall()
+  assert.deepEqual(unsafeSafety, { ok: true, value: { safe: false, reason: 'expression-backed-role-settings' } })
+  assert(!JSON.stringify(unsafeSafety).includes('SYNTHETIC_WIRE_MARKER'))
+  assert(!JSON.stringify(unsafeSafety).includes('__jsExpr'))
+  rawRoles = { roles: [] }
+  assert.deepEqual(await safetyCall({ expectedRevision: safetyRevision, namespace: 'unrelated-config' }), {
+    ok: true,
+    value: { safe: false, reason: 'safety-unavailable' },
+  })
+  const wrongSafetyArgs = await client.connection.rpc.call(
+    '/api',
+    safetyEndpoint,
+    { args: { namespace: 'unrelated-config' } },
+    AbortSignal.timeout(5000),
+  )
+  assert.equal(wrongSafetyArgs.ok, false)
+  assert.equal(wrongSafetyArgs.error.code, 'gateway/arguments-invalid')
+  console.log(
+    'PASS writeSafety wire refuses stale revision, opaque expressions and caller namespace fields without returning source values',
+  )
+  assert.equal((await safetyInvoke(undefined, { cookie: '' })).status, 401)
+  assert.equal((await safetyInvoke(undefined, { origin: 'https://untrusted.invalid' })).status, 403)
+  console.log(
+    'PASS writeSafety actual HTTP authentication/Origin fence rejects ownerless and cross-origin calls (401/403)',
+  )
+  safetyAvailable = false
+  assert.deepEqual(await safetyCall(), { ok: true, value: { safe: false, reason: 'safety-unavailable' } })
+  safetyAvailable = true
+  safetyDisposed = true
+  assert.deepEqual(await safetyCall(), { ok: true, value: { safe: false, reason: 'safety-unavailable' } })
+  safetyDisposed = false
+  assert.deepEqual(await safetyCall(), positiveSafety)
+  safetyDisposed = true
+  await safetyFiber.dispose()
+  assert.equal(ctx.get('rolesubagentsManagement'), undefined)
+  try {
+    const afterSafetyUnload = await safetyCall()
+    assert(
+      afterSafetyUnload.ok === false || afterSafetyUnload.value?.safe === false,
+      'unloaded safety service must never attest safe',
+    )
+  } catch (error) {
+    assert.equal(probeFailureOf(error), 'endpoint-unavailable')
+  }
+  console.log('PASS missing, unavailable and unloaded writeSafety service cannot produce a positive attestation')
   await gatewayScope.dispose()
   const noGateway = await invoke()
   assert.equal(noGateway.status, 404)
