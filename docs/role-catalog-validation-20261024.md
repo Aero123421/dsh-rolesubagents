@@ -8,7 +8,7 @@ KISS decisions: one catalog adapter, fixed local SVG artwork, existing projectio
 
 ## Executed checks
 
-- **48 suites / 1,489 tests passed**, Host/client/test TypeScript configurations, lint and reproducible checked-in bundles.
+- **48 suites / 1,489 tests passed**, Host/client/test TypeScript configurations, lint and reproducible checked-in bundles. Initial CI caught Host bundle path differences from a cross-worktree `node_modules` symlink; the link was replaced with `pnpm install --frozen-lockfile --offline` in this worktree and bundles regenerated. No dependency or lockfile change was needed. Builds must use a normal local dependency layout, not another worktree's symlinked dependency tree.
 - Actual installed DSH **0.2.1-rc.2**, Linux, Node **22.23.4**:
   - `pnpm check:delegation`: actual headless launcher/Agent creation, five role routes and history/effort semantics, native read-only guard and repin, compaction, same-child warm and cold persistence after settings change.
   - `pnpm check:host`: **18** actual workflow checks, including native invalid-option behavior.
