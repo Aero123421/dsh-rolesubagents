@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0
+
 - Add optional delegation-time role labels and fixed local SVG badges to the root/lineage subagent catalog. Recorded identity survives later role settings changes; unknown and older external children remain unbadged. A metadata-only, bounded read-only RPC never exposes instructions, model routes or environment configuration.
 - Scope the catalog override to supported public slot kinds/scopes and navigation services; leave the built-in catalog when these are unavailable. Missing metadata leaves rows usable. Bound each lookup, cancel stale/reset/closed queries, preserve tree/navigation/metrics and keyboard access, and dispose registrations/styles on unload. See [catalog compatibility and limits](<docs/role-catalog.md>).
 
