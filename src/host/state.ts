@@ -3,7 +3,8 @@
  * role a child was started as.
  *
  * Both live in a schema-validated KV storage domain (`rolesubagents`, one
- * `snapshots` and one `roles` table keyed by Session id), the Host's
+ * `snapshots` and one `roles` table keyed by actual Session id, or by external
+ * activation id for external roles), the Host's
  * sanctioned store for plugin-owned data. Reads are synchronous from the
  * domain's in-memory image; writes update that image through the domain's
  * write chain and are flushed before the plugin unloads.
@@ -33,7 +34,7 @@ export const STATE_DOMAIN_NAME = 'rolesubagents'
 /** Table of role-list snapshots, keyed by Session id. */
 export const SNAPSHOTS_TABLE = 'snapshots'
 
-/** Table of child roles, keyed by Session id. */
+/** Table of child roles, keyed by actual DSH Session id or external activation id. */
 export const ROLES_TABLE = 'roles'
 
 const snapshotRecord = z.object({ version: z.literal(1), settings: z.unknown() })
@@ -90,6 +91,10 @@ export interface RoleState {
    * @returns the role, or undefined for Sessions this plugin did not start.
    */
   readRole(session: SessionPort): RoleDefinition | undefined
+  /** Read a saved identity by actual DSH Session id or external activation id; never opens a Session. */
+  readRoleById(childId: string): RoleDefinition | undefined
+  /** Record an external activation's role without inventing a DSH Session. */
+  writeRoleById(childId: string, role: RoleDefinition): void
   /**
    * Record the role a child was started as.
    * @param session - the child's Session.
@@ -139,7 +144,7 @@ function roleOf(data: unknown): RoleDefinition | undefined {
  * the background; until it is ready (and whenever it is unavailable) an
  * in-memory image serves reads and accepts writes, and a successful open
  * adopts writes already made.
- * @param ctx - the plugin's Host context (only `get('storageDomain')` and the logger are used).
+ * @param ctx - the plugin's Host context (storage, already-loaded Sessions, and the logger).
  * @returns the store; call {@link RoleState.close} when the plugin unloads.
  */
 export function createRoleState(ctx: HostContext): RoleState {
@@ -202,6 +207,13 @@ export function createRoleState(ctx: HostContext): RoleState {
     if (failure?.status === 'rejected') throw failure.reason
   }
 
+  const writeRoleById = (childId: string, role: RoleDefinition): void => {
+    if (closing) throw new Error('role state is closed')
+    const record: RoleRecord = { version: 1, role }
+    roles.set(childId, record)
+    persist(ROLES_TABLE, childId, record)
+  }
+
   return {
     ready,
     get degraded() {
@@ -222,11 +234,16 @@ export function createRoleState(ctx: HostContext): RoleState {
     readRole(session) {
       return roleOf(roles.get(session.id)) ?? roleOf(legacyRecord(session, ROLE_RECORD))
     },
+    readRoleById(childId) {
+      const stored = roleOf(roles.get(childId))
+      if (stored !== undefined) return stored
+      // Legacy records are explicit identities too, but only inspect an already-loaded Session.
+      const loaded = ctx.get('sessions')?.get(childId)
+      return loaded === undefined ? undefined : roleOf(legacyRecord(loaded, ROLE_RECORD))
+    },
+    writeRoleById,
     writeRole(session, role) {
-      if (closing) throw new Error('role state is closed')
-      const record: RoleRecord = { version: 1, role }
-      roles.set(session.id, record)
-      persist(ROLES_TABLE, session.id, record)
+      writeRoleById(session.id, role)
     },
     flush,
     close() {

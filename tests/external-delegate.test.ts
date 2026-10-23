@@ -53,12 +53,34 @@ interface BootOptions {
   readonly mode?: string
   readonly clis?: unknown
   readonly onRun?: FakeSubprocessOptions['onRun']
+  readonly beforeRolePut?: () => Promise<void>
 }
 
 async function boot(options: BootOptions = {}) {
   const root = workspace()
   const ws = join(root, 'ws')
   const world = fakeWorld()
+  if (options.beforeRolePut) {
+    const storage = world.services.storageDomain!
+    world.services.storageDomain = {
+      async open(spec) {
+        const domain = await storage.open(spec)
+        return {
+          ...domain,
+          table(name) {
+            const table = domain.table(name)
+            return {
+              ...table,
+              async put(key, value) {
+                if (name === 'roles') await options.beforeRolePut!()
+                await table.put(key, value)
+              },
+            }
+          },
+        }
+      },
+    }
+  }
   const subprocess = fakeSubprocess({
     onRun:
       options.onRun ??
@@ -133,6 +155,91 @@ describe('delegate: external roles', () => {
       stopReason: 'completed',
     })
     expect(subprocess.processes).toHaveLength(1)
+  })
+
+  it('records the selected external role under the returned activation id, never a CLI thread id', async () => {
+    const { world, call } = await boot()
+    const start = world.subagents.startActivation.getMockImplementation()!
+    world.subagents.startActivation.mockImplementationOnce(async spec => {
+      await start(spec)
+      return { childId: 'host-activation-id' }
+    })
+    expect(await call({ role: 'coder' })).toEqual({ kind: 'activation', subagentId: 'host-activation-id' })
+    await world.settle()
+    expect(world.storedRole('host-activation-id')).toEqual({ version: 1, role: CODER })
+    expect(world.storedRole('cli-thread-id')).toBeUndefined()
+    expect(world.storedRole(world.externalRuns[0]!.id)).toBeUndefined()
+    expect(world.storedSnapshot('host-activation-id')).toBeUndefined()
+    await world.teardown()
+  })
+
+  it('returns an already-started activation without waiting for role storage and lifetime handoff', async () => {
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const { world, call } = await boot({ beforeRolePut: () => blocked })
+    const result = (await call({ role: 'coder' })) as { subagentId: string }
+    expect(world.externalRuns).toHaveLength(1)
+    expect(world.storedRole(result.subagentId)).toBeUndefined()
+    release()
+    await world.settle()
+    expect(world.storedRole(result.subagentId)).toEqual({ version: 1, role: CODER })
+    await world.teardown()
+  })
+
+  it('does not report failed delegation when post-start persistence fails', async () => {
+    const { world, call } = await boot({
+      beforeRolePut: async () => {
+        throw new Error('write failed')
+      },
+    })
+    await expect(call({ role: 'coder' })).resolves.toMatchObject({ kind: 'activation' })
+    await world.settle()
+    expect(world.externalRuns).toHaveLength(1)
+    expect(world.logger.warn).toHaveBeenCalledWith(expect.stringContaining('could not persist roles state'))
+    await world.teardown()
+  })
+
+  it('keeps the owner liveness fence immediately before an external start', async () => {
+    const { world, parent, call, ws } = await boot()
+    world.services.sandboxPolicy = {
+      resolve: () => {
+        world.emitDisposed(parent)
+        return { mode: 'danger-full-access', workspaceRoot: ws }
+      },
+    }
+    await expect(call({ role: 'coder' })).rejects.toThrow(/aborted|no longer active/)
+    expect(world.subagents.startActivation).not.toHaveBeenCalled()
+    expect(world.subagents.registerProvider).not.toHaveBeenCalled()
+    await world.teardown()
+  })
+
+  it('records an already-started activation even if its caller was disposed during handoff', async () => {
+    const { world, parent, call } = await boot()
+    const start = world.subagents.startActivation.getMockImplementation()!
+    world.subagents.startActivation.mockImplementationOnce(async spec => {
+      const result = await start(spec)
+      world.emitDisposed(parent)
+      return result
+    })
+    const result = (await call({ role: 'coder' })) as { subagentId: string }
+    await world.settle()
+    expect(world.storedRole(result.subagentId)).toEqual({ version: 1, role: CODER })
+    await world.teardown()
+  })
+
+  it('does not undo a started activation if state closes before post-start recording', async () => {
+    const { world, call } = await boot()
+    const start = world.subagents.startActivation.getMockImplementation()!
+    world.subagents.startActivation.mockImplementationOnce(async spec => {
+      const result = await start(spec)
+      await world.teardown()
+      return result
+    })
+    await expect(call({ role: 'coder' })).resolves.toMatchObject({ kind: 'activation' })
+    expect(world.externalRuns).toHaveLength(1)
+    expect(world.logger.warn).toHaveBeenCalledWith('rolesubagents: could not record the started external child role')
   })
 
   it('renders the CLI name in the start line', async () => {

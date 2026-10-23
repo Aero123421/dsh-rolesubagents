@@ -296,11 +296,15 @@ async function delegateExternal(
     )
   }
   assertExplicitCwdCheckable(args.cwd, permission.access, ceiling.workspaceRoot)
+  const adapter = external.adapters(role.runner.cli)
+  const settings = external.cliSettings()?.[role.runner.cli] ?? {}
+  call.signal.throwIfAborted()
+  if (deps.isAlive?.(parent) === false) throw new Error('the calling Agent or roles plugin is no longer active')
   const started = await startExternalDelegation({
     ctx: deps.ctx,
     role,
-    adapter: external.adapters(role.runner.cli),
-    settings: external.cliSettings()?.[role.runner.cli] ?? {},
+    adapter,
+    settings,
     permission,
     ceiling,
     parent,
@@ -310,5 +314,13 @@ async function delegateExternal(
     signal: call.signal,
     engine: external.engine,
   })
+  // DSH already owns this activation. Do not delay lifetime handoff with a storage flush,
+  // re-check the caller, or report a failed delegation after a successful start.
+  // Async persistence errors are logged by state; unload can also close state before this resumes.
+  try {
+    deps.state.writeRoleById(started.childId, role)
+  } catch {
+    deps.ctx.logger.warn('rolesubagents: could not record the started external child role')
+  }
   return { kind: 'activation', subagentId: started.childId }
 }

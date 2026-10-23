@@ -65,7 +65,7 @@ describe('role state lifecycle', () => {
     t.rows.set('roles', new Map([['old', { version: 1, role: role('historical') }]]))
     const replacement = settingsOf([role('replacement')])
     t.state.writeSnapshot(fakeSession('override'), replacement)
-    t.state.writeRole(fakeSession('new'), role('new'))
+    t.state.writeRoleById('new', role('new'))
     t.opened.resolve(t.domain)
     await t.state.ready
     expect(t.state.readSnapshot(fakeSession('old'))?.roles.some(r => r.id === 'worker')).toBe(true)
@@ -169,6 +169,8 @@ describe('role state lifecycle', () => {
     const closing = t.state.close()
     expect(t.state.close()).toBe(closing)
     expect(() => t.state.writeRole(session, role('late'))).toThrow(/closed/)
+    expect(() => t.state.writeRoleById('late-external', role('late'))).toThrow(/closed/)
+    expect(t.state.readRoleById('late-external')).toBeUndefined()
     t.opened.resolve(t.domain)
     await t.state.ready
     expect(t.close).not.toHaveBeenCalled()

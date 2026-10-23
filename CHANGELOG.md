@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add optional delegation-time role labels and fixed local SVG badges to the root/lineage subagent catalog. Recorded identity survives later role settings changes; unknown and older external children remain unbadged. A metadata-only, bounded read-only RPC never exposes instructions, model routes or environment configuration.
+- Scope the catalog override to supported public slot kinds/scopes and navigation services; leave the built-in catalog when these are unavailable. Missing metadata leaves rows usable. Bound each lookup, cancel stale/reset/closed queries, preserve tree/navigation/metrics and keyboard access, and dispose registrations/styles on unload. See [catalog compatibility and limits](<docs/role-catalog.md>).
+
 - Await role storage and persistence during native Agent creation, preserve restored read-only roles, clean up failed registrations, and defer/coalesce sandbox re-pinning until Session event publication finishes. Disposed Agents and plugin callbacks cannot re-install tools.
 - Drain shared storage writes without retaining completed promises or rewriting historical rows on open. Concurrent flushes observe their covered failures; acknowledged failures do not poison subsequent rollback/recovery. Close is idempotent and refuses late writes.
 - Explicit child-model defaults clear inherited reasoning effort; missing LLM validation, replaced providers and incompatible full-history providers refuse before delegation. Workflow defaults accept cross-realm plain options while leaving malformed values and property reads to native validation.
