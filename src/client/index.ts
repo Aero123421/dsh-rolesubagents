@@ -14,12 +14,14 @@
  * `inject`: Cordis treats every listed name as required, so a client without it
  * would never load the page at all. It is read lazily with `ctx.get` (Cordis'
  * reflect mixin, as DSH's own ui-settings-general does) when a test runs.
- * Missing capabilities and failed diagnostics remain retryable, without
- * disabling role editing or making claims about whether a CLI is installed.
+ * Missing CLI diagnostics remain retryable without making claims about CLI installation.
+ * Role-array saves separately require the metadata-only rolesubagentsManagement/writeSafety endpoint,
+ * because Host form values are interpolated and cannot safely round-trip executable expressions.
+ * Its absence fails role saves closed; the page and independent management-OFF switch still work.
  */
 
 import type { CliId } from '../shared/cli/index.ts'
-import { createController, type ProbeCall, ProbeUnavailableError } from './controller.ts'
+import { createController, type ProbeCall, ProbeUnavailableError, type RoleWriteSafetyCall } from './controller.ts'
 import { type ConnectionLike, type DshClientContext, ENTRY_ID, PACKAGE_NAME, type RemoteResult } from './dsh.ts'
 import { RolesPage } from './RolesPage.tsx'
 import { installStyles } from './styles.ts'
@@ -29,6 +31,9 @@ export const inject = ['slots', 'locale', 'remote', 'remote.session', 'remote.ag
 
 /** Remote endpoint of the Host's CLI connection test (src/host/external/probe-service.ts). */
 export const PROBE_ENDPOINT = 'rolesubagentsCli/probe'
+/** Metadata-only syntax guard: no raw configuration/role values cross this endpoint. */
+export const ROLE_WRITE_SAFETY_ENDPOINT = 'rolesubagentsManagement/writeSafety'
+export const ROLE_WRITE_SAFETY_TIMEOUT_MS = 10_000
 
 function connectionOf(ctx: DshClientContext): ConnectionLike | undefined {
   try {
@@ -52,6 +57,46 @@ export function probeCaller(ctx: DshClientContext): ProbeCall {
   }
 }
 
+/** Production role-array writes always need a positive, same-revision syntax check. */
+export function roleWriteSafetyCaller(ctx: DshClientContext): RoleWriteSafetyCall {
+  return async (expectedRevision, signal) => {
+    const unavailable = () => new Error('role-write-safety-unavailable')
+    const connection = connectionOf(ctx)
+    if (connection === undefined || signal.aborted) throw unavailable()
+    const abort = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let stop: (() => void) | undefined
+    try {
+      const interrupted = new Promise<never>((_resolve, reject) => {
+        stop = () => {
+          abort.abort()
+          reject(unavailable())
+        }
+        signal.addEventListener('abort', stop, { once: true })
+        timer = setTimeout(stop, ROLE_WRITE_SAFETY_TIMEOUT_MS)
+        if (signal.aborted) stop()
+      })
+      const pending = Promise.resolve().then(() => {
+        if (abort.signal.aborted) throw unavailable()
+        return connection.rpc.call(
+          '/api',
+          ROLE_WRITE_SAFETY_ENDPOINT,
+          { args: { request: { expectedRevision } } },
+          abort.signal,
+        )
+      })
+      const result = await Promise.race([pending, interrupted])
+      if (result?.ok !== true) throw unavailable()
+      return result
+    } catch {
+      throw unavailable()
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      if (stop !== undefined) signal.removeEventListener('abort', stop)
+    }
+  }
+}
+
 function activeLocale(ctx: DshClientContext): string {
   try {
     const active = ctx.locale.getLocale()?.active
@@ -67,6 +112,7 @@ export function apply(ctx: DshClientContext): void {
     form: ctx.configForms.get(ENTRY_ID),
     remote: ctx.remote,
     locale: activeLocale(ctx),
+    roleWriteSafety: roleWriteSafetyCaller(ctx),
     ...(probe === undefined ? {} : { probe }),
   })
 
@@ -77,6 +123,7 @@ export function apply(ctx: DshClientContext): void {
   ctx.effect(
     () =>
       ctx.on('connection/reset', () => {
+        controller.resetRoleWriteSafety()
         controller.invalidateReference()
         controller.resetProbes()
       }),

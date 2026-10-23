@@ -508,6 +508,43 @@ describe('probe', () => {
     expect(await service.probe({ cli: 'codex' }, signal)).toEqual({ cli: 'codex', found: true, path: '/bin/codex' })
   })
 
+  it('attributes cached probe data to settings captured at admission, not completion', async () => {
+    const typert = fakeTypert()
+    let entered!: () => void, release!: () => void
+    const started = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    const blocked = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const source = { codex: { executable: 'old-codex', envPassthrough: ['OLD_NAME'] } }
+    const seen = vi.fn()
+    const adapter: CliAdapter = {
+      ...testAdapter({ descriptor: CODEX }),
+      probe: async () => {
+        entered()
+        await blocked
+        return { cli: 'codex', found: true, models: [{ id: 'old-model' }] }
+      },
+    }
+    const Service = createProbeServiceClass(typert.module, {
+      subprocess: () => fakeSubprocess(),
+      adapters: () => adapter,
+      cliSettings: () => source,
+      isDisposed: () => false,
+      onResult: seen,
+    })
+    const running = new Service({}).probe({ cli: 'codex' }, signal)
+    await started
+    source.codex.executable = 'new-codex'
+    source.codex.envPassthrough.push('NEW_NAME')
+    release()
+    await running
+    expect(seen).toHaveBeenCalledWith(expect.objectContaining({ cli: 'codex', models: [{ id: 'old-model' }] }), {
+      codex: { executable: 'old-codex', envPassthrough: ['OLD_NAME'] },
+    })
+  })
+
   it('mounts only when the Host can load Typert and the plugin is still loaded', async () => {
     const world = fakeWorld()
     const plugin = vi.fn()

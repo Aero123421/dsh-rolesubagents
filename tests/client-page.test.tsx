@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { type Controller, createController, type ProbeCall } from '../src/client/controller.ts'
+import {
+  type Controller,
+  createController,
+  type ProbeCall,
+  type RoleWriteSafetyCall,
+} from '../src/client/controller.ts'
 import { RolesPage } from '../src/client/RolesPage.tsx'
 import { DEFAULT_ROLES } from '../src/shared/roles.ts'
 import { cleanup, fireEvent, render, screen, settle, update, waitFor, within } from './client-dom.ts'
@@ -25,6 +30,7 @@ interface MountOptions {
   preload?: boolean
   /** The CLI connection test; omitted = not available. */
   probe?: ProbeCall
+  roleWriteSafety?: RoleWriteSafetyCall
 }
 
 async function mount(options: MountOptions = {}) {
@@ -35,6 +41,7 @@ async function mount(options: MountOptions = {}) {
     remote,
     locale: options.locale ?? 'en',
     ...(options.probe === undefined ? {} : { probe: options.probe }),
+    ...(options.roleWriteSafety === undefined ? {} : { roleWriteSafety: options.roleWriteSafety }),
   })
   render(<RolesPage controller={controller} view="page" />)
   if (options.preload !== false) update(() => controller.loadReference())
@@ -48,6 +55,7 @@ const rowOf = (id: string): HTMLElement => {
   return item
 }
 const button = (name: string | RegExp) => screen.getByRole('button', { name })
+const footerMessage = (): string | null => document.querySelector('.dshrs-footer [role="status"]')?.textContent ?? null
 const saved = async (fake: FakeForm) => {
   await settle()
   await waitFor(() => expect(fake.calls.length).toBeGreaterThan(0))
@@ -111,12 +119,12 @@ describe('role list', () => {
     await mount()
     const master = screen.getByRole('switch', { name: 'Subagents' })
     expect(master.getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByRole('status').textContent).toBe('No changes')
+    expect(footerMessage()).toBe('No changes')
     fireEvent.click(master)
     expect(master.getAttribute('aria-checked')).toBe('false')
     fireEvent.click(screen.getByRole('switch', { name: 'Enable role worker' }))
     expect(within(rowOf('worker')).getByRole('switch').getAttribute('aria-checked')).toBe('false')
-    expect(screen.getByRole('status').textContent).toBe('Unsaved changes')
+    expect(footerMessage()).toBe('Unsaved changes')
     expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
   })
 
@@ -307,6 +315,162 @@ describe('role editor', () => {
   })
 })
 
+describe('AI role-management permission', () => {
+  it('starts OFF and saves ON/OFF immediately without using the role Save button', async () => {
+    const { fake } = await mount()
+    const control = screen.getByRole('switch', { name: 'Allow AI role management' })
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText(/administer role configuration for this Host\/profile/)).toBeTruthy()
+    expect(screen.getByText(/Children do not inherit it/)).toBeTruthy()
+    fireEvent.click(control)
+    await settle()
+    await screen.findByText('AI role-management permission saved.')
+    expect(control.getAttribute('aria-checked')).toBe('true')
+    expect(fake.calls[0]).toEqual({ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: true }], revision: 1 })
+    expect(footerMessage()).toBe('No changes')
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(control)
+    await settle()
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'))
+    expect(fake.calls[1]).toEqual({ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 2 })
+  })
+
+  it('keeps accepted ON visible while OFF is pending, disables controls, and preserves dirty role input', async () => {
+    const { fake } = await mount({
+      form: { value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } },
+    })
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Description for the parent'), { target: { value: 'unsaved role input' } })
+    let release = () => {}
+    fake.gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const control = screen.getByRole('switch', { name: 'Allow AI role management' })
+    fireEvent.click(control)
+    expect(control.getAttribute('aria-checked')).toBe('true')
+    expect((control as HTMLButtonElement).disabled).toBe(true)
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText('Saving AI role-management permission…')).toBeTruthy()
+    update(release)
+    await settle()
+    await screen.findByText('AI role-management permission saved.')
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    expect((screen.getByLabelText('Description for the parent') as HTMLTextAreaElement).value).toBe(
+      'unsaved role input',
+    )
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByText(/nothing was saved/)).toBeNull()
+    expect(fake.calls).toHaveLength(1)
+  })
+
+  it('shows permission failure without changing the switch or dirtying roles', async () => {
+    const { fake } = await mount()
+    fake.outcome = 'throw'
+    const control = screen.getByRole('switch', { name: 'Allow AI role management' })
+    fireEvent.click(control)
+    await settle()
+    await screen.findByText(
+      'Could not confirm the permission change. The switch shows the Host’s current value; try again.',
+    )
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    expect((control as HTMLButtonElement).disabled).toBe(false)
+    expect(footerMessage()).toBe('No changes')
+  })
+
+  it('shows a gate revision conflict and does not automatically retry it', async () => {
+    const { fake } = await mount()
+    fake.outcome = 'refuse'
+    fake.onRefuse = () =>
+      fake.set({ revision: 2, value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } })
+    fireEvent.click(screen.getByRole('switch', { name: 'Allow AI role management' }))
+    await settle()
+    await screen.findByText(
+      'Settings changed before this permission could be saved. The switch shows the Host’s current value; try again.',
+    )
+    expect(screen.getByRole('switch', { name: 'Allow AI role management' }).getAttribute('aria-checked')).toBe('true')
+    expect(fake.calls).toHaveLength(1)
+  })
+
+  it('labels the independent permission in Japanese and requires a revision before writing', async () => {
+    const { fake } = await mount({ locale: 'ja', form: { revision: undefined } })
+    const control = screen.getByRole('switch', { name: 'AIによるロール管理を許可' })
+    expect((control as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText('この許可を変更するには、Hostの現在の設定リビジョンが必要です。')).toBeTruthy()
+    fireEvent.click(control)
+    expect(fake.calls).toHaveLength(0)
+  })
+})
+
+describe('role write-safety diagnostics', () => {
+  it('explains expression-backed settings without discarding input or preventing independent OFF', async () => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async () =>
+      ok({ safe: false, revision: 1, reason: 'expression-backed-role-settings' }),
+    )
+    const { fake } = await mount({
+      form: { value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } },
+      roleWriteSafety: guard,
+    })
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Description for the parent'), { target: { value: 'keep typed text' } })
+    fireEvent.click(button('Save'))
+    await settle()
+    expect(footerMessage()).toBe(
+      'Executable expressions or other unsupported role settings cannot be safely saved from this page. Edit the native profile configuration instead. Your draft is unchanged.',
+    )
+    expect((screen.getByLabelText('Description for the parent') as HTMLTextAreaElement).value).toBe('keep typed text')
+    expect(fake.calls).toHaveLength(0)
+    fireEvent.click(screen.getByRole('switch', { name: 'Allow AI role management' }))
+    await settle()
+    expect(fake.calls).toEqual([{ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 1 }])
+    expect(guard).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows OFF during a pending guard and refuses its stale positive answer without any roles write', async () => {
+    let release: (answer: Awaited<ReturnType<RoleWriteSafetyCall>>) => void = () => {}
+    const guard = vi.fn<RoleWriteSafetyCall>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { fake } = await mount({
+      form: { value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } },
+      roleWriteSafety: guard,
+    })
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable role worker' }))
+    fireEvent.click(button('Save'))
+    const control = screen.getByRole('switch', { name: 'Allow AI role management' })
+    expect((control as HTMLButtonElement).disabled).toBe(false)
+    expect((button('Saving…') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(control)
+    await settle()
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    update(() => release(ok({ safe: true, revision: 1, reason: 'literal-role-settings' })))
+    await settle()
+    expect(footerMessage()).toBe(
+      'Settings changed before role-write safety could be confirmed. Nothing was written by this attempt; review the current settings and try again.',
+    )
+    expect(fake.calls).toHaveLength(1)
+    expect(fake.calls[0]?.ops[0]?.path).toEqual(['allowAiRoleManagement'])
+    expect(screen.getByRole('switch', { name: 'Enable role worker' }).getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('shows a fixed localized unavailable diagnostic rather than a raw transport error', async () => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async () => {
+      throw new Error('SECRET raw error')
+    })
+    const { fake } = await mount({ locale: 'ja', roleWriteSafety: guard })
+    fireEvent.click(screen.getByRole('switch', { name: 'サブエージェント' }))
+    fireEvent.click(button('保存'))
+    await settle()
+    expect(footerMessage()).toBe(
+      'Hostがロール設定を書き込んでよいか確認できませんでした。この試行では何も書き込んでいません。接続やHostの対応を確認して再試行してください。',
+    )
+    expect(document.body.textContent).not.toContain('SECRET')
+    expect(fake.calls).toHaveLength(0)
+  })
+})
+
 describe('saving', () => {
   it('writes the draft once and tells the user when it applies', async () => {
     const { fake } = await mount()
@@ -315,8 +479,8 @@ describe('saving', () => {
     expect(button('Saving…').getAttribute('aria-busy')).toBe('true')
     await saved(fake)
     expect(fake.calls).toHaveLength(1)
-    expect(screen.getByRole('status').textContent).toBe(
-      'Saved. Changes apply to new sessions; running sessions keep their roles and workflow default model.',
+    expect(footerMessage()).toBe(
+      'Saved. New root conversations use these settings. AI can explicitly use apply_current to update its own roles for future delegations, never existing children. Running sessions keep their workflow default model.',
     )
     expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
   })
@@ -406,7 +570,7 @@ describe('language', () => {
     expect(within(rowOf('worker')).getByText('モデル: 親と同じモデル')).toBeTruthy()
     expect(document.querySelector('.dshrs-root')?.getAttribute('lang')).toBe('ja')
     fireEvent.click(screen.getByRole('switch', { name: 'サブエージェント' }))
-    expect(screen.getByRole('status').textContent).toBe('未保存の変更があります')
+    expect(footerMessage()).toBe('未保存の変更があります')
   })
 
   it('switches language live and falls back to English for other locales', async () => {

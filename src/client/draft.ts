@@ -30,6 +30,7 @@ import {
   type SettingsProblem,
 } from '../shared/roles.ts'
 import { normalizeClis } from '../shared/runner.ts'
+import { eligibleRawRoleSourceIds } from '../shared/role-management.ts'
 
 /** Longest role id; the `{0,31}` tail of `ROLE_ID_PATTERN` plus its first letter. */
 export const ID_MAX_LENGTH = 32
@@ -38,6 +39,8 @@ export const ID_MAX_LENGTH = 32
 export interface DraftRow {
   readonly uid: number
   readonly role: RoleDefinition
+  /** Original saved id, retained across rename; newly added and duplicated rows have no origin. */
+  readonly sourceId?: string
 }
 
 /** The whole settings value being edited. */
@@ -49,6 +52,8 @@ export interface Draft {
   readonly rows: readonly DraftRow[]
   /** The settings this draft started from; the baseline of {@link isDirty}. */
   readonly base: RoleSettings
+  /** Unprojected saved roles, kept only to preserve untouched fields when saving. */
+  readonly rawBaseRoles?: readonly unknown[]
   /** Host revision the draft started from; it fences the save. */
   readonly revision: number | undefined
   /** The uid the next added row receives. */
@@ -80,24 +85,66 @@ function cloneClis(clis: CliSettingsMap | undefined): CliSettingsMap | undefined
   return copy
 }
 
+/** Snapshot JSON-like raw data without invoking getters (unlike structuredClone) or prototype setters. */
+function copyRawRoles(roles: readonly unknown[]): readonly unknown[] {
+  const seen = new WeakMap<object, object>()
+  const copy = (value: unknown): unknown => {
+    if (value === null || typeof value !== 'object') return value
+    const prototype = Object.getPrototypeOf(value)
+    if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return value
+    const previous = seen.get(value)
+    if (previous) return previous
+    const result: object = Array.isArray(value) ? [] : Object.create(prototype)
+    seen.set(value, result)
+    for (const key of Reflect.ownKeys(value)) {
+      if (Array.isArray(value) && key === 'length') continue
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (descriptor)
+        Object.defineProperty(
+          result,
+          key,
+          'value' in descriptor ? { ...descriptor, value: copy(descriptor.value) } : descriptor,
+        )
+    }
+    if (Array.isArray(value)) {
+      const length = Object.getOwnPropertyDescriptor(value, 'length')
+      if (length) Object.defineProperty(result, 'length', length)
+    }
+    return result
+  }
+  return copy(roles) as readonly unknown[]
+}
+
 /**
  * Start a draft from normalized settings.
  * @param settings - the Host's current settings, already normalized.
  * @param revision - the Host revision they were read at.
+ * @param rawRoles - optional unprojected roles from the same accepted Host value.
  * @returns a draft with no edits.
  */
-export function createDraft(settings: RoleSettings, revision: number | undefined): Draft {
+export function createDraft(
+  settings: RoleSettings,
+  revision: number | undefined,
+  rawRoles?: readonly unknown[],
+): Draft {
+  const rawBaseRoles = rawRoles ?? settings.roles
+  const sourceIds = new Set(eligibleRawRoleSourceIds(rawBaseRoles))
   return {
     enabled: settings.enabled,
     ...(settings.workflowModel === undefined ? {} : { workflowModel: { ...settings.workflowModel } }),
     ...(settings.clis === undefined ? {} : { clis: cloneClis(settings.clis) }),
-    rows: settings.roles.map((role, index) => ({ uid: index + 1, role: cloneRole(role) })),
+    rows: settings.roles.map((role, index) => ({
+      uid: index + 1,
+      role: cloneRole(role),
+      ...(sourceIds.has(role.id) ? { sourceId: role.id } : {}),
+    })),
     base: {
       enabled: settings.enabled,
       roles: settings.roles.map(cloneRole),
       ...(settings.workflowModel === undefined ? {} : { workflowModel: { ...settings.workflowModel } }),
       ...(settings.clis === undefined ? {} : { clis: cloneClis(settings.clis) }),
     },
+    rawBaseRoles: copyRawRoles(rawBaseRoles),
     revision,
     nextUid: settings.roles.length + 1,
   }
@@ -174,6 +221,40 @@ export function sameSettings(a: RoleSettings, b: RoleSettings): boolean {
 }
 
 /**
+ * Compare unprojected roles without losing unknown nested metadata or depending on key order.
+ * Host form values are plain JSON-like data; non-plain values conservatively differ.
+ */
+export function sameRawRoles(a: readonly unknown[] | undefined, b: readonly unknown[] | undefined): boolean {
+  const seen = new WeakMap<object, object>()
+  const equal = (left: unknown, right: unknown): boolean => {
+    if (Object.is(left, right)) return true
+    if (typeof left !== 'object' || left === null || typeof right !== 'object' || right === null) return false
+    if (Array.isArray(left) !== Array.isArray(right)) return false
+    if (Array.isArray(left) && Array.isArray(right) && left.length !== right.length) return false
+    if (!Array.isArray(left)) {
+      const leftPrototype = Object.getPrototypeOf(left)
+      const rightPrototype = Object.getPrototypeOf(right)
+      if (
+        (leftPrototype !== Object.prototype && leftPrototype !== null) ||
+        (rightPrototype !== Object.prototype && rightPrototype !== null)
+      )
+        return false
+    }
+    const previous = seen.get(left)
+    if (previous !== undefined) return previous === right
+    seen.set(left, right)
+    const keys = Object.keys(left)
+    if (keys.length !== Object.keys(right).length) return false
+    return keys.every(key => {
+      const l = Object.getOwnPropertyDescriptor(left, key)
+      const r = Object.getOwnPropertyDescriptor(right, key)
+      return l !== undefined && r !== undefined && 'value' in l && 'value' in r && equal(l.value, r.value)
+    })
+  }
+  return equal(a, b)
+}
+
+/**
  * Whether the draft differs from the settings it started from.
  * @param draft - the draft.
  * @returns true when a save would write something new.
@@ -209,7 +290,7 @@ function mapRow(draft: Draft, uid: number, edit: (role: RoleDefinition) => RoleD
     const role = edit(row.role)
     if (role === row.role) return row
     changed = true
-    return { uid, role }
+    return { ...row, role }
   })
   return changed ? { ...draft, rows } : draft
 }

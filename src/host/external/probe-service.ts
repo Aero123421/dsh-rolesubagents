@@ -51,6 +51,8 @@ export interface ProbeServiceOptions {
   readonly cliSettings: () => CliSettingsMap | undefined
   /** True once the plugin unloaded; a late import then does nothing. */
   readonly isDisposed: () => boolean
+  /** Safe in-process metadata observer; never starts another probe or changes the wire result. */
+  readonly onResult?: (result: ProbeResult, admittedSettings: CliSettingsMap) => void
 }
 
 /**
@@ -95,11 +97,20 @@ export function createProbeServiceClass(typert: TypertModule, options: ProbeServ
 
     /** Remote `rolesubagentsCli/probe`. Parameter names are part of the wire contract. */
     async probe(request: unknown, signal: AbortSignal): Promise<ProbeResult> {
-      return probeCli(
+      const admittedSettings = structuredClone(options.cliSettings() ?? {})
+      const result = await probeCli(
         request,
-        { subprocess: options.subprocess(), adapters: options.adapters, settings: options.cliSettings() },
+        { subprocess: options.subprocess(), adapters: options.adapters, settings: admittedSettings },
         signal,
       )
+      if (!options.isDisposed()) {
+        try {
+          options.onResult?.(result, admittedSettings)
+        } catch {
+          /* Optional reference cache must not break diagnostics. */
+        }
+      }
+      return result
     }
   }
 }

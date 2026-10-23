@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-23T09:44:20.055Z",
+  "runtime": {
+    "dsh": "0.2.1-rc.2",
+    "node": "22.23.4",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "passes": 20,
+  "metadata": {
+    "providers": 2,
+    "models": 1,
+    "info": 1,
+    "inference": 0,
+    "fixtureChildActivations": 3
+  },
+  "syntaxCases": ["opaque", "roles-root", "config-root", "bundle-inherited-opaque"],
+  "scope": "real Loader/settings/configEditor/fileLock/atomicProfile/ToolRuntime/scopes; local source Remote and actual UI controller",
+  "fixtures": [
+    "agents",
+    "child-backend",
+    "in-memory-KV-ack",
+    "LLM-metadata",
+    "HMR-scheduling-barrier",
+    "UI-form-transport-adapter"
+  ],
+  "notVerified": [
+    "network-RPC-transport",
+    "KV-disk-durability",
+    "live-model-backend",
+    "CLI-file-enforcement",
+    "production-deployment"
+  ]
+}

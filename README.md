@@ -12,9 +12,10 @@ A role can also run its child on a coding-agent CLI installed on the DSH host in
 - **Built-in roles**: `general` (a fresh child, like the official `subagent`) and `fork` (inherits the parent's conversation, like the official `subagent_fork`) cannot be deleted, only switched off.
 - **Templates**: `worker`, `explorer`, and `reviewer` ship as templates.
 - **Read-only**: pins the child's file sandbox to `read-only` and appends `read-only` again if a later `sandbox/mode` selects a wider mode. While that role is active, write-like tools from MCP and other plugins are refused. Requests for wider sandbox access are still rejected automatically, even when the parent runs in Full access or Auto review.
-- **Cache-friendly**: role instructions reach the child as runtime context, not as system prompt. A role that keeps the parent's model and preset leaves the child's system prompt and tool definitions identical to the parent's. Fork roles also keep the inherited conversation cached.
+- **Cache-friendly**: role instructions reach the child as runtime context, not as system prompt. Matching models/compositions retain their usual cache behavior. Parent-only management tools and explicit role-catalog refreshes can change the tool prefix; see [Prompt caching](#prompt-caching).
 - **External CLI runners**: set a role's **Runs on** to Codex, Claude Code, Antigravity, OpenCode, Grok Build, or Pi and its child runs once as that CLI on the host, with the CLI's own model, reasoning effort, and permission preset. The preset never exceeds what the parent session may do. See [External CLI runners](#external-cli-runners).
-- **Fixed per session**: changes apply to new sessions; a running session keeps the role list it started with. The **External CLIs** settings (executable path, forwarded variables) are the exception: they are read at each delegation.
+- **Optional AI role administration**: enable **Allow AI role management** (OFF by default) to let eligible parent sessions inspect models/capabilities and preview/apply role changes through `manage_roles`. This grants role-configuration administration for this Host/profile, not child execution or CLI installation/authentication control. Children do not inherit it. See [AI role management](#ai-role-management).
+- **Snapshots with explicit refresh**: UI saves affect new root conversations; existing sessions, and children/forks inheriting their catalog, retain their snapshot. An authorized parent's explicit `manage_roles` `apply_current` updates only its own future delegation catalog, never existing children or other sessions. **External CLIs** settings (executable path, forwarded variables) are still read at each delegation.
 
 ## Requirements
 
@@ -22,6 +23,7 @@ A role can also run its child on a coding-agent CLI installed on the DSH host in
 - The settings page appears on the DSH Web (`dsh web`) Plugins page.
 - 日本語の表示には dsh-japanese が必要です（[dsh-japanese](https://github.com/Aero123421/dsh-japanese)）。This plugin does not register the `ja` language. With that pack installed and Japanese selected, the page uses its own Japanese dictionary. Without the pack, and when DSH is set to 中文 (`zh-CN`), the page stays in English and does not show raw message keys.
 - CLI roles also need the CLI installed on the DSH host (see [External CLI runners](#external-cli-runners)) and a Host that offers plugins its subprocess service and subagent provider registration. Without them, CLI roles are refused with a message and DSH roles keep working.
+- Optional AI role management additionally needs the Host's canonical `settings.describe` / revision-fenced `settings.mutate` service and the standard unique `rolesubagents` settings entry. Missing/ambiguous/rebound service ownership refuses management without breaking ordinary delegation; this is not a promise that every version in the base DSH range offers the optional feature.
 
 ## Install
 
@@ -42,10 +44,22 @@ Restart DSH if asked.
 ## Usage
 
 1. Open `dsh-rolesubagents` on the Plugins page, edit roles, and save.
-2. Start a new session. The parent model sees a `delegate` tool whose description lists the enabled roles.
+2. Start a new root conversation. The parent model sees a `delegate` tool whose description lists the enabled roles. A fork/child of an existing conversation can inherit its older role snapshot.
 3. The parent calls `delegate({ role: "reviewer", description, prompt })`. Without `role` it starts `general` (`role` is required when `general` is off).
 
 Children run on the official subagent runtime: they start in the background, notify the parent when they finish, and accept follow-ups through `send_message`. A child of a CLI role also starts in the background and notifies the parent, but it runs once and does not accept `send_message`.
+
+### AI role management
+
+The separate **Allow AI role management** switch is **OFF by default** and saves immediately, independently of the role Save button and master Subagents switch. It grants eligible parent sessions administration of this Host/profile's role definitions; ordinary workspace-write parents can manage workspace-limited roles. Children do not inherit this tool, and an existing captured tool must still pass live caller/permission checks. A human-created fork is not classified as a child merely because it has a parent-session link.
+
+`manage_roles` offers `list`, `get`, `capabilities`, `models`, `preview`, `apply`, and `apply_current`. Create/update/delete are bounded changes inside a preview; inspect the diff and apply its returned plan ID. Saves use the same revision-fenced Host writer as the settings page, never direct profile-file edits. A conflict requires a fresh read/preview, not an automatic overwrite. The tool cannot change its own permission, the master switch, CLI executables/environment/authentication, workflow model, or provider routes. CLI permission increases above the caller's ceiling and arbitrary Agent Preset selection are refused.
+
+Saving and using a role are separate: **create preview → apply → list again → apply_current → next model/tool step → delegate**. Do not run apply/refresh and delegate in parallel or expect a previously bound workflow program to gain new role IDs. Existing children, admitted delegations and other conversations remain unchanged. Saving global settings, refreshing the current catalog, persisting its Session snapshot and recording audit metadata are separate outcomes.
+
+Whole-catalog saves support **literal JSON role settings only**. The UI requires the Host's read-only `rolesubagentsManagement/writeSafety` check at the same revision—even when AI management is OFF. Executable `!!js`/`__jsExpr` role bindings (including inherited/opaque fields) are refused instead of replacing them with resolved values; edit such profiles natively. Management writes also require a resolvable caller sandbox policy. OFF remains available during a pending UI safety check; already-admitted Host profile writes cannot be retroactively canceled.
+
+Model candidates carry provenance, timestamps and partial/unknown status; listing them does not verify authentication or availability. Management does not launch CLI processes, inference, login, installation or updates. See [the operation contract, examples and limits](<docs/role-management.md>).
 
 ### Role fields
 
@@ -54,7 +68,7 @@ Children run on the official subagent runtime: they start in the background, not
 | ID | The name the parent passes; lowercase letters, digits, `-`, `_`, up to 32 characters |
 | Runs on | DSH (built-in child, the default) or one of the external CLIs. A CLI replaces Context, Inherited context, Model, and Agent preset with its own fields; see [External CLI runners](#external-cli-runners). Built-in roles always run on DSH |
 | Description for the parent | What the role is for and how to brief it; shown in the tool description |
-| Instructions for the child | Added to the child's runtime context; never shown to the parent |
+| Instructions for the child | Added to the child's runtime context, not the `delegate` role list; authorized `manage_roles get` can inspect the saved instructions |
 | Context | Fresh (spawn) or fork |
 | Inherited context | Fork roles only. All completed turns (the default) copies the parent's completed turns, including tool results. Task only starts a fresh child and does not copy that history |
 | Model | Provider, model, and reasoning effort; empty inherits the parent's route. Not available for fork roles |
@@ -71,13 +85,14 @@ The Plugins page has a separate **Workflow model** provider/model setting. It ch
 | Neither field specified | Set | Configured provider and model |
 | Neither field specified | Empty | Native parent model inheritance |
 
-For example, `await agent("Investigate the tests")` uses the configured workflow model, while `await agent("Review", { provider: "other", model: "other-model" })` overrides it. Specifying only one route field also bypasses the configured pair, retaining DSH's normal inheritance for the other field. Clear the provider selection to remove the default. The master Subagents switch disables this default as well. Changes apply to new sessions; existing sessions retain their recorded setting, including after resume.
+For example, `await agent("Investigate the tests")` uses the configured workflow model, while `await agent("Review", { provider: "other", model: "other-model" })` overrides it. Specifying only one route field also bypasses the configured pair, retaining DSH's normal inheritance for the other field. Clear the provider selection to remove the default. The master Subagents switch disables this default as well. Changes apply to new root conversations; existing sessions and their inherited children/forks retain their recorded setting, including after resume. `apply_current` refreshes roles only and does not change this workflow model.
 
 The original workflow tool still owns execution, schemas, limits, cancellation, foreground results, and background jobs. A preset without `workflow` does not gain the tool. This integration adapts the script's lexical `agent()` helper; direct calls to the workflow engine or access through `globalThis.agent` are not adapted. It is a convenience default, not a model-enforcement policy. Script wrapping can shift diagnostic line numbers. Standard preset and global/headless workflow tools are supported. If another plugin registers `workflow` directly in the same agent-local layer, DSH forbids replacing that registration: the plugin logs a warning and leaves that tool unchanged. External tool changes invalidate adapters lazily; each agent refreshes before its next prompt or workflow execution, and captured adapters refuse to execute a removed/restricted workflow.
 
 ### Prompt caching
 
-- A role with the parent's model and composition shares the parent's cached system prompt and tool definitions.
+- A role with the parent's model and composition normally shares the parent's cached system prompt and tool definitions when the visible tools match.
+- Enabling parent-only `manage_roles` deliberately makes the parent/child tool sets differ. Explicit `apply_current` also replaces the caller's `delegate` definition; identical tool-prefix/cache reuse is not promised across these changes.
 - A role with another model or an Agent Preset does not share the parent's cache (children of the same role still share one).
 - Fork roles cannot change the model or preset, because that would re-read the whole inherited conversation uncached.
 
@@ -105,7 +120,7 @@ A role whose **Runs on** is a CLI runs its child once as a separate program on t
    | Timeout (minutes) | The run is stopped after this long; 1–1440, empty for 30 |
 
 3. **Read-only** permits only a verified read-only preset (see [Read-only](#read-only-on-a-cli)). Grok Build and Pi have no supported read-only preset: this combination is rejected in the editor and a stored incompatible role is switched off during normalization.
-4. Save, then start a new session.
+4. Save, then start a new root conversation (or explicitly refresh the eligible current parent through `manage_roles apply_current`).
 
 For Grok/Pi in an ordinary workspace-write session, select **Workspace write** (the new default). A saved explicit `native` selection stays native and is refused under a restricted parent; change it explicitly rather than expecting silent lowering.
 

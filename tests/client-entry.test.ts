@@ -1,8 +1,16 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply, inject, PROBE_ENDPOINT, probeCaller } from '../src/client/index.ts'
+import {
+  apply,
+  inject,
+  PROBE_ENDPOINT,
+  probeCaller,
+  ROLE_WRITE_SAFETY_ENDPOINT,
+  ROLE_WRITE_SAFETY_TIMEOUT_MS,
+  roleWriteSafetyCaller,
+} from '../src/client/index.ts'
 import { type Controller, ProbeUnavailableError } from '../src/client/controller.ts'
-import type { DshClientContext } from '../src/client/dsh.ts'
+import type { ConnectionLike, DshClientContext } from '../src/client/dsh.ts'
 import { RolesPage } from '../src/client/RolesPage.tsx'
 import { fakeForm, fakeRemote } from './client-helpers.ts'
 
@@ -175,6 +183,140 @@ describe('client entry', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(3)
     expect(remote.agentPresets.list).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('role-write safety production wiring', () => {
+  it('requires the fixed metadata-only endpoint and reads the connection lazily on each attempt', async () => {
+    const services: Record<string, unknown> = {}
+    const { ctx } = fakeContext('en', services)
+    const check = roleWriteSafetyCaller(ctx)
+    const signal = new AbortController().signal
+    await expect(check(7, signal)).rejects.toThrow('role-write-safety-unavailable')
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({
+      ok: true,
+      value: { safe: true, revision: 7, reason: 'literal-role-settings' },
+    }))
+    services.connection = { rpc: { call } }
+    await expect(check(7, signal)).resolves.toEqual({
+      ok: true,
+      value: { safe: true, revision: 7, reason: 'literal-role-settings' },
+    })
+    expect(ROLE_WRITE_SAFETY_ENDPOINT).toBe('rolesubagentsManagement/writeSafety')
+    expect(call).toHaveBeenCalledExactlyOnceWith(
+      '/api',
+      ROLE_WRITE_SAFETY_ENDPOINT,
+      { args: { request: { expectedRevision: 7 } } },
+      expect.any(AbortSignal),
+    )
+    expect(inject).not.toContain('connection')
+  })
+
+  it('normalizes missing endpoint and transport errors without a fallback or raw message', async () => {
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({
+      ok: false,
+      error: { code: 'gateway/method-unavailable', message: 'SECRET endpoint data' },
+    }))
+    const { ctx } = fakeContext('en', { connection: { rpc: { call } } })
+    const check = roleWriteSafetyCaller(ctx)
+    await expect(check(1, new AbortController().signal)).rejects.toThrow(/^role-write-safety-unavailable$/)
+    call.mockRejectedValueOnce(new Error('SECRET transport error'))
+    await expect(check(1, new AbortController().signal)).rejects.toThrow(/^role-write-safety-unavailable$/)
+    expect(call).toHaveBeenCalledTimes(2)
+    expect(call.mock.calls.every(args => args[1] === ROLE_WRITE_SAFETY_ENDPOINT)).toBe(true)
+  })
+
+  it('bounds a stalled request to ten seconds and aborts its transport signal', async () => {
+    vi.useFakeTimers()
+    try {
+      const call = vi.fn<ConnectionLike['rpc']['call']>(() => new Promise(() => {}))
+      const { ctx } = fakeContext('en', { connection: { rpc: { call } } })
+      const pending = roleWriteSafetyCaller(ctx)(1, new AbortController().signal)
+      const rejected = expect(pending).rejects.toThrow(/^role-write-safety-unavailable$/)
+      await vi.advanceTimersByTimeAsync(ROLE_WRITE_SAFETY_TIMEOUT_MS)
+      await rejected
+      expect(call).toHaveBeenCalledTimes(1)
+      expect(call.mock.calls[0]?.[3]?.aborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not start a request with an already-aborted owner signal', async () => {
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({ ok: true, value: {} }))
+    const { ctx } = fakeContext('en', { connection: { rpc: { call } } })
+    const abort = new AbortController()
+    abort.abort()
+    await expect(roleWriteSafetyCaller(ctx)(1, abort.signal)).rejects.toThrow(/^role-write-safety-unavailable$/)
+    expect(call).not.toHaveBeenCalled()
+  })
+
+  it('always injects the guard in production, failing role saves closed without blocking management OFF', async () => {
+    const { ctx, form, registrations } = fakeContext()
+    form.set({ value: { ...(form.form.getSnapshot().value as object), allowAiRoleManagement: true } })
+    apply(ctx)
+    const controller = controllerOf(registrations[0])
+    const uid = controller.getSnapshot().draft?.rows[2]?.uid ?? -1
+    controller.patchRole(uid, { description: 'unsaved' })
+    await controller.save()
+    expect(form.calls).toHaveLength(0)
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      save: 'failed',
+      saveIssue: 'role-write-safety-unavailable',
+    })
+    await controller.setAllowAiRoleManagement(false)
+    expect(form.calls).toEqual([{ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 1 }])
+  })
+
+  it('invalidates and aborts a pending role guard on connection/reset even when a new Host reuses its revision', async () => {
+    let release: (value: { ok: true; value: unknown }) => void = () => {}
+    const call = vi.fn<ConnectionLike['rpc']['call']>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { ctx, form, registrations, eventListeners } = fakeContext('en', { connection: { rpc: { call } } })
+    apply(ctx)
+    const controller = controllerOf(registrations[0])
+    controller.setEnabled(false)
+    const pending = controller.save()
+    await Promise.resolve()
+    expect(call).toHaveBeenCalledTimes(1)
+    eventListeners.get('connection/reset')?.()
+    await pending
+    expect(call.mock.calls[0]?.[3]?.aborted).toBe(true)
+    expect(form.calls).toHaveLength(0)
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      canSave: false,
+      saveIssue: 'role-write-safety-conflict',
+    })
+    release({ ok: true, value: { safe: true, revision: 1, reason: 'literal-role-settings' } })
+    await Promise.resolve()
+    await controller.save()
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(form.calls).toHaveLength(0)
+  })
+
+  it('permits a literal role save with a positive same-revision response even while AI management is OFF', async () => {
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({
+      ok: true,
+      value: { safe: true, revision: 1, reason: 'literal-role-settings' },
+    }))
+    const { ctx, form, registrations } = fakeContext('en', { connection: { rpc: { call } } })
+    apply(ctx)
+    const controller = controllerOf(registrations[0])
+    controller.setEnabled(false)
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({
+      save: 'saved',
+      saveIssue: undefined,
+      management: { enabled: false },
+    })
+    expect(form.calls).toHaveLength(1)
+    expect(call.mock.calls[0]?.[2]).toEqual({ args: { request: { expectedRevision: 1 } } })
   })
 })
 
