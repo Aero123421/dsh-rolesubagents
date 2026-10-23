@@ -1,4 +1,4 @@
-# Temporary research runner; remove from the final design diff after recording results.
+# Temporary research runner; removed from final design diff after recording results.
 name: VM design research
 on:
   push:
@@ -21,38 +21,63 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npx --yes --package=npm@10.9.2 npm install --prefix "$RUNNER_TEMP/dsh-vm-runtime" --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.2 pnpm@10.28.0
+          npx --yes --package=npm@10.9.2 npm install --prefix "$RUNNER_TEMP/dsh-vm-runtime" --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.2 pnpm@10.28.0 playwright@1.56.1
           echo "$RUNNER_TEMP/dsh-vm-runtime/node_modules/.bin" >> "$GITHUB_PATH"
           echo "DSH_CHECKOUT=$RUNNER_TEMP/dsh-vm-runtime/node_modules/@deepseek-ai/dsh" >> "$GITHUB_ENV"
           echo "DSH_HOME=$RUNNER_TEMP/dsh-vm-home" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/dsh-vm-runtime/node_modules/.bin/dsh" --version
-      - name: Install plugin development dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Installed DSH orchestration checks (no model or credentials)
-        run: node scripts/check-workflow-host.mjs
-      - name: Boot disposable DSH Web and check local HTTP
+      - name: Install plugin and check installed DSH contracts
+        run: |
+          pnpm install --frozen-lockfile
+          node scripts/check-workflow-host.mjs
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          dsh plugin --profile web add "$RUNNER_TEMP/dsh-rolesubagents-0.2.1.tgz"
+          dsh --profile web --dump-config > "$RUNNER_TEMP/dsh-composed.yml"
+          grep -q rolesubagents "$RUNNER_TEMP/dsh-composed.yml"
+          echo 'PASS real profile composition includes rolesubagents'
+          playwright install chromium
+      - name: Boot real Web and exercise authenticated browser
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dsh-web-workspace"
           cd "$RUNNER_TEMP/dsh-web-workspace"
-          dsh web --port 19873 > "$RUNNER_TEMP/dsh-web.log" 2>&1 &
+          dsh web --no-open --host 127.0.0.1 --port 19873 > "$RUNNER_TEMP/dsh-web.log" 2>&1 &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
-          ok=false
-          for i in $(seq 1 60); do
-            for port in 19873 3080; do
-              status=$(curl --max-time 2 -s -o "$RUNNER_TEMP/dsh-web.html" -w '%{http_code}' "http://127.0.0.1:$port/" || true)
-              if [ "$status" = 200 ]; then ok=true; echo "PASS installed DSH Web HTTP 200 on port $port"; break 2; fi
-            done
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 1
-          done
-          if [ "$ok" != true ]; then
-            echo 'DSH_WEB_HTTP_NOT_READY; sanitized local diagnostics follow'
-            node --input-type=module -e 'import {readFileSync} from "node:fs"; const lines=readFileSync(process.env.RUNNER_TEMP+"/dsh-web.log","utf8").split("\n"); console.log(lines.filter(x=>!/token|secret|password|bearer|authorization|credential|api.?key/i.test(x)).slice(-70).map(x=>x.replace(/https?:\/\/\S+/g,"<URL>")).join("\n"))'
-            exit 1
-          fi
+          cat > "$RUNNER_TEMP/dsh-vm-runtime/browser-check.mjs" <<'JS'
+          import {readFileSync} from 'node:fs';
+          import {chromium} from 'playwright';
+          let url;
+          for (let i=0;i<60;i++) {
+            const text=readFileSync(process.env.RUNNER_TEMP+'/dsh-web.log','utf8');
+            url=/^dsh web: (http:\/\/127\.0\.0\.1:\d+\/\S*)/m.exec(text)?.[1];
+            if(url) break;
+            await new Promise(r=>setTimeout(r,1000));
+          }
+          if(!url) throw new Error('No loopback ready URL; credentials intentionally not printed');
+          const browser=await chromium.launch({headless:true});
+          try {
+            const page=await browser.newPage();
+            const errors=[];
+            page.on('pageerror',e=>errors.push(e.name));
+            const response=await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000});
+            if(!response || response.status()!==200) throw new Error('Authenticated frontend did not return HTTP 200');
+            await page.waitForTimeout(3000);
+            const text=await page.locator('body').innerText();
+            if(text.trim().length<20) throw new Error('Frontend did not render');
+            console.log('PASS authenticated DSH Web HTTP 200 and non-empty rendered DOM');
+            console.log('DSH_BROWSER_PAGEERROR_COUNT',errors.length);
+            console.log('DSH_BROWSER_NAV_LABELS',JSON.stringify((await page.getByRole('button').allTextContents()).map(x=>x.trim()).filter(x=>x.length>0&&x.length<70).slice(0,25)));
+            const pluginNav=page.getByRole('button',{name:/^Plugins$|^插件$/}).first();
+            if(await pluginNav.count()) {
+              await pluginNav.click();
+              await page.waitForTimeout(1500);
+              console.log('PLUGIN_PAGE_CONTAINS_TARGET', (await page.locator('body').innerText()).includes('dsh-rolesubagents'));
+            } else console.log('PLUGIN_NAV_NOT_MATCHED: configuration interactions not claimed');
+          } finally {await browser.close();}
+          JS
+          node "$RUNNER_TEMP/dsh-vm-runtime/browser-check.mjs"
       - name: Install Lima and validate no-mount configuration
         if: always()
         shell: bash
@@ -66,7 +91,6 @@ jobs:
           export PATH="$RUNNER_TEMP/dsh-lima-bin/bin:$PATH"
           limactl --version
           limactl list --json
-          limactl template copy --help
           limactl template copy --fill template:default "$RUNNER_TEMP/dsh-vm.yaml"
           limactl template yq "$RUNNER_TEMP/dsh-vm.yaml" '.mounts = [] | .containerd.system = false | .containerd.user = false | .ssh.forwardAgent = false | .ssh.loadDotSSHPubKeys = false | .ssh.forwardX11 = false | .ssh.forwardX11Trusted = false | .portForwards = [{"guestPortRange": [1, 65535], "ignore": true}]' > "$RUNNER_TEMP/dsh-vm-isolated.yaml"
           limactl validate "$RUNNER_TEMP/dsh-vm-isolated.yaml"
