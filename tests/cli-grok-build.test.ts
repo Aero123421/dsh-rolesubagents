@@ -54,6 +54,14 @@ describe('Grok native adapter', () => {
   it.each(['read-only', 'workspace-write'] as const)('refuses unsupported %s at plan boundary', access => {
     expect(() => grokBuildAdapter.plan({ ...input, access }, 'abc')).toThrow('full-access')
   })
+  it.each(['read-only', 'workspace', 'workspace-write'])(
+    'does not advertise unverified official profile %s as a supported preset',
+    preset => {
+      expect(() =>
+        grokBuildAdapter.plan({ ...input, preset, runner: { ...input.runner, permission: preset } }, 'abc'),
+      ).toThrow('Grok native requires full-access')
+    },
+  )
   it('ends stdin without writing task or protocol commands', () => {
     const io = { write: vi.fn(), end: vi.fn() }
     grokBuildAdapter.createSession(input, 'abc').start(io)

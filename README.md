@@ -169,6 +169,8 @@ Every run gets the task text through the CLI's input, and the role's instruction
 | Model and credentials | Native Grok configuration/authentication; optionally select a model/effort or forward a required key variable by name. `GROK_DISABLE_AUTOUPDATER=1` prevents adapter-triggered updater activity |
 | Connection test | Version only. Authentication and model catalog remain unknown |
 
+Grok **does provide** official OS sandbox profiles (`--sandbox read-only` / `--sandbox workspace`); this is different from Pi's lack of a built-in permission boundary. The adapter's `native` choice does not select or verify those profiles, nor force them off. A full-access parent is a DSH admission condition, not an instruction to bypass Grok permissions. Restrictive presets must first demonstrate the effective boundary and management-policy conflict behavior for the tested binary/OS; passing a requested flag alone is insufficient. See the [upstream review](docs/grok-sandbox-upstream-review.md) and [real-binary investigation](docs/grok-sandbox-investigation.md). Their integration remains deferred; this PR does not advertise verified Grok restricted presets.
+
 #### Pi (`pi`)
 
 | | |

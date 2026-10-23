@@ -46,6 +46,8 @@
     "docs/cli-compatibility.md",
     "docs/external-cli-validation-20261022.md",
     "docs/codex-local-regression-20261022.md",
+    "docs/grok-sandbox-upstream-review.md",
+    "docs/grok-sandbox-investigation.md",
     "docs/cli-evidence/",
     "CHANGELOG.md"
   ],

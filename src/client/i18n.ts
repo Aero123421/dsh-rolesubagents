@@ -157,11 +157,11 @@ const en = {
   'preset.nativeAcceptEdits': 'Native accept-edits (keep settings and extensions)',
   'preset.native': 'Native harness (keep settings and extensions)',
   'confinement.native':
-    "Keeps {cli}'s native tools, settings and extensions. This is not an OS sandbox and requires an explicitly full-access parent; it does not enable bypass-permissions. No whole-workspace scan is required.",
+    "Keeps {cli}'s native tools, settings and extensions. The adapter does not select or verify an OS sandbox, so an explicitly full-access parent is required; native CLI restrictions may still apply. It does not enable bypass-permissions. No whole-workspace scan is required.",
   'ed.readOnlyHelp.grok-build':
-    'The native Grok Build harness cannot guarantee read-only execution with its extensions. This combination is unsupported.',
+    'Grok Build provides official OS sandbox profiles, but this adapter has not verified their effective restrictions. Its native preset does not select a sandbox, so read-only roles are currently unsupported.',
   'ed.readOnlyHelp.pi':
-    'The native Pi harness cannot guarantee read-only execution with its extensions. This combination is unsupported.',
+    'Pi has no built-in OS permission boundary for arbitrary native extensions. Selecting read tools alone does not confine extension code, so read-only roles are unsupported.',
   'preset.auto': 'Auto (classifier)',
   'preset.bypassPermissions': 'Bypass permissions',
   'preset.edit-files': 'Edit files (no shell)',
@@ -405,11 +405,11 @@ const ja: Record<Key, string> = {
   'preset.nativeAcceptEdits': 'ネイティブ編集（設定・拡張を維持）',
   'preset.native': 'ネイティブハーネス（設定・拡張を維持）',
   'confinement.native':
-    '{cli} 本来のツール・設定・拡張を維持します。OSサンドボックスではないため、明示的にフルアクセスにした親が必要です。権限確認の一括省略は有効にせず、ワークスペース全体の走査も行いません。',
+    '{cli} 本来のツール・設定・拡張を維持します。アダプターはOSサンドボックスを指定・検証しないため、明示的にフルアクセスにした親が必要です。CLI側の制限が適用される場合もあります。権限確認の一括省略は有効にせず、ワークスペース全体の走査も行いません。',
   'ed.readOnlyHelp.grok-build':
-    'Grok Build のネイティブハーネスは拡張を維持したまま読み取り専用を保証できないため、この組み合わせは未対応です。',
+    'Grok Build には公式OSサンドボックスがありますが、このアダプターでは実効制限を未検証です。native はサンドボックスを指定しないため、現在は読み取り専用ロールに未対応です。',
   'ed.readOnlyHelp.pi':
-    'Pi のネイティブハーネスは拡張を維持したまま読み取り専用を保証できないため、この組み合わせは未対応です。',
+    'Pi は任意のネイティブ拡張を隔離する標準のOS権限境界を持ちません。読み取りツールだけを選んでも拡張コードを制限できないため、読み取り専用ロールに未対応です。',
   'preset.auto': '自動判定',
   'preset.bypassPermissions': '権限確認をすべて省略',
   'preset.edit-files': 'ファイル編集のみ（シェルなし）',

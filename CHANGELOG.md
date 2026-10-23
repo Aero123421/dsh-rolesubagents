@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Distinguish Grok's official OS sandbox capability from Pi's native-only boundary limitation in English/Japanese UI and documentation. Add a reproducible Grok sandbox investigation; do not expose unverified restrictive presets merely because a requested CLI flag exists. Native admission/permissions remain unchanged.
 - Add native Grok Build (`grok`, streaming JSON) and Pi (`pi`, RPC) runners. Preserve native settings/authentication/tools/extensions; only the `native` full-access preset is supported. Restricted parents refuse before startup; incompatible read-only roles are disabled, never elevated.
 - Add explicit Claude `nativeAcceptEdits`: keep native settings/tools/MCP/hooks and skip recursive workspace-link preflight (including ordinary Python venv workspaces). Requires a full-access parent but uses `acceptEdits`, not automatic bypass. Existing restricted defaults remain unchanged.
 - Keep CLI diagnostics retryable after RPC/transport failures. Distinguish local connection, structured Remote, Host auth, malformed response and CLI errors; 404 remains ambiguous between absent Gateway and Remote. Real HTTP integration covers DSH 0.2.1-rc.2, not all versions or a stable-public-API promise.

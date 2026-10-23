@@ -169,6 +169,8 @@ dsh plugin --profile web add github:Aero123421/dsh-rolesubagents
 | モデルと認証 | Grok 本来の設定・認証を使います。モデルと推論の強さは必要なら指定し、必要なキー変数は名前で引き渡します。`GROK_DISABLE_AUTOUPDATER=1` を設定します |
 | 接続テスト | バージョンのみ。認証とモデル一覧は不明です |
 
+Grok **には公式OSサンドボックスがあります**（`--sandbox read-only`／`--sandbox workspace`）。標準の権限境界を持たないPiとは区別します。アダプターの `native` はそのプロファイルを指定・検証せず、強制解除もしません。親のフルアクセスはDSH側の実行許可条件であり、Grokの権限確認を省略する指示ではありません。制限付きプリセットは、対象バイナリ／OSで実効制限と管理ポリシーとの衝突時の挙動まで検証してから対応扱いにします。フラグを指定した事実だけでは保証しません。[上流の調査](docs/grok-sandbox-upstream-review.md)と[実バイナリの検証](docs/grok-sandbox-investigation.md)を参照してください。制限付きプリセットの統合は保留であり、このPRでは検証済み対応として公開しません。
+
 #### Pi（`pi`）
 
 | | |
