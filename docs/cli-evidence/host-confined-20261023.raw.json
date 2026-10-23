@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-23T06:33:16.693Z",
+  "dshVersion": "0.2.1-rc.2",
+  "platform": "linux",
+  "arch": "x64",
+  "variants": {
+    "codexSandboxBackend": "default"
+  },
+  "binaries": {
+    "grok-build": {
+      "path": "grok-1.0.62-linux-x86_64",
+      "sha256": "2a46d9e4d7ebd7a9cff7f95716714b19dad5f21dd2a497822400b1fb128969aa",
+      "version": "1.0.62",
+      "expectedVersion": "1.0.62"
+    },
+    "pi": {
+      "path": "cli.js",
+      "sha256": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
+      "version": "1.3.0",
+      "expectedVersion": "1.3.0"
+    }
+  },
+  "cases": [
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok ordinary parent reads and edits inside a venv workspace without source-state writes",
+      "status": "pass",
+      "durationMs": 1230
+    },
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok denies ordinary outside-file edits after genuine model/tool execution",
+      "status": "pass",
+      "durationMs": 645
+    },
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok denies writes through an escaping symlink",
+      "status": "pass",
+      "durationMs": 601
+    },
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok observes host hardlink alias semantics without claiming inode isolation",
+      "status": "pass",
+      "durationMs": 586
+    },
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok managed off cannot disable the outer DSH file policy",
+      "status": "pass",
+      "durationMs": 609
+    },
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok missing Host sandbox refuses before model or native startup",
+      "status": "pass",
+      "durationMs": 158
+    },
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok native shell runs inside the same ordinary file boundary",
+      "status": "pass",
+      "durationMs": 1065
+    },
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok cancellation stops the actual confined stream and owned processes",
+      "status": "pass",
+      "durationMs": 587
+    },
+    {
+      "cli": "grok-build",
+      "name": "host-confined Grok real wall timeout stops the confined stream and owned processes",
+      "status": "pass",
+      "durationMs": 2239
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi ordinary parent reads and edits inside a venv workspace without source-state writes",
+      "status": "pass",
+      "durationMs": 1106
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi denies ordinary outside-file edits after genuine model/tool execution",
+      "status": "pass",
+      "durationMs": 589
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi denies writes through an escaping symlink",
+      "status": "pass",
+      "durationMs": 773
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi observes host hardlink alias semantics without claiming inode isolation",
+      "status": "pass",
+      "durationMs": 780
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi native extension starts inside the file boundary",
+      "status": "pass",
+      "durationMs": 775
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi missing Host sandbox refuses before model or native startup",
+      "status": "pass",
+      "durationMs": 164
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi native shell runs inside the same ordinary file boundary",
+      "status": "pass",
+      "durationMs": 1251
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi cancellation stops the actual confined stream and owned processes",
+      "status": "pass",
+      "durationMs": 743
+    },
+    {
+      "cli": "pi",
+      "name": "host-confined Pi real wall timeout stops the confined stream and owned processes",
+      "status": "pass",
+      "durationMs": 2243
+    }
+  ],
+  "totals": {
+    "passes": 18,
+    "failures": 0,
+    "skips": 0
+  }
+}

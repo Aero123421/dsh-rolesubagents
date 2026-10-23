@@ -20,6 +20,8 @@ export const CLAUDE_CODE: CliDescriptor = Object.freeze({
   permissions: Object.freeze([
     Object.freeze({ id: 'read-only', access: 'read-only', confinement: 'tool-scope' }),
     Object.freeze({ id: 'acceptEdits', access: 'workspace-write', confinement: 'tool-scope' }),
+    // Native acceptEdits is not bypassPermissions, but user hooks/MCP/settings can execute arbitrary code.
+    Object.freeze({ id: 'nativeAcceptEdits', access: 'full-access', confinement: 'none', nativeHarness: true }),
     Object.freeze({ id: 'auto', access: 'full-access', confinement: 'none' }),
     Object.freeze({ id: 'bypassPermissions', access: 'full-access', confinement: 'none' }),
   ]),

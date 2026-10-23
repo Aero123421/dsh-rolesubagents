@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-22T10:43:34.697Z",
+  "dshVersion": "0.2.1-rc.2",
+  "platform": "linux",
+  "arch": "x64",
+  "variants": {
+    "codexSandboxBackend": "default"
+  },
+  "binaries": {
+    "codex": {
+      "path": "codex",
+      "sha256": "50ed828f357c655a3c82054d346cab8434f24901f14ec19b8267571bdd008b38",
+      "version": "0.162.0",
+      "expectedVersion": "0.162.0"
+    }
+  },
+  "cases": [
+    {
+      "cli": "codex",
+      "name": "answer reaches the parent; instructions, model and effort reach the model",
+      "status": "pass",
+      "durationMs": 503
+    },
+    {
+      "cli": "codex",
+      "name": "read-only role: a write attempted by the model is blocked",
+      "status": "fail",
+      "durationMs": 593
+    },
+    {
+      "cli": "codex",
+      "name": "workspace-write role (default preset) can write inside the workspace",
+      "status": "fail",
+      "durationMs": 576
+    },
+    {
+      "cli": "codex",
+      "name": "workspace-write from a subdirectory of a git repository cannot write a sibling directory",
+      "status": "fail",
+      "durationMs": 632
+    },
+    {
+      "cli": "codex",
+      "name": "workspace-write ignores a config's extra writable roots (control run without the override writes)",
+      "status": "fail",
+      "durationMs": 995
+    },
+    {
+      "cli": "codex",
+      "name": "a read-only parent sandbox lowers a workspace-write role to read-only",
+      "status": "fail",
+      "durationMs": 601
+    },
+    {
+      "cli": "codex",
+      "name": "interrupt_agent aborts the run and leaves no Codex process behind",
+      "status": "pass",
+      "durationMs": 668
+    },
+    {
+      "cli": "codex",
+      "name": "wall-clock timeout terminates the real streaming Codex process",
+      "status": "pass",
+      "durationMs": 2220
+    },
+    {
+      "cli": "codex",
+      "name": "a rejected API key yields a safe auth diagnostic",
+      "status": "pass",
+      "durationMs": 481
+    },
+    {
+      "cli": "codex",
+      "name": "an unforwarded provider key and an upstream 500 map to auth and service",
+      "status": "pass",
+      "durationMs": 719
+    },
+    {
+      "cli": "codex",
+      "name": "probe: version, sign-in state and model list without a model call",
+      "status": "pass",
+      "durationMs": 302
+    }
+  ],
+  "totals": {
+    "passes": 6,
+    "failures": 5,
+    "skips": 0
+  },
+  "provenance": {
+    "sourceArtifact": "artifacts/codex-0162-default-strict-20261022.json",
+    "pathRedaction": "Executable paths reduced to basename; version, SHA256 and outcomes unchanged.",
+    "qualification": "Raw mixed-preset outcomes, not complete CompatibilityEvidence."
+  }
+}

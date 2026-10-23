@@ -572,21 +572,51 @@ describe('CLI connection test', () => {
   })
 
   it.each([
-    ['a Host without the probe method', async () => fail('gateway/invocation-unavailable')],
-    ['a Host without the Remote service', async () => fail('gateway/method-unavailable')],
-    ['a client without the connection service', async () => Promise.reject(new ProbeUnavailableError())],
-    ['a Host without the Gateway route', async () => Promise.reject(new Error('transport failure: HTTP 404'))],
-  ])('hides the test for %s', async (_name, answer) => {
+    ['a Host without the probe method', async () => fail('gateway/invocation-unavailable'), 'remote-unavailable'],
+    ['a Host without the Remote service', async () => fail('gateway/method-unavailable'), 'remote-unavailable'],
+    ['a missing service', async () => fail('gateway/service-unavailable'), 'remote-unavailable'],
+    [
+      'a client without the connection service',
+      async () => Promise.reject(new ProbeUnavailableError()),
+      'connection-unavailable',
+    ],
+    [
+      'an ambiguous missing endpoint',
+      async () => Promise.reject(new Error('transport failure: HTTP 404')),
+      'endpoint-unavailable',
+    ],
+    ['host authentication', async () => Promise.reject(new Error('transport failure: HTTP 401')), 'host-auth'],
+    ['host authorization', async () => Promise.reject(new Error('transport failure: HTTP 403')), 'host-auth'],
+    ['structured access denial', async () => fail('remote-access/denied'), 'host-auth'],
+    ['transport failure', async () => Promise.reject(new Error('transport failure: HTTP 503')), 'transport'],
+    ['invalid JSON', async () => Promise.reject(new SyntaxError('bad JSON')), 'malformed'],
+    [
+      'invalid carrier envelope',
+      async () => Promise.reject(new TypeError('connection: invalid server-response envelope')),
+      'malformed',
+    ],
+    [
+      'correlation mismatch',
+      async () => Promise.reject(new Error('rpcId mismatch for rolesubagentsCli/probe')),
+      'malformed',
+    ],
+    ['withdrawn definition', async () => fail('gateway/definition-unavailable'), 'remote-unavailable'],
+    ['invalid envelope', async () => null, 'malformed'],
+    ['invalid error envelope', async () => ({ ok: false, error: null }), 'malformed'],
+  ])('distinguishes %s and allows retry', async (_name, answer, issue) => {
     const probe = vi.fn<ProbeCall>(answer as ProbeCall)
     const { controller } = setup({}, 'en', probe)
     controller.probeCli('agy')
     await flushAll()
-    expect(controller.getSnapshot().probes.available).toBe(false)
-    expect(controller.getSnapshot().probes.clis.agy).toEqual({ status: 'idle' })
-    controller.probeCli('agy')
-    expect(probe).toHaveBeenCalledTimes(1)
-    controller.resetProbes()
     expect(controller.getSnapshot().probes.available).toBe(true)
+    expect(controller.getSnapshot().probes.clis.agy).toEqual({ status: 'error', issue })
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
+    probe.mockResolvedValueOnce(probeAnswer('agy'))
+    controller.probeCli('agy')
+    await flushAll()
+    expect(probe).toHaveBeenCalledTimes(2)
+    expect(controller.getSnapshot().probes.clis.agy.status).toBe('ready')
+    expect(controller.getSnapshot().canEdit).toBe(true)
   })
 
   it.each([

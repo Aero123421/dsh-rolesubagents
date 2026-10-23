@@ -484,6 +484,8 @@ describe('runs on an external CLI', () => {
       'Claude Code',
       'Antigravity',
       'OpenCode',
+      'Grok Build',
+      'Pi',
     ])
     fireEvent.change(runsOn, { target: { value: 'codex' } })
     const editor = editorOf('worker')
@@ -539,6 +541,10 @@ describe('runs on an external CLI', () => {
     expect([...permission.options].map(option => [option.textContent, option.disabled])).toEqual([
       ['Read-only — no file changes', false],
       ['Edit files (no shell) — edits in the workspace', true],
+      [
+        'Native accept-edits (keep settings and extensions) — requires full-access parent; native CLI checks apply',
+        true,
+      ],
       ['Auto (classifier) — no restrictions', true],
       ['Bypass permissions — no restrictions', true],
     ])
@@ -557,6 +563,21 @@ describe('runs on an external CLI', () => {
     expect(permission.value).toBe('read-only')
     expect(screen.queryByText('Fix these before saving:')).toBeNull()
   })
+
+  it.each(['grok-build', 'pi'])(
+    'selects the Host-confined workspace preset by default for %s, not native full access',
+    async cli => {
+      await mount()
+      fireEvent.click(button('Edit role explorer'))
+      fireEvent.click(screen.getByLabelText('Block file writes for this role'))
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: cli } })
+      const permission = select(screen.getByLabelText('Permission'))
+      expect(permission.value).toBe('workspace-write')
+      expect([...permission.options].map(option => option.value)).toEqual(['workspace-write', 'native'])
+      expect(screen.getByText(/Host DSH sandbox/)).toBeTruthy()
+      expect(screen.getByText(/static API-key credentials/)).toBeTruthy()
+    },
+  )
 
   it('asks OpenCode for a provider and a model, with suggestions from the connection test', async () => {
     const probe = fakeProbe()
@@ -684,6 +705,10 @@ describe('external CLIs section', () => {
     expect(
       cardOf('Codex').getByText('Found: /usr/local/bin/codex · Version 0.200.0 · Signed in · 2 models listed'),
     ).toBeTruthy()
+    expect(cardOf('Codex').getByText('Compatibility verification records')).toBeTruthy()
+    expect(cardOf('Codex').getByText('Verification scope unknown')).toBeTruthy()
+    expect(cardOf('Codex').queryByText('Tested for this exact scope')).toBeNull()
+    expect(cardOf('Codex').getByText(/Version detection alone does not verify/)).toBeTruthy()
     fireEvent.click(button('Test connection to Antigravity'))
     fireEvent.click(button('Test connection to OpenCode'))
     fireEvent.click(button('Test connection to Claude Code'))
@@ -697,18 +722,37 @@ describe('external CLIs section', () => {
     expect(probe).toHaveBeenCalledWith('codex', expect.any(AbortSignal))
   })
 
-  it('reports a failed test, and hides the button when the Host has no probe', async () => {
+  it('distinguishes transport and Remote failures without hiding retries or other cards', async () => {
     const probe = fakeProbe()
     probe.mockRejectedValueOnce(new Error('network down'))
     probe.mockResolvedValueOnce(fail('gateway/invocation-unavailable'))
     await mount({ probe })
     fireEvent.click(button('Test connection to Codex'))
     await settle()
-    expect(cardOf('Codex').getByText('The test could not run. Check the connection and try again.')).toBeTruthy()
+    expect(cardOf('Codex').getByText(/Diagnostics could not reach the Host reliably/)).toBeTruthy()
     fireEvent.click(button('Test connection to Codex'))
     await settle()
-    expect(screen.queryByRole('button', { name: /Test connection/ })).toBeNull()
-    expect(screen.getByText('The connection test is not available on this Host.')).toBeTruthy()
+    expect(cardOf('Codex').getByText(/diagnostic Remote service or method is unavailable/)).toBeTruthy()
+    expect(button('Test connection to Codex')).toBeTruthy()
+    expect(button('Test connection to Claude Code')).toBeTruthy()
+    fireEvent.click(button('Test connection to Codex'))
+    await settle()
+    expect(cardOf('Codex').getByText(/Found:/)).toBeTruthy()
+  })
+
+  it.each([
+    [new Error('transport failure: HTTP 401 secret-token'), /DSH のサインイン・アクセス権限/],
+    [new Error('transport failure: HTTP 404 secret-token'), /この応答だけでは区別できません/],
+    [new TypeError('connection: invalid server-response envelope secret-token'), /診断応答が不正/],
+  ])('shows localized diagnostic failures without leaking raw errors', async (error, expected) => {
+    const probe = fakeProbe().mockRejectedValueOnce(error)
+    await mount({ locale: 'ja', probe })
+    fireEvent.click(screen.getByRole('button', { name: 'Codex への接続をテスト' }))
+    await settle()
+    expect(cardOf('Codex').getByText(expected)).toBeTruthy()
+    expect(screen.queryByText(/secret-token/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Codex への接続をテスト' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'ロール worker を編集' })).toBeTruthy()
   })
 
   it('shows the CLI editor and section in Japanese', async () => {

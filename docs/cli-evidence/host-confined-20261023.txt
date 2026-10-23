@@ -1,0 +1,52 @@
+
+> dsh-rolesubagents@0.2.1 check:cli <checkout>
+> node scripts/check-cli.mjs grok-build pi
+
+DSH runtime: /usr/lib/node_modules/@deepseek-ai/dsh
+BINARY grok-build: grok-1.0.62-linux-x86_64; version 1.0.62
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"},{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS grok-build: host-confined Grok ordinary parent reads and edits inside a venv workspace without source-state writes (1230 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS grok-build: host-confined Grok denies ordinary outside-file edits after genuine model/tool execution (645 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS grok-build: host-confined Grok denies writes through an escaping symlink (601 ms)
+    HARDLINK OBSERVATION Grok: native replacement preserved outside bytes; not kernel inode-isolation evidence
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS grok-build: host-confined Grok observes host hardlink alias semantics without claiming inode isolation (586 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS grok-build: host-confined Grok managed off cannot disable the outer DSH file policy (609 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[]}
+PASS grok-build: host-confined Grok missing Host sandbox refuses before model or native startup (158 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"},{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS grok-build: host-confined Grok native shell runs inside the same ordinary file boundary (1065 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS grok-build: host-confined Grok cancellation stops the actual confined stream and owned processes (587 ms)
+    log: rolesubagents: Grok Build: Warning: DSH reports partial file-effect sandbox enforcement on this host. Some file operations are not covered; network access and process visibility are not restricted by this policy.
+    log: rolesubagents: Grok Build run 0cef3814-1958-49e3-8411-cc751c6bcc11 ended with error (Subagent failure (CLI: Grok Build; category: timeout))
+    HOST_CONFINEMENT_METADATA {"cli":"grok-build","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS grok-build: host-confined Grok real wall timeout stops the confined stream and owned processes (2239 ms)
+BINARY pi: cli.js; version 1.3.0
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"},{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS pi: host-confined Pi ordinary parent reads and edits inside a venv workspace without source-state writes (1106 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS pi: host-confined Pi denies ordinary outside-file edits after genuine model/tool execution (589 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS pi: host-confined Pi denies writes through an escaping symlink (773 ms)
+    HARDLINK OBSERVATION Pi: existing alias shares outside bytes; no inode-isolation qualification
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS pi: host-confined Pi observes host hardlink alias semantics without claiming inode isolation (780 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS pi: host-confined Pi native extension starts inside the file boundary (775 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[]}
+PASS pi: host-confined Pi missing Host sandbox refuses before model or native startup (164 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"},{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS pi: host-confined Pi native shell runs inside the same ordinary file boundary (1251 ms)
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS pi: host-confined Pi cancellation stops the actual confined stream and owned processes (743 ms)
+    log: rolesubagents: Pi: Warning: DSH reports partial file-effect sandbox enforcement on this host. Some file operations are not covered; network access and process visibility are not restricted by this policy.
+    log: rolesubagents: Pi run ba9a5227-4e11-41f4-9593-aa72c3c334bb ended with error (Subagent failure (CLI: Pi; category: timeout; exit code: 0))
+    HOST_CONFINEMENT_METADATA {"cli":"pi","calls":[{"mode":"workspace-write","workspaceRoot":"<workspace>","runner":"landlock-run","enforcement":"partial"}]}
+PASS pi: host-confined Pi real wall timeout stops the confined stream and owned processes (2243 ms)
+REPORT <checkout>/artifacts/host-confined-metadata-final-20261023.json
+
+18 passed, 0 failed, 0 skipped

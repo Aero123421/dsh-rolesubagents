@@ -13,9 +13,9 @@
  * through the `connection` service. That service is deliberately NOT in
  * `inject`: Cordis treats every listed name as required, so a client without it
  * would never load the page at all. It is read lazily with `ctx.get` (Cordis'
- * reflect mixin, as DSH's own ui-settings-general does) when a test runs; when
- * it is missing, or the Host does not export the method, the controller hides
- * the button.
+ * reflect mixin, as DSH's own ui-settings-general does) when a test runs.
+ * Missing capabilities and failed diagnostics remain retryable, without
+ * disabling role editing or making claims about whether a CLI is installed.
  */
 
 import type { CliId } from '../shared/cli/index.ts'
@@ -40,12 +40,11 @@ function connectionOf(ctx: DshClientContext): ConnectionLike | undefined {
 }
 
 /**
- * The connection test caller, or undefined when this DSH build cannot read optional services.
+ * The connection test caller. Missing services are reported per attempt, so retry stays available.
  * @param ctx - the plugin context.
  * @returns a caller that reads `connection` on every call.
  */
-export function probeCaller(ctx: DshClientContext): ProbeCall | undefined {
-  if (typeof ctx.get !== 'function') return undefined
+export function probeCaller(ctx: DshClientContext): ProbeCall {
   return async (cli: CliId, signal: AbortSignal): Promise<RemoteResult<unknown>> => {
     const connection = connectionOf(ctx)
     if (connection === undefined) throw new ProbeUnavailableError()

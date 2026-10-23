@@ -181,6 +181,30 @@ export interface SandboxPolicyPort {
   resolve(request?: { session?: SessionPort }): { readonly mode?: string; readonly workspaceRoot?: string }
 }
 
+/** Runner-owned failure evidence returned by DSH's process sandbox. */
+export interface SandboxRunnerFailureRulePort {
+  readonly allowedExitCodes?: readonly number[]
+  readonly fatalSignatures: readonly string[]
+  readonly informationalLines?: readonly string[]
+}
+
+/** Exact wrapped argv and enforcement scope from DSH's existing sandbox service. */
+export interface ConfinedArgvPort {
+  readonly argv: readonly string[]
+  readonly enforcement: 'full' | 'partial'
+  readonly denialSignatures: readonly string[]
+  readonly runnerFailureRules: readonly SandboxRunnerFailureRulePort[]
+}
+
+/** Optional DSH file-effect confinement; not a network/process-visibility sandbox. */
+export interface SandboxPort {
+  confine(
+    argv: readonly string[],
+    policy: { readonly mode: 'workspace-write'; readonly workspaceRoot: string },
+    signal?: AbortSignal,
+  ): Promise<ConfinedArgvPort>
+}
+
 /** Exit facts of one closed process. */
 export interface SubprocessOutcomePort {
   exitCode: number | null
@@ -248,6 +272,7 @@ export interface HostContext {
   get(name: 'storageDomain'): StorageDomainPort | undefined
   get(name: 'subprocess'): SubprocessPort | undefined
   get(name: 'sandboxPolicy'): SandboxPolicyPort | undefined
+  get(name: 'sandbox'): SandboxPort | undefined
   get(name: string): unknown
   on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown

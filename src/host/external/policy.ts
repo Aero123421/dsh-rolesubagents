@@ -82,7 +82,18 @@ export function effectivePermission(
   const level = presetAccess(descriptor, runner.permission)
   if (level === undefined) throw new Error(`unknown ${descriptor.displayName} permission "${runner.permission}"`)
   if (ACCESS_ORDER[level] <= ACCESS_ORDER[ceiling]) return { preset: runner.permission, access: level, lowered: false }
-  return { preset: descriptor.presetForAccess[ceiling], access: ceiling, lowered: true }
+  if (descriptor.permissions.find(preset => preset.id === runner.permission)?.nativeHarness) {
+    throw new Error(
+      `${descriptor.displayName}'s native harness cannot guarantee ${ceiling}; choose a supported restricted preset or explicitly use a full-access parent. No permissions were changed`,
+    )
+  }
+  const preset = descriptor.presetForAccess[ceiling]
+  if (preset === undefined || presetAccess(descriptor, preset) !== ceiling) {
+    throw new Error(
+      `${descriptor.displayName} does not provide a verified ${ceiling} preset; this delegation cannot preserve the parent's permission ceiling`,
+    )
+  }
+  return { preset, access: ceiling, lowered: true }
 }
 
 /**

@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "id": "pi-1.3.0-e79626f2dd6f-2026-10-22T10:54:07.610Z",
+  "scope": {
+    "cli": "pi",
+    "cliVersion": "1.3.0",
+    "dshVersion": "0.2.1-rc.2",
+    "platform": "linux",
+    "arch": "x64",
+    "preset": "native",
+    "protocol": "rpc"
+  },
+  "recordedAt": "2026-10-22T10:54:07.610Z",
+  "source": {
+    "kind": "real-cli-local-fake-model",
+    "command": "DSH_CHECKOUT=/usr/lib/node_modules/@deepseek-ai/dsh CHECK_CLI_VERSION_GROK_BUILD=1.0.62 CHECK_CLI_VERSION_PI=1.3.0 CHECK_CLI_REPORT=artifacts/native-evidence-20261022-1956.json pnpm check:cli grok-build pi"
+  },
+  "suites": [
+    {
+      "id": "startup-completion",
+      "status": "pass",
+      "cases": [
+        {
+          "id": "native Pi returns final text and preserves instructions and configured provider",
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "cancel",
+      "status": "pass",
+      "cases": [
+        {
+          "id": "native Pi cancellation stops streaming and owned descendants",
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "timeout",
+      "status": "pass",
+      "cases": [
+        {
+          "id": "native Pi wall-clock timeout terminates streaming process and owned descendants",
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "protocol",
+      "status": "pass",
+      "cases": [
+        {
+          "id": "native Pi retains extensions and handles prompt disposition handled",
+          "status": "pass"
+        },
+        {
+          "id": "native Pi tool loop keeps only final answer",
+          "status": "pass"
+        },
+        {
+          "id": "native Pi max token limit is not success",
+          "status": "pass"
+        },
+        {
+          "id": "native Pi extension dialogs are denied without approving",
+          "status": "pass"
+        },
+        {
+          "id": "native Pi parallel runs settle independently",
+          "status": "pass"
+        },
+        {
+          "id": "native Pi real stream tolerates synthetic unknown and malformed line injection",
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "permission-boundary",
+      "status": "pass",
+      "cases": [
+        {
+          "id": "native Pi extension dialogs are denied without approving",
+          "status": "pass"
+        },
+        {
+          "id": "restricted parent refuses native Pi before extension startup",
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "configuration-auth",
+      "status": "pass",
+      "cases": [
+        {
+          "id": "native Pi returns final text and preserves instructions and configured provider",
+          "status": "pass"
+        },
+        {
+          "id": "native Pi retains extensions and handles prompt disposition handled",
+          "status": "pass"
+        },
+        {
+          "id": "native Pi reports provider errors without leaking raw output",
+          "status": "pass"
+        },
+        {
+          "id": "native Pi missing key is diagnosed before inference",
+          "status": "pass"
+        }
+      ]
+    }
+  ]
+}

@@ -128,6 +128,8 @@ const en = {
   'ed.permissionReadOnly': 'Read-only roles can use only a read-only preset.',
   'ed.permissionOption': '{name} — {access}',
   'confinement.os-sandbox': "Enforced by {cli}'s sandbox, which also covers its shell commands.",
+  'confinement.host-sandbox':
+    'Runs the entire {cli} CLI through the Host DSH sandbox, allowing workspace and sandbox temporary writes. Older kernels may provide partial enforcement, reported in the result. Uses private per-run settings/model state and static API-key credentials; browser sign-ins and full global resources require the native preset. This is the same path-based file policy as parent DSH tools: existing hard-link aliases can share writes across roots. Network/process access is not restricted.',
   'confinement.tool-scope': "Enforced by {cli}'s own tool permissions (no operating-system sandbox).",
   'confinement.tool-scope-write':
     "Enforced by {cli}'s own tool permissions (no operating-system sandbox), so a delegation is refused when its working directory contains a symbolic link that leads outside the workspace.",
@@ -152,8 +154,17 @@ const en = {
 
   'preset.read-only': 'Read-only',
   'preset.workspace-write': 'Workspace write',
+  'preset.host-workspace': 'DSH-confined workspace (private CLI state)',
   'preset.danger-full-access': 'Full access (no sandbox)',
   'preset.acceptEdits': 'Edit files (no shell)',
+  'preset.nativeAcceptEdits': 'Native accept-edits (keep settings and extensions)',
+  'preset.native': 'Native harness (keep settings and extensions)',
+  'confinement.native':
+    "Keeps {cli}'s native tools, settings and extensions. The adapter does not select or verify an OS sandbox, so an explicitly full-access parent is required; native CLI restrictions may still apply. It does not enable bypass-permissions. No whole-workspace scan is required.",
+  'ed.readOnlyHelp.grok-build':
+    'Grok Build provides official OS sandbox profiles, but this adapter has not verified their effective restrictions. Its native preset does not select a sandbox, so read-only roles are currently unsupported.',
+  'ed.readOnlyHelp.pi':
+    'Pi has no built-in OS permission boundary for arbitrary native extensions. Selecting read tools alone does not confine extension code, so read-only roles are unsupported.',
   'preset.auto': 'Auto (classifier)',
   'preset.bypassPermissions': 'Bypass permissions',
   'preset.edit-files': 'Edit files (no shell)',
@@ -161,6 +172,7 @@ const en = {
   'access.read-only': 'no file changes',
   'access.workspace-write': 'edits in the workspace',
   'access.full-access': 'no restrictions',
+  'access.native': 'requires full-access parent; native CLI checks apply',
 
   'clis.heading': 'External CLIs',
   'clis.hint':
@@ -188,6 +200,19 @@ const en = {
   'probe.noSubprocess': 'This Host cannot start programs for plugins, so CLI roles cannot run here.',
   'probe.checksFailed': 'The version and sign-in checks did not answer.',
   'probe.error': 'The test could not run. Check the connection and try again.',
+  'probe.connection-unavailable':
+    'The Web connection service is unavailable or still loading. Retry when connected; this does not mean the CLI is missing.',
+  'probe.remote-unavailable':
+    'The Host reports that the diagnostic Remote service or method is unavailable. Check plugin compatibility or retry after loading. Role settings and delegation are independent.',
+  'probe.endpoint-unavailable':
+    'The diagnostic endpoint returned HTTP 404. The Gateway or Remote endpoint may be unavailable; this response cannot distinguish them. Check compatibility and retry.',
+  'probe.host-auth':
+    'The Host denied access to diagnostics. Check your DSH sign-in or access permissions, not the CLI credentials, then retry.',
+  'probe.transport':
+    'Diagnostics could not reach the Host reliably. Check the connection and retry; the CLI installation has not been determined.',
+  'probe.malformed': 'The Host returned an invalid diagnostic response. Check Web/Host/plugin compatibility and retry.',
+  'probe.remote-error':
+    'The Host diagnostic service reported an error. Retry or check Host logs. This does not establish that the CLI is missing.',
 
   'foot.clean': 'No changes',
   'foot.unsaved': 'Unsaved changes',
@@ -354,6 +379,8 @@ const ja: Record<Key, string> = {
   'ed.permissionReadOnly': '読み取り専用のロールでは、読み取り専用のプリセットだけを選べます。',
   'ed.permissionOption': '{name} — {access}',
   'confinement.os-sandbox': '{cli} のサンドボックスで制限します（シェルコマンドも対象です）。',
+  'confinement.host-sandbox':
+    '{cli} CLI全体をホストDSHのsandbox内で実行し、ワークスペースとsandboxの一時領域への書き込みを許可します。古いカーネルでは部分施行となり結果に明記します。実行専用の設定・モデル情報と静的APIキーを利用し、ブラウザ認証や完全なグローバル資源はnativeが必要です。親DSHと同じパス単位の権限であり、既存のハードリンクは境界外の同一ファイルと書き込みを共有し得ます。ネットワーク・プロセスは制限しません。',
   'confinement.tool-scope': '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。',
   'confinement.tool-scope-write':
     '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。そのため、作業ディレクトリにワークスペースの外を指すシンボリックリンクがあると、委譲を拒否します。',
@@ -378,8 +405,17 @@ const ja: Record<Key, string> = {
 
   'preset.read-only': '読み取り専用',
   'preset.workspace-write': 'ワークスペースへの書き込み',
+  'preset.host-workspace': 'DSH制限付きワークスペース（実行専用CLI状態）',
   'preset.danger-full-access': 'フルアクセス（サンドボックスなし）',
   'preset.acceptEdits': 'ファイル編集のみ（シェルなし）',
+  'preset.nativeAcceptEdits': 'ネイティブ編集（設定・拡張を維持）',
+  'preset.native': 'ネイティブハーネス（設定・拡張を維持）',
+  'confinement.native':
+    '{cli} 本来のツール・設定・拡張を維持します。アダプターはOSサンドボックスを指定・検証しないため、明示的にフルアクセスにした親が必要です。CLI側の制限が適用される場合もあります。権限確認の一括省略は有効にせず、ワークスペース全体の走査も行いません。',
+  'ed.readOnlyHelp.grok-build':
+    'Grok Build には公式OSサンドボックスがありますが、このアダプターでは実効制限を未検証です。native はサンドボックスを指定しないため、現在は読み取り専用ロールに未対応です。',
+  'ed.readOnlyHelp.pi':
+    'Pi は任意のネイティブ拡張を隔離する標準のOS権限境界を持ちません。読み取りツールだけを選んでも拡張コードを制限できないため、読み取り専用ロールに未対応です。',
   'preset.auto': '自動判定',
   'preset.bypassPermissions': '権限確認をすべて省略',
   'preset.edit-files': 'ファイル編集のみ（シェルなし）',
@@ -387,6 +423,7 @@ const ja: Record<Key, string> = {
   'access.read-only': 'ファイルを変更しない',
   'access.workspace-write': 'ワークスペース内を編集',
   'access.full-access': '制限なし',
+  'access.native': '親はフルアクセス必須・CLI本来の権限設定に従う',
 
   'clis.heading': '外部 CLI',
   'clis.hint':
@@ -414,6 +451,19 @@ const ja: Record<Key, string> = {
   'probe.noSubprocess': 'このホストではプラグインからプログラムを起動できないため、CLI のロールは実行できません。',
   'probe.checksFailed': 'バージョンとサインイン状態の確認に応答がありませんでした。',
   'probe.error': 'テストを実行できませんでした。接続を確認して、もう一度お試しください。',
+  'probe.connection-unavailable':
+    'Web の接続サービスが未提供、または読み込み中です。接続後に再試行してください。CLI の未検出を意味するものではありません。',
+  'probe.remote-unavailable':
+    'ホストの診断用 Remote サービスまたはメソッドを利用できません。プラグインの互換性を確認するか、読み込み後に再試行してください。役割設定・委任とは独立した診断です。',
+  'probe.endpoint-unavailable':
+    '診断先が HTTP 404 を返しました。Gateway または Remote の経路が利用できない可能性がありますが、この応答だけでは区別できません。互換性を確認して再試行してください。',
+  'probe.host-auth':
+    'ホストへの診断アクセスが拒否されました。CLI の認証ではなく、DSH のサインイン・アクセス権限を確認して再試行してください。',
+  'probe.transport':
+    'ホストとの診断通信に失敗しました。接続を確認して再試行してください。CLI のインストール状態は未確認です。',
+  'probe.malformed': 'ホストの診断応答が不正です。Web・ホスト・プラグインの互換性を確認して再試行してください。',
+  'probe.remote-error':
+    'ホストの診断サービスがエラーを返しました。再試行するかホストのログを確認してください。CLI がないとは断定できません。',
 
   'foot.clean': '変更はありません',
   'foot.unsaved': '未保存の変更があります',
@@ -600,6 +650,7 @@ export function confinementHelp(t: Translator, cli: CliId, preset: string): stri
   const found = descriptor.permissions.find(entry => entry.id === preset)
   if (found === undefined) return ''
   const name = descriptor.displayName
+  if (found.nativeHarness) return t('confinement.native', { cli: name })
   if (found.confinement !== 'tool-scope') return t(`confinement.${found.confinement}`, { cli: name })
   if (found.access !== 'workspace-write') return t('confinement.tool-scope', { cli: name })
   const key =

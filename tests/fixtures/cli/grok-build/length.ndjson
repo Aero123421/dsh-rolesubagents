@@ -1,0 +1,3 @@
+{"type":"text","data":"GROK_FAK"}
+{"type":"text","data":"E_FINAL ✓"}
+{"type":"error","message":"Internal error: {\n  \"message\": \"response truncated by max_tokens\",\n  \"error_kind\": \"max_tokens_truncation\"\n}","cwd":"<workspace>"}

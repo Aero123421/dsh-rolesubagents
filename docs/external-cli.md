@@ -1,7 +1,7 @@
 # External CLI runners: design notes for maintainers
 
 This document describes how a role with a `runner` runs its child on a host-installed coding-agent CLI
-(Codex CLI, Claude Code, Antigravity CLI `agy`, OpenCode), and what to touch when adding or updating a CLI.
+(Codex CLI, Claude Code, Antigravity CLI `agy`, OpenCode, Grok Build `grok`, Pi `pi`), and what to touch when adding or updating a CLI.
 User-facing behaviour is documented in the README ("External CLI runners").
 
 ## Principles
@@ -13,7 +13,7 @@ User-facing behaviour is documented in the README ("External CLI runners").
    settlement and diagnostics are written once in `src/host/external/`. Adapters are pure functions plus a small
    synchronous session, unit-testable from recorded transcripts.
 3. **Fail closed.** A child never gets more access than its role's preset and the delegating parent allow. When
-   in doubt (unknown preset, unknown access) adapters pick the read-only behaviour.
+   in doubt, refuse unsupported access. A CLI without a verified read-only preset must not fabricate one. Explicit native harnesses require a full-access parent. Grok/Pi default workspace-write instead requires the existing DSH Host sandbox; never silently substitute one harness for the other.
 4. **No secrets in config.** The CLIs use their own sign-in, or the user forwards variable *names*
    (`envPassthrough`) whose values are read from the Host process at spawn time.
 5. **Version-tolerant parsing.** Unknown events and non-JSON lines are ignored; success is decided only from
@@ -39,6 +39,7 @@ src/host/
     workspace.ts        workspace integrity checks before tool-scope runs (git top-level, escaping links, startup code)
     provider.ts         one ephemeral DSH provider per delegation
     engine.ts           startExternalRun, createProbeRunner, toSubagentResult
+    private-state.ts    confined Node bootstrap and bounded settings/static-auth snapshots
     env.ts              child environment composition
     lines.ts            LineSplitter (stdout) and ByteTail (stderr)
     diagnostic.ts       fixed-vocabulary diagnostics
@@ -54,18 +55,18 @@ src/host/
 `CliDescriptor` is pure data: `id`, `displayName`, default `executable` (PATH name), `needsProvider` (OpenCode:
 model is provider + model, both required), `modelSuggestions` (static fallback for the editor), `efforts` (allowed
 ids, or `[]`), `effortFreeText` (any non-empty effort accepted, OpenCode), `permissions` (presets in display order,
-each with an `AccessLevel` and a `confinement`), `defaultPermission`, `presetForAccess` (one preset per access level,
+each with an `AccessLevel`, a `confinement`, and optional `nativeHarness`), `defaultPermission`, `presetForAccess` (a partial mapping containing only supported access levels,
 used to lower a preset to the ceiling and to switch a read-only role), `instructionsChannel` (documentation only),
 `toolScope` and the optional `startupCodeDirs` (see [Workspace checks](#workspace-checks)).
 
 `confinement` says what enforces a preset: `os-sandbox` (Codex: an OS sandbox that also covers shell commands and
-resolves symbolic links), `tool-scope` (the CLI's own tool permissions: Claude Code, Antigravity, OpenCode), or
+resolves symbolic links), `host-sandbox` (Grok/Pi: existing DSH `ctx.sandbox.confine`, the same path-based file policy as parent Bash, with the caveats below), `tool-scope` (the CLI's own tool permissions: Claude Code, Antigravity, OpenCode), or
 `none` (full access). The editor shows it in the permission field's help. `toolScope` is how far a `tool-scope`
 preset's file tools reach: `cwd`, or `git-worktree` (OpenCode: the whole worktree around the directory).
 
 Access levels are ordered `read-only < workspace-write < full-access`. Normalization (`runner.ts`) relies on the
 descriptor: unknown permission → `defaultPermission`; read-only role with a wider preset →
-`presetForAccess['read-only']`; effort not in `efforts` (unless free text) → cleared; `needsProvider` with a missing
+`presetForAccess['read-only']` when present, otherwise retain native settings but switch the incompatible role off; effort not in `efforts` (unless free text) → cleared; `needsProvider` with a missing
 half → cleared and the role switched off; `model`, `provider` and `effort` must match `RUNNER_NAME_PATTERN` (letters,
 digits, `. _ : @ / + - [ ]`, no leading `-`, at most 128 characters), otherwise `invalid-runner-model` /
 `invalid-runner-effort` (this keeps OpenCode `{env:…}` / `{file:…}` references and option-like values out). Every rule
@@ -97,13 +98,14 @@ read-only roles, and the one-shot sentence), the `task` (the delegate prompt) an
 | `envJson` | Variables whose value is JSON built by the engine (OpenCode's `OPENCODE_CONFIG_CONTENT`): string leaves that start with a placeholder are substituted, then the value is serialized with `$`, `{`, `}` inside strings as `\u` escapes. A temp path with backslashes cannot corrupt it, and no data can form a placeholder or an `{env:…}` reference |
 | `envRemovePrefixes` | Inherited names with these prefixes are removed (Claude Code: `CLAUDE_CODE_`), unless forwarded |
 | `files` | Files created before spawn and removed after exit (also on failure or cancel). Keys start with `${RUN_DIR}/` or `${HOME}/` |
+| `privateState` | Optional Grok/Pi private-state bootstrap; requires `host-sandbox` and no separate preflight. Reads and writes happen inside confinement, not in the Host |
 | `preflight` | Optional cheap command; a non-zero exit or timeout refuses the start with its `category` |
 | `cancelGraceMs` | Wait between `session.cancel()` and the engine's terminate |
 
 Placeholders, substituted by the engine only in argv elements and `envJson` string leaves that *start* with a
 placeholder, in env values, and in file keys (never in file contents or the task):
 
-- `${RUN_DIR}`: a private 0700 temp directory per run, created only when the plan mentions it, removed afterwards;
+- `${RUN_DIR}`: a private 0700 temp directory per run, created when the plan mentions it or requests private state, removed afterwards;
 - `${HOME}`: the child's HOME (the overlay's `HOME`, else the Host's);
 - `${SECRET}`: a fresh 32-hex random value per run (OpenCode's local server password).
 
@@ -147,7 +149,7 @@ write the CLI's state.
      else the parent's sandbox mode (`read-only` → read-only, `danger-full-access` → full-access, anything else or
      no service → workspace-write), plus the parent's `workspaceRoot`;
    - `effectivePermission(descriptor, runner, ceiling)`: the role's preset when its level fits, else
-     `presetForAccess[ceiling]` (logged). Never widened;
+     `presetForAccess[ceiling]` for a legacy preset when supported (logged). Missing mappings refuse. An explicit `nativeHarness` preset above the ceiling refuses instead of silently changing harness. Never widened;
    - `assertExplicitCwdCheckable(args.cwd, access, workspaceRoot)`: an explicit `cwd` cannot be checked when the
      workspace root is unknown (no `sandboxPolicy`, a throwing one, or no root), so it is refused unless the run is
      read-only or full access (where containment does not apply). Without `cwd`, DSH's default is kept.
@@ -171,7 +173,10 @@ startExternalRun                       (every await checks the delegation signal
   subprocess service? → cwd check → workspace checks → plan + session (nonce)
   → placeholders (${SECRET}, ${HOME}, ${RUN_DIR} if mentioned) → env (composeEnv) → argv
   → resolveExecutable (settings path or descriptor name; not found → "<CLI> was not found …")
-  → write files → pre-flight → spawn
+  → prepare private-state bootstrap when requested (no config reads in Host)
+  → write ordinary plan files; confine any pre-flight → pre-flight
+  → confine exact CLI/bootstrap argv for host-sandbox → spawn
+    (private-state snapshots/plan files are created inside the confined bootstrap)
 superviseRun
   session.start(io) → stdout lines → session.line … → exit → drain (≤ 2 s)
   → session.finish → toSubagentResult → files removed → untracked
@@ -183,6 +188,7 @@ superviseRun
   2. inherited names with an adapter prefix removed;
   3. the adapter overlay;
   4. forwarded names copied from the Host environment. These override removals but never an explicit adapter value.
+- **Host confinement**: see [Host-confined Grok/Pi](#host-confined-grokpi). The spawn uses the returned confined argv for `host-sandbox`; other presets use the original exact argv.
 - **Spawn**: `ctx.subprocess.spawn({ argv: [resolved, ...argv], cwd, stdio: pipes, graceMs: 3000, env })`. DSH's
   local runtime starts the child detached (own session), so CLIs have no controlling TTY.
 - **Pre-flight**: runs through `createProbeRunner` (stdout capped at 1 MiB, stderr at 64 KiB, 1 s TERM→KILL grace);
@@ -237,8 +243,24 @@ only. The checks only read the filesystem (no git binary).
   - **escaping symbolic links**: a bounded walk of the `cwd` tree (including `.git` and internal directory links, with each real directory visited once; budget
     `SCAN_MAX_ENTRIES` = 100 000 entries and `SCAN_MAX_MS` = 2 s, exceeding it refuses — fail closed) for a link
     whose target (for a dangling link: the path it would create) is outside the real path of the parent's workspace
-    root (else of `cwd`). Read-only runs and `os-sandbox` presets are not scanned. Residual risk: hard links are
+    root (else of `cwd`). Read-only runs, `os-sandbox` and `host-sandbox` presets are not scanned; ordinary venv interpreter symlinks do not trigger recursive rejection for Grok/Pi. Residual risk: hard links are
     not detected, and another process can change the filesystem after the startup scan.
+
+## Host-confined Grok/Pi
+
+Both shared descriptors default to `workspace-write` with `confinement: 'host-sandbox'`; `native` remains an explicit full-access-only choice (`nativeHarness: true`). Neither supports read-only: leave that mapping absent and reject/disable incompatible roles. Do not lower explicit native to workspace-write or promote the parent.
+
+The engine uses **existing `ctx.sandbox.confine`**, not a new VM or custom sandbox. It wraps the exact resolved CLI argv, or the exact private Node bootstrap argv that launches that CLI, with `{ mode: 'workspace-write', workspaceRoot: parentWorkspaceRoot ?? cwd }`. It rechecks containment and anchors the grant to the parent's established policy root when known, rather than a model-selected child path that could be retargeted through a symlink between validation and wrapping. Any adapter preflight must use the same wrapper. An absent/throwing provider, malformed or unusable confinement, or runner failure refuses execution; no unconfined CLI fallback is allowed. Sandbox-runner startup environment is scrubbed so caller-controlled loader hooks cannot execute before confinement. DSH `0.2.1-rc.2` standard profile provides the service; older/unavailable services must fail clearly. Linux is tested; other OS are not certified.
+
+This is **the same path-based file policy as parent Bash**: the established workspace root (or default CWD when unknown) and `/tmp` writable; global reads, network access and process visibility unrestricted. Direct and symlink-following outside regular-file writes are denied, inside regular-file writes work. **Existing hard-link inode aliases can share writes outside the root** (actual Pi observation). Never describe it as hardlink-safe, inode isolation or absolute outside-effect isolation. All host-confined results carry the fixed hard-link/network/process caveat. Provider-reported `partial` enforcement adds a separate fixed warning to results and logs. On this Linux kernel, Landlock ABI 4 lacks device ioctl handling: partial must not be reported as full. Unsupported/failed confinement is a refusal, not merely a warning. Remote hooks/MCP/network side effects are outside this local file policy.
+
+`private-state.ts` builds a trusted Node bootstrap that runs **inside** confinement before CLI code. It reads bounded regular configuration files (4 MiB per file), writes snapshots exclusively with private permissions under `${RUN_DIR}` in `/tmp`, and redirects HOME/XDG/temp/CLI state there. Grok snapshots selected TOML config/requirements/settings files; Pi snapshots `settings.json`, `models.json`, and only static `{ type: 'api_key', key: string }` auth entries. Source configuration/authentication remains unchanged. Browser/OAuth stores are not copied or rotated. Forwarded API keys or configured static keys are supported; browser sign-ins require explicit native under a full-access parent. Bootstrap failure is a configuration failure with a fixed API-key/native hint, never a native retry.
+
+This is not full native config parity: global resource trees are not recursively copied and relative resource paths have a changed base. Project/explicitly configured executable resources that actually load run within the same OS file boundary. Do not claim every extension is disabled or every native resource is preserved. There is no recursive whole-workspace preflight; ordinary Python venvs remain usable.
+
+Grok limited mode adds `--permission-mode acceptEdits --allow Write --allow Edit --allow Bash`: actual Grok otherwise cancels tool writes in this headless path. These flags allow useful inside edits/shell, while the **mandatory DSH OS boundary** limits file effects. They do not establish the boundary themselves. Native argv remains unchanged. Pi keeps RPC settlement, prompt/cancel acknowledgment and extension-dialog rejection semantics unchanged.
+
+Grok's official CLI sandbox investigation remains historically valid: Bubblewrap was unavailable and managed `off` could override requested native profiles. This DSH wrapper is independent of native `--sandbox` flags, so those findings are not invalidated and are not proof of failure of the new path. Conversely, old native qualification is not host-confined qualification. See [host-confined validation](host-confined-cli-validation.md) for scoped observations and failures; do not publish provisional totals as final.
 
 ## Diagnostics
 
@@ -269,28 +291,38 @@ answers.
 - `probe-service.ts` mounts a Typert Remote service `rolesubagentsCli` with `probe(request, signal)`, called from
   the browser as `ctx.connection.rpc.call('/api', 'rolesubagentsCli/probe', { args: { request } }, signal)`.
   `@deepseek-ai/dsh-typert-protocol` is an optional peer loaded with a dynamic `import()`; when it is missing the
-  feature is skipped and logged once, and the editor hides **Test connection** and uses the descriptor's
-  `modelSuggestions`. This RPC path is not a documented DSH API. `@Remote('probe')` is applied by hand in the
+  Host mounting is skipped and logged once. The client reports each attempt separately, retains retry controls, and uses descriptor suggestions when discovery is unavailable. Failures never globally disable diagnostics or ordinary role execution. This RPC path is not a documented stable DSH API. `@Remote('probe')` is applied by hand in the
   constructor, so the method's parameter names are part of the wire contract and the Host bundle must stay
   unminified.
+
+### Probe diagnostics and runtime scope
+
+Local connection absence, structured Remote errors, HTTP endpoint 404, Host authentication (401/403), transport failure and malformed carriers are separate client states. CLI executable/authentication results are distinct from RPC failures. HTTP 404 is intentionally ambiguous: both absent Gateway and absent Remote method produce it. No inference, update or permission change follows a probe failure.
+
+`scripts/check-probe-host.mjs` exercises installed browser Connection, Host HTTP bridge/auth, Typert Registry/Gateway and actual decorated plugin Remote in an isolated in-process loopback server. It verifies 404 ambiguity, 401/403, argument errors and recovery on DSH `0.2.1-rc.2`; this is not a deployed `dsh web` profile/GUI test or stable-public-API guarantee. The subprocess seam is a fixture, not an actual CLI/model call. Grok/Pi probes run only `--version`; Pi help/model-list commands initialize extensions and are unsuitable for side-effect-free discovery.
 
 ## Per-CLI summary
 
 | CLI | Protocol | Instructions channel | Presets (read-only / workspace-write / full-access) | Pre-flight | Graceful cancel |
 |---|---|---|---|---|---|
 | Codex | `codex exec --json`, task on stdin | `-c developer_instructions=…` | `read-only` / `workspace-write` (+ `writable_roots=[]`) / `danger-full-access` (`-s`); OS sandbox | none | no |
-| Claude Code | `claude -p --output-format stream-json --verbose`, task on stdin | `--append-system-prompt` | `read-only` (dontAsk + `--tools` read tools + no setting sources) / `acceptEdits` ("Edit files (no shell)": `--tools` read tools + Edit/Write/NotebookEdit, no setting sources) / `auto`, `bypassPermissions` | none | no |
+| Claude Code | `claude -p --output-format stream-json --verbose`, task on stdin | `--append-system-prompt` | `read-only` (dontAsk + `--tools` read tools + no setting sources) / `acceptEdits` ("Edit files (no shell)": `--tools` read tools + Edit/Write/NotebookEdit, no setting sources) / `nativeAcceptEdits`, `auto`, `bypassPermissions` | none | no |
 | Antigravity | stream-json in and out, one user event on stdin | generated agent body; full-access: task prefix | `read-only` / `edit-files` (generated agent tool allowlists; edit-files adds `--mode accept-edits`) / `full-access` (default agent + skip permissions) | `--output-format json models` → `auth` | no (SIGTERM is handled) |
+| Grok Build | `--output-format streaming-json --prompt-file` | `--rules` | unsupported / `workspace-write` (default, DSH host-sandbox + private state + acceptEdits/Write/Edit/Bash) / explicit `native` (unchanged config/auth/extensions) | none | process termination |
+| Pi | `--mode rpc --no-session` | `--append-system-prompt` private file | unsupported / `workspace-write` (default, DSH host-sandbox + private settings/static-key auth) / explicit `native` (unchanged config/auth/extensions) | none | `clear_queue` ack → `abort` ack → stdin EOF, then engine fallback |
 | OpenCode | `opencode acp` (ACP JSON-RPC) | `instructions` file in `${RUN_DIR}` | `read-only` / `edit-files` / `full-access` (permission profiles on agent `dsh-<nonce>`; below full access `OPENCODE_DISABLE_PROJECT_CONFIG=1`) | none | `session/cancel` + EOF |
 
 What each preset loads from the project: Codex reads `AGENTS.md` and, for a trusted project, `.codex/config.toml`
 (`-s` and `writable_roots=[]` still win). Claude Code's `read-only` and `acceptEdits` load no setting sources (no
 user/project/local settings, hooks, allow rules, `additionalDirectories`, `CLAUDE.md`; verified: user and project
-hooks and allow rules have no effect, while a control run with default sources runs them); `auto` and
-`bypassPermissions` load the defaults. OpenCode below full access loads only the user's global config (no project
+hooks and allow rules have no effect, while a control run with default sources runs them); `auto`, `bypassPermissions`, and explicit `nativeAcceptEdits` load default settings. Only `nativeAcceptEdits` also omits `--strict-mcp-config` and retains inherited `CLAUDE_CODE_*` variables (fixed adapter overlays still apply). It preserves native tools/MCP/hooks and skips recursive tool-scope preflight. It requires an already full-access parent but passes `--permission-mode acceptEdits`, not automatic bypass. OpenCode below full access loads only the user's global config (no project
 `opencode.json` MCP servers, `.opencode` agents/commands/tools, `AGENTS.md`/`CLAUDE.md` — a trade-off: project
 instructions are not seen; verified that a project MCP server and tool file do not run), at full access everything;
 project plugins are refused (above). Antigravity reads the project's `AGENTS.md`.
+
+Grok provides official OS `read-only`/`workspace` sandbox profiles; Pi has no comparable built-in boundary for arbitrary extensions. Both adapters now offer workspace-write through the **independent DSH wrapper**, not Grok native flags or Pi tool allowlists. Official Grok profile integration remains deferred; see the historical [source review](grok-sandbox-upstream-review.md) and [real-binary investigation](grok-sandbox-investigation.md). Explicit native retains its admission and native permission behavior. Existing native evidence certifies neither official Grok profiles nor the new host-confined preset.
+
+Pi waits for `agent_settled`, not `agent_end`, because retries/continuations can follow. Prompt acknowledgments are correlated; handled/unknown dispositions terminate explicitly rather than hanging or pretending an answer exists. Interactive extension requests receive cancellation, never automatic approval. Grok's observed `max_tokens_truncation` error/nonzero exit is truncation, not success; preserve its sanitized fixture.
 
 The adapters' header comments hold the exact flags and the evidence for each choice; keep them current.
 
@@ -306,20 +338,17 @@ The adapters' header comments hold the exact flags and the evidence for each cho
      splitting, stdin, files and placeholders, pre-flight, timeout, abort, crash, env composition.
    - `tests/external-delegate.test.ts`: the delegate path with fake subagents and sandbox policy (ephemeral
      provider registered and removed, no forbidden start fields, ceiling, read-only parent, depth, cwd).
+   - `tests/external-host-sandbox.test.ts`, `tests/private-state.test.ts`: fail-closed confinement, exact argv/preflight wrapping, fixed warnings and private settings/static-auth snapshots.
    - `tests/external-units.test.ts`: registry consistency, policy, env, diagnostics, line framing.
    - `tests/client-*.test.ts`: editor drafts, save payload with `clis`, page rendering, i18n completeness.
 2. **Fake model servers** in `tests/support/fake-models/<id>.mjs` (Node ESM, no dependencies): each speaks the API
    its CLI calls (OpenAI Responses for Codex, Anthropic Messages for Claude Code, Gemini for agy, OpenAI Chat
-   Completions for OpenCode), prints its port as the first stdout line, scripts behaviour per request, and logs
+   Completions for OpenCode, Grok Build and Pi), prints its port as the first stdout line, scripts behaviour per request, and logs
    requests so a check can assert that instructions, model and effort reached the model.
 3. **Real-CLI integration** (`pnpm check:cli [suites…]`, opt-in, not in CI): `scripts/check-cli.mjs` builds a real
    DSH runtime from `DSH_CHECKOUT` (default `/opt/dsh`) with this plugin loaded from `src/`, finds CLIs on `PATH`
    (with `CLI_PATH_DIR` prepended), and runs `scripts/check-cli/<id>.mjs` (`export async function cases(h)`; the
-   helpers are documented in the script header). A suite whose CLI is not found is skipped. Cases always use an
-   isolated HOME, the fake server and fake keys, never real credentials. Each CLI's suite covers: answer delivered
-   to the parent notice, read-only blocks a write, the default preset writes in the workspace, cancellation ends
-   as aborted with no leftover process, an auth/upstream error gives a safe diagnostic, and model + effort reach
-   the CLI. `pnpm check:cli self` checks the harness with `tests/support/fake-cli/fake-cli.mjs`.
+   helpers are documented in the script header). Missing explicitly requested suites/binaries fail; optional discovery may skip unavailable CLIs. The harness isolates HOME/XDG/DSH_HOME and scrubs credential/config overrides before loading DSH, so housekeeping cannot use the real home. Cases use disposable native configuration, localhost fake servers and dummy keys. Explicit-native Grok/Pi tests prove restricted-parent refusal, not qualification of workspace-write. Host-confined cases must use ordinary workspaces/outside targets outside `/tmp`, exercise useful inside writes plus direct/symlink denials, and retain hard-link observations honestly rather than treating shared inode writes as successful isolation; see [host-confined validation](host-confined-cli-validation.md). Read-only remains unsupported. Grok's separate official sandbox capability is investigated independently. Consult actual outcomes and the [evidence contract](cli-compatibility.md), not just a suite exit code. `pnpm check:cli self` checks the harness with `tests/support/fake-cli/fake-cli.mjs`.
    `CHECK_CLI_CASE=<text>` runs only cases whose name contains the text. Write boundaries must be checked in a
    workspace outside `/tmp` (`h.workspace(files, { outsideTmp: true })`, default `/var/tmp`, override with
    `CHECK_CLI_OUTSIDE_TMP`): Codex and agy always allow writes under the temp dir, which hides a wrong preset. DSH
@@ -328,19 +357,34 @@ The adapters' header comments hold the exact flags and the evidence for each cho
    `GIT_CONFIG_COUNT=0`. The `@deepseek-ai/*` resolve hook (`scripts/host-resolve-hook.mjs`) guards against
    re-entry, since on Node 24 `require.resolve` runs the registered hooks again.
 
+### Reproducible harness controls
+
+```sh
+DSH_CHECKOUT=/path/to/dsh CHECK_CLI_EXECUTABLE_PI=/absolute/path/to/pi \
+CHECK_CLI_VERSION_PI=1.3.0 CHECK_CLI_REPORT=artifacts/pi-unique-run.json \
+pnpm check:cli pi
+```
+
+- `CHECK_CLI_EXECUTABLE_<UPPER_ID>` chooses the exact binary (replace hyphens with underscores, e.g. `CLAUDE_CODE`, `GROK_BUILD`); `CLI_PATH_DIR` still prepends PATH.
+- `CHECK_CLI_VERSION_<UPPER_ID>` requires an exact detected version. Reports record resolved executable path/SHA256/version, expected version, DSH version, platform/architecture and case outcomes.
+- `CHECK_CLI_REPORT` exclusively creates raw JSON; an existing output path fails instead of overwriting evidence. Raw case reports are not automatically complete `CompatibilityEvidence` qualifications.
+- `CHECK_CLI_REQUIRE_ALL=1` makes skips fail. Unknown requested CLI IDs and zero-case filters fail too. Missing explicitly requested suites/binaries fail even without that switch.
+- Known Snap launch wrappers are refused because they can replace disposable HOME. Choose the direct official CLI binary; never copy real credentials to repair fixture authentication. This guard is not proof that arbitrary custom wrappers preserve isolation.
+- Environment scrubbing and localhost model endpoints are not an OS network sandbox. CLI telemetry and native extensions may have independent side effects; never copy production extensions into tests.
+
+Validation has explicit limits: Claude 2.1.306 has 13 passing cases and one root-only skip (non-root runner), without a dedicated real wall-timeout case; Grok 1.0.62 has 10 passing cases, Pi 1.3.0 has 12, direct Antigravity 1.4.4 has 16, OpenCode 1.19.3 has 13. These historical native totals do not qualify the new host-confined preset; totals alone are not compatibility badges. Codex 0.162.0 and 0.163.0 each have 6 passes and 5 filesystem-check failures because the sandbox cannot configure loopback (`RTM_NEWADDR: Operation not permitted`); selecting legacy Landlock also failed. Identical failures do not prove backward compatibility. See the [verification report](external-cli-validation-20261022.md), [Codex comparison](codex-local-regression-20261022.md), and [published native evidence](cli-evidence/README.md). Do not turn failures/skips/missing groups into validation.
+
 ## Adding a new CLI
 
 1. **Id**: add it to `CliId` and `CLI_IDS` in `src/shared/cli/types.ts`.
-2. **Descriptor**: `src/shared/cli/<id>.ts` (frozen object `satisfies CliDescriptor`). Every access level must map
-   in `presetForAccess` to a preset of that level; ids unique; `defaultPermission` a workspace-write preset. Put the
-   reasoning for presets in the file's header comment.
+2. **Descriptor**: `src/shared/cli/<id>.ts` (frozen object `satisfies CliDescriptor`). Present `presetForAccess` entries must map to presets of that level; unsupported levels stay absent. IDs must be unique and `defaultPermission` must exist. Grok/Pi default to `workspace-write` with mandatory `host-sandbox`; read-only remains absent. Only claim a supported preset when its actual boundary and residual risks are documented. Mark native presets `nativeHarness: true` and document limitations.
 3. **Descriptor registry**: import it and add the entry to `CLI_DESCRIPTORS` in `src/shared/cli/index.ts`.
 4. **Adapter**: `src/host/cli/<id>/index.ts` exporting `<name>Adapter: CliAdapter`, plus `parser.ts` (and
    `probe.ts` if large). Header comment: exact invocation, how each preset is enforced, the instructions channel,
    cancellation, and the CLI version it was verified against. Rules:
    - `plan` and the session are pure and synchronous; sessions never throw;
    - pass instructions through the CLI's native instruction channel, never as user text unless unavoidable;
-   - unknown preset or access → read-only behaviour;
+   - unknown/unsupported preset or access → refuse; native extensions prevent tool allowlists from proving confinement;
    - success only from a documented terminal event with a non-blank answer;
    - map failures to `FailureCategory` with fixed rules; facts are safe tokens only;
    - disable auto-update, telemetry and session persistence where the CLI allows; keep the run from writing the
@@ -367,7 +411,7 @@ The adapters' header comments hold the exact flags and the evidence for each cho
    (use the argv the unit tests assert for `plan()`), and replace the old files when the format changed. Keep
    fixtures for older formats that the parser should still accept.
 3. Run `pnpm test`, then `pnpm check:cli <id>` with the new binary on `PATH` (or in `CLI_PATH_DIR`).
-4. Update the tested version in the README (both languages), the adapter header, and the CHANGELOG.
+4. Record exact CLI/DSH versions, platform, architecture, preset, protocol and required-suite outcomes following [CLI compatibility](cli-compatibility.md). Preserve failures/skips, distinguish environment failures from reviewed incompatibility, and compare genuinely distinct old/new binaries with expected versions pinned. Update both READMEs, adapter header and CHANGELOG with actual scope, not a blanket tested-version claim.
 
 What to watch for:
 
@@ -395,3 +439,5 @@ What to watch for:
   keys (`edit`, `bash`, `external_directory`, `doom_loop`, `question`, `plan_enter`, `plan_exit`); how
   `OPENCODE_CONFIG_CONTENT` merges; `error.data.errorName` values; the `opencode models --verbose` format; whether
   it still writes `<repo>/.git/opencode`.
+
+- **Grok Build / Pi**: keep explicit-native behavior unchanged and full-access-only; verify default host-sandbox admission, exact wrapping/fail-closed behavior, partial warnings, static-key snapshots, source-state immutability, resource-loading differences, ordinary venvs and honest hard-link/network caveats. Do not use historical native evidence to qualify workspace-write. Refuse read-only before startup. Check Grok terminal/truncation events and usage aggregation; Pi prompt acknowledgments, final `message_end`, `agent_settled`, extension-dialog rejection and cancel acknowledgment ordering. Ignoring unknown protocol events does not prove compatibility.

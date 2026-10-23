@@ -1,7 +1,7 @@
 {
   "name": "dsh-rolesubagents",
   "version": "0.2.1",
-  "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, run them in DSH or on external coding-agent CLIs (Codex CLI, Claude Code, Antigravity CLI, OpenCode), and let the parent pick one per delegation.",
+  "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, run them in DSH or on external coding-agent CLIs (Codex CLI, Claude Code, Antigravity CLI, OpenCode, Grok Build, Pi), and let the parent pick one per delegation.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -13,7 +13,9 @@
     "codex",
     "claude-code",
     "antigravity",
-    "opencode"
+    "opencode",
+    "grok-build",
+    "pi-coding-agent"
   ],
   "license": "MIT",
   "homepage": "https://github.com/Aero123421/dsh-rolesubagents#readme",
@@ -41,6 +43,13 @@
     "README.ja.md",
     "LICENSE",
     "docs/external-cli.md",
+    "docs/cli-compatibility.md",
+    "docs/external-cli-validation-20261022.md",
+    "docs/codex-local-regression-20261022.md",
+    "docs/grok-sandbox-upstream-review.md",
+    "docs/grok-sandbox-investigation.md",
+    "docs/host-confined-cli-validation.md",
+    "docs/cli-evidence/",
     "CHANGELOG.md"
   ],
   "dsh": {
@@ -68,7 +77,10 @@
     "check": "pnpm lint && pnpm typecheck && pnpm test && node scripts/check-lib.mjs",
     "check:lib": "node scripts/check-lib.mjs",
     "check:host": "node scripts/check-workflow-host.mjs",
-    "check:cli": "node scripts/check-cli.mjs"
+    "check:cli": "node scripts/check-cli.mjs",
+    "check:probe": "node scripts/check-probe-host.mjs",
+    "check:sandbox": "node scripts/check-host-sandbox.mjs",
+    "compare:cli": "node scripts/compare-cli-evidence.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-storage-domain": ">=0.2.1-alpha.3 <0.3.0-0",

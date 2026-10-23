@@ -131,6 +131,15 @@ describe('issueText', () => {
 })
 
 describe('dictionaries', () => {
+  it('distinguishes unverified Grok sandbox integration from Pi native-only limitations', () => {
+    const en = translator('en')
+    expect(readOnlyHelp(en, 'grok-build')).toContain('provides official OS sandbox profiles')
+    expect(readOnlyHelp(en, 'grok-build')).toContain('has not verified')
+    expect(readOnlyHelp(en, 'pi')).toContain('no built-in OS permission boundary')
+    expect(confinementHelp(en, 'grok-build', 'native')).toContain('native CLI restrictions may still apply')
+    expect(readOnlyHelp(translator('ja'), 'grok-build')).toContain('公式OSサンドボックス')
+    expect(readOnlyHelp(translator('ja'), 'pi')).toContain('標準のOS権限境界を持ちません')
+  })
   it('has a Japanese text for every key, and no key without an English one', () => {
     const en = Object.keys(DICTIONARIES.en).sort()
     expect(Object.keys(DICTIONARIES.ja).sort()).toEqual(en)

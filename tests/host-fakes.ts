@@ -14,6 +14,7 @@ import type {
   LlmPort,
   LoggerPort,
   SandboxPolicyPort,
+  SandboxPort,
   SessionPort,
   StorageDomainPort,
   SubagentProviderPort,
@@ -294,6 +295,7 @@ export interface FakeWorld {
     storageDomain?: StorageDomainPort
     subprocess?: SubprocessPort
     sandboxPolicy?: SandboxPolicyPort
+    sandbox?: SandboxPort
   }
   /** The fake storage-domain backend every state instance in this world shares. */
   readonly storage: FakeStorage
@@ -442,6 +444,7 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
   function get(name: 'storageDomain'): StorageDomainPort | undefined
   function get(name: 'subprocess'): SubprocessPort | undefined
   function get(name: 'sandboxPolicy'): SandboxPolicyPort | undefined
+  function get(name: 'sandbox'): SandboxPort | undefined
   function get(name: string): unknown
   function get(name: string): unknown {
     if (name === 'llm') return services.llm
@@ -449,6 +452,7 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
     if (name === 'storageDomain') return services.storageDomain
     if (name === 'subprocess') return services.subprocess
     if (name === 'sandboxPolicy') return services.sandboxPolicy
+    if (name === 'sandbox') return services.sandbox
     return undefined
   }
 

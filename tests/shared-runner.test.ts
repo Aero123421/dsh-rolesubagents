@@ -66,10 +66,12 @@ describe('CLI descriptors', () => {
     expect(ids).toContain(descriptor.defaultPermission)
     expect(presetAccess(descriptor, descriptor.defaultPermission)).toBe('workspace-write')
     for (const level of Object.keys(ACCESS_ORDER) as AccessLevel[]) {
-      expect(presetAccess(descriptor, descriptor.presetForAccess[level])).toBe(level)
+      const preset = descriptor.presetForAccess[level]
+      if (preset !== undefined) expect(presetAccess(descriptor, preset)).toBe(level)
+      else expect(descriptor.permissions.some(p => p.access === level)).toBe(false)
     }
     expect(new Set(descriptor.efforts).size).toBe(descriptor.efforts.length)
-    expect(descriptor.effortFreeText).toBe(descriptor.efforts.length === 0)
+    if (descriptor.efforts.length === 0) expect(descriptor.effortFreeText).toBe(true)
     expect(descriptor.displayName).not.toBe('')
     expect(descriptor.executable).toMatch(/^[a-z]+$/)
     expect(Object.isFrozen(descriptor)).toBe(true)
@@ -85,6 +87,7 @@ describe('CLI descriptors', () => {
     expect(presets('claude-code')).toEqual([
       'read-only:read-only',
       'acceptEdits:workspace-write',
+      'nativeAcceptEdits:full-access',
       'auto:full-access',
       'bypassPermissions:full-access',
     ])

@@ -230,7 +230,13 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   }
 
   const external = {
-    engine: { subprocess: () => ctx.get('subprocess'), logger: ctx.logger, runs, lifetime: lifetime.signal },
+    engine: {
+      subprocess: () => ctx.get('subprocess'),
+      sandbox: () => ctx.get('sandbox'),
+      logger: ctx.logger,
+      runs,
+      lifetime: lifetime.signal,
+    },
     adapters: options.adapters ?? defaultAdapterLookup,
     cliSettings: () => currentSettings().clis,
   }

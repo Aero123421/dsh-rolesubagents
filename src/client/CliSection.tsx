@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react'
 import { CLI_IDS, type CliId, cliDescriptor } from '../shared/cli/index.ts'
 import type { CliSettings } from '../shared/roles.ts'
+import { CliCompatibility } from './CliCompatibility.tsx'
 import { useController, useT } from './context.tsx'
 import type { PageState, ProbeState } from './controller.ts'
 import { type IssueField, parseEnvNames } from './draft.ts'
@@ -97,6 +98,14 @@ function CliCard({ cli, state }: { cli: CliId; state: PageState }) {
             {changed ? <span className="dshrs-hint">{t('clis.testSaved')}</span> : null}
           </div>
           <ProbeOutcome probe={probe} cli={name} />
+          {probe.status === 'ready' && probe.result?.found ? (
+            <details className="dshrs-hint">
+              <summary>
+                {state.locale.startsWith('ja') ? '互換性の検証記録' : 'Compatibility verification records'}
+              </summary>
+              <CliCompatibility scope={{ cli, cliVersion: probe.result.version }} locale={state.locale} />
+            </details>
+          ) : null}
         </>
       ) : null}
     </section>
@@ -107,7 +116,8 @@ function ProbeOutcome({ probe, cli }: { probe: ProbeState; cli: string }) {
   const t = useT()
   const lines: { text: string; tone: '' | ' dshrs-ok' | ' dshrs-bad' }[] = []
   const result = probe.status === 'loading' ? undefined : probe.result
-  if (probe.status === 'error') lines.push({ text: t('probe.error'), tone: ' dshrs-bad' })
+  if (probe.status === 'error')
+    lines.push({ text: t(probe.issue === undefined ? 'probe.error' : `probe.${probe.issue}`), tone: ' dshrs-bad' })
   else if (result?.message === 'subprocess-unavailable')
     lines.push({ text: t('probe.noSubprocess'), tone: ' dshrs-bad' })
   else if (result !== undefined && !result.found) lines.push({ text: t('probe.notFound', { cli }), tone: ' dshrs-bad' })
