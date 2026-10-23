@@ -12,14 +12,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
-          node-version: '24'
+          node-version: '24.21.0'
       - name: Install pinned DSH in disposable runner directory
         shell: bash
         run: |
           set -euo pipefail
-          npm install --prefix "$RUNNER_TEMP/dsh-vm-runtime" --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.2 pnpm@10.28.0
+          npx --yes --package=npm@10.9.2 npm install --prefix "$RUNNER_TEMP/dsh-vm-runtime" --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.2 pnpm@10.28.0
           echo "$RUNNER_TEMP/dsh-vm-runtime/node_modules/.bin" >> "$GITHUB_PATH"
           echo "DSH_CHECKOUT=$RUNNER_TEMP/dsh-vm-runtime/node_modules/@deepseek-ai/dsh" >> "$GITHUB_ENV"
           echo "DSH_HOME=$RUNNER_TEMP/dsh-vm-home" >> "$GITHUB_ENV"
@@ -38,18 +40,20 @@ jobs:
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
           ok=false
-          for i in $(seq 1 90); do
-            status=$(curl --max-time 2 -s -o "$RUNNER_TEMP/dsh-web.html" -w '%{http_code}' http://127.0.0.1:19873/ || true)
-            if [ "$status" = 200 ]; then ok=true; break; fi
+          for i in $(seq 1 60); do
+            for port in 19873 3080; do
+              status=$(curl --max-time 2 -s -o "$RUNNER_TEMP/dsh-web.html" -w '%{http_code}' "http://127.0.0.1:$port/" || true)
+              if [ "$status" = 200 ]; then ok=true; echo "PASS installed DSH Web HTTP 200 on port $port"; break 2; fi
+            done
             kill -0 "$pid" 2>/dev/null || break
             sleep 1
           done
           if [ "$ok" != true ]; then
-            echo 'DSH_WEB_HTTP_NOT_READY (raw log retained only in disposable runner; not printed to avoid auth disclosure)'
+            echo 'DSH_WEB_HTTP_NOT_READY; sanitized local diagnostics follow'
+            node --input-type=module -e 'import {readFileSync} from "node:fs"; const lines=readFileSync(process.env.RUNNER_TEMP+"/dsh-web.log","utf8").split("\n"); console.log(lines.filter(x=>!/token|secret|password|bearer|authorization|credential|api.?key/i.test(x)).slice(-70).map(x=>x.replace(/https?:\/\/\S+/g,"<URL>")).join("\n"))'
             exit 1
           fi
-          echo 'PASS installed DSH Web responds HTTP 200 on loopback'
-      - name: Install and inspect pinned Lima CLI (not a VM boot claim)
+      - name: Install Lima and validate no-mount configuration
         if: always()
         shell: bash
         run: |
@@ -59,7 +63,11 @@ jobs:
           echo "b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb  $RUNNER_TEMP/lima.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/lima.tar.gz" -C "$RUNNER_TEMP/dsh-lima-bin"
           export LIMA_HOME="$RUNNER_TEMP/dsh-lima-home"
-          "$RUNNER_TEMP/dsh-lima-bin/bin/limactl" --version
-          "$RUNNER_TEMP/dsh-lima-bin/bin/limactl" list --json
-          if test -r /dev/kvm && test -w /dev/kvm; then echo 'KVM_ACCESSIBLE'; else echo 'KVM_UNAVAILABLE'; fi
-          if command -v qemu-system-x86_64; then qemu-system-x86_64 --version; else echo 'QEMU_NOT_INSTALLED'; fi
+          export PATH="$RUNNER_TEMP/dsh-lima-bin/bin:$PATH"
+          limactl --version
+          limactl list --json
+          limactl template copy --help
+          limactl template copy --fill template:default "$RUNNER_TEMP/dsh-vm.yaml"
+          limactl template yq "$RUNNER_TEMP/dsh-vm.yaml" '.mounts = [] | .containerd.system = false | .containerd.user = false | .ssh.forwardAgent = false | .ssh.loadDotSSHPubKeys = false | .ssh.forwardX11 = false | .ssh.forwardX11Trusted = false | .portForwards = [{"guestPortRange": [1, 65535], "ignore": true}]' > "$RUNNER_TEMP/dsh-vm-isolated.yaml"
+          limactl validate "$RUNNER_TEMP/dsh-vm-isolated.yaml"
+          if test -r /dev/kvm && test -w /dev/kvm; then echo 'KVM_ACCESSIBLE'; else echo 'KVM_UNAVAILABLE: no accelerated VM E2E claimed'; fi
