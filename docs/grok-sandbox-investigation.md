@@ -1,5 +1,8 @@
 # Installed Grok 1.0.62 sandbox experiment — 2026-10-23
 
+> **Historical scope:** the investigation/review below concerns Grok's **native official sandbox profiles**, not the new default Grok/Pi `workspace-write` path. Its findings remain valid: Bubblewrap was unavailable on the tested host and managed `off` could override a requested native profile. The new path independently wraps the exact CLI/private bootstrap with DSH's existing `ctx.sandbox.confine`; it does not rely on Grok native `--sandbox` flags or introduce a VM/custom sandbox. Explicit `native` remains full-access-only and unchanged; read-only is unsupported. This is the same path-based file policy as parent Bash (CWD + `/tmp` writable, global reads/network/process visibility unrestricted), **not hardlink-safe or absolute outside-effect isolation**: existing inode aliases can share writes outside the root. Partial enforcement (tested Linux Landlock ABI 4, without device ioctl handling) is additionally warned. Native historical evidence does not qualify the new host-confined preset. See the [current design](external-cli.md#host-confined-grokpi) and [host-confined validation](host-confined-cli-validation.md) for current behavior and scoped evidence. The remainder is preserved as a historical record.
+
+
 ## Conclusion
 
 **Do not enable guaranteed read-only/workspace presets from CLI flags alone on the evidence collected here.** This experiment leaves the production descriptor, adapter and parent-permission checks unchanged.

@@ -1,10 +1,12 @@
 /** Real Pi RPC against a localhost fake, with disposable native config and no real credentials. */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { piAdapter } from '../../src/host/cli/pi/index.ts'
+import { cases as hostConfinedCases } from './host-confined.mjs'
 import { join } from 'node:path'
 import { createOwnedEnvironmentScanner } from '../../tests/support/process-ownership.mjs'
 
 export async function cases(h) {
+  await hostConfinedCases(h)
   async function withPi(
     body,
     { extension = '', patch = {}, sandboxMode = 'danger-full-access', missingKey = false, faultInjection = false } = {},

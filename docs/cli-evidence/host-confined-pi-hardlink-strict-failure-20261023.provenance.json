@@ -1,0 +1,15 @@
+{
+  "sourceReport": "artifacts/host-confined-pi-hardlink-20261023-1534.json",
+  "sourceReportSha256": "2e90fb7ec06421850bb22566bc8faaedd9f5671891b1693c9c2a63045b6f8a37",
+  "sourceLog": "artifacts/host-confined-pi-hardlink-20261023-1534.log",
+  "sourceLogSha256": "7ced1b0809e3d01b67983e23375fda88cac93539696f8b559ba5dfd537b55277",
+  "redaction": "Binary paths reduced to basenames; checkout paths in log replaced. Outcomes, fingerprints and alias observations unchanged.",
+  "qualification": "Raw real-CLI host-policy observations only; NOT complete CompatibilityEvidence and NOT an inode-isolation or network confinement certificate.",
+  "hostSandbox": null,
+  "limitations": [
+    "Same DSH path-based file policy as parent; /tmp remains writable.",
+    "Existing hard-link aliases can share writes outside workspace paths.",
+    "Network/process visibility/readable credentials are not restricted by this file policy.",
+    "Pi snapshots static API-key entries only; browser/OAuth refresh state is not copied."
+  ]
+}

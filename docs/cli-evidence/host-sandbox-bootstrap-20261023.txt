@@ -1,0 +1,9 @@
+Standalone local DSH sandbox check, 2026-10-23. No model/provider requests.
+Runner: landlock-run; enforcement: partial; denial dialect: permission denied.
+OUTSIDE_DENIED EACCES
+landlock-run: partial enforcement (older Landlock ABI)
+PASS real DSH sandbox permits inside edit and rejects ordinary outside edit
+OBSERVATION same DSH provider existing-hardlink shared writes=true; exit=0; not inode-isolation qualification
+PASS source bootstrap applies DSH boundary before state/CLI, preserves source auth, filters OAuth and hides envelope; enforcement=partial
+PASS built bootstrap applies DSH boundary before state/CLI, preserves source auth, filters OAuth and hides envelope; enforcement=partial
+Source log: artifacts/host-sandbox-bootstrap-20261023.log. Installed runner path reduced to basename; observations unchanged.

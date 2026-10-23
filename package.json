@@ -48,6 +48,7 @@
     "docs/codex-local-regression-20261022.md",
     "docs/grok-sandbox-upstream-review.md",
     "docs/grok-sandbox-investigation.md",
+    "docs/host-confined-cli-validation.md",
     "docs/cli-evidence/",
     "CHANGELOG.md"
   ],
@@ -78,6 +79,7 @@
     "check:host": "node scripts/check-workflow-host.mjs",
     "check:cli": "node scripts/check-cli.mjs",
     "check:probe": "node scripts/check-probe-host.mjs",
+    "check:sandbox": "node scripts/check-host-sandbox.mjs",
     "compare:cli": "node scripts/compare-cli-evidence.mjs"
   },
   "peerDependencies": {

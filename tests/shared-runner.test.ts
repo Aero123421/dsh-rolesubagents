@@ -64,9 +64,7 @@ describe('CLI descriptors', () => {
     const ids = descriptor.permissions.map(preset => preset.id)
     expect(new Set(ids).size).toBe(ids.length)
     expect(ids).toContain(descriptor.defaultPermission)
-    expect(presetAccess(descriptor, descriptor.defaultPermission)).toBe(
-      id === 'grok-build' || id === 'pi' ? 'full-access' : 'workspace-write',
-    )
+    expect(presetAccess(descriptor, descriptor.defaultPermission)).toBe('workspace-write')
     for (const level of Object.keys(ACCESS_ORDER) as AccessLevel[]) {
       const preset = descriptor.presetForAccess[level]
       if (preset !== undefined) expect(presetAccess(descriptor, preset)).toBe(level)

@@ -72,6 +72,9 @@ export interface RunPlan {
    * contain `..` segments; values are contents (written verbatim, mode 0600).
    */
   readonly files?: Readonly<Record<string, string>>
+  /** Explicit limited harness: snapshot routing/settings and static API-key auth into private RUN_DIR state.
+   * Browser/OAuth credentials and resource trees are never copied. Native plans leave this absent. */
+  readonly privateState?: 'grok-build' | 'pi'
   /** Optional pre-flight (e.g. an auth probe). */
   readonly preflight?: PreflightSpec
   /** Grace between a graceful cancel request ({@link RunSession.cancel}) and the engine's terminate. */

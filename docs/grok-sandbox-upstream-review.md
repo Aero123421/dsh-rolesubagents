@@ -1,5 +1,8 @@
 # Grok official sandbox integration review
 
+> **Historical scope:** the investigation/review below concerns Grok's **native official sandbox profiles**, not the new default Grok/Pi `workspace-write` path. Its findings remain valid: Bubblewrap was unavailable on the tested host and managed `off` could override a requested native profile. The new path independently wraps the exact CLI/private bootstrap with DSH's existing `ctx.sandbox.confine`; it does not rely on Grok native `--sandbox` flags or introduce a VM/custom sandbox. Explicit `native` remains full-access-only and unchanged; read-only is unsupported. This is the same path-based file policy as parent Bash (CWD + `/tmp` writable, global reads/network/process visibility unrestricted), **not hardlink-safe or absolute outside-effect isolation**: existing inode aliases can share writes outside the root. Partial enforcement (tested Linux Landlock ABI 4, without device ioctl handling) is additionally warned. Native historical evidence does not qualify the new host-confined preset. See the [current design](external-cli.md#host-confined-grokpi) and [host-confined validation](host-confined-cli-validation.md) for current behavior and scoped evidence. The remainder is preserved as a historical record.
+
+
 Review follow-up for PR #14, 2026-10-23. Grok Build and Pi must not be described as lacking the same capabilities: Grok has official OS sandbox profiles; Pi has no comparable built-in boundary for arbitrary native extension code. The existing unrestricted/native presets still require an explicitly full-access parent. That condition does not force Grok's configured sandbox off or enable always-approve.
 
 ## Source scope

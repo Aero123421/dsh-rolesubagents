@@ -250,6 +250,10 @@ async function createWorld(options = {}) {
     resolve: () => ({ mode: options.sandboxMode ?? 'workspace-write', workspaceRoot: options.workspaceRoot ?? cwd }),
   })
   await ctx.plugin(LocalSubprocessRuntime)
+  if (options.hostSandbox) {
+    const { default: LocalSandbox } = await import('@deepseek-ai/dsh-sandbox-local')
+    await ctx.plugin(LocalSandbox)
+  }
   await ctx.plugin(SubagentRuntime, { maxDepth: options.maxDepth ?? 1, maxActiveSubagents: 8 })
   await sleep(30)
 
@@ -347,6 +351,7 @@ function makeHelpers(cli, executable) {
       engine,
       engineDeps: world => ({
         subprocess: () => world.ctx.get('subprocess'),
+        sandbox: () => world.ctx.get('sandbox'),
         logger: { info: () => {}, warn: message => console.log(`    log: ${message.split('\n')[0]}`) },
         runs: new Set(),
       }),

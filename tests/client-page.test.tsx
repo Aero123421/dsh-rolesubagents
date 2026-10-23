@@ -564,6 +564,21 @@ describe('runs on an external CLI', () => {
     expect(screen.queryByText('Fix these before saving:')).toBeNull()
   })
 
+  it.each(['grok-build', 'pi'])(
+    'selects the Host-confined workspace preset by default for %s, not native full access',
+    async cli => {
+      await mount()
+      fireEvent.click(button('Edit role explorer'))
+      fireEvent.click(screen.getByLabelText('Block file writes for this role'))
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: cli } })
+      const permission = select(screen.getByLabelText('Permission'))
+      expect(permission.value).toBe('workspace-write')
+      expect([...permission.options].map(option => option.value)).toEqual(['workspace-write', 'native'])
+      expect(screen.getByText(/Host DSH sandbox/)).toBeTruthy()
+      expect(screen.getByText(/static API-key credentials/)).toBeTruthy()
+    },
+  )
+
   it('asks OpenCode for a provider and a model, with suggestions from the connection test', async () => {
     const probe = fakeProbe()
     probe.mockResolvedValue(

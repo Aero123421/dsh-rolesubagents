@@ -51,10 +51,10 @@ describe('Grok native adapter', () => {
     expect(plan.envRemovePrefixes).toBeUndefined()
     expect(plan.preflight).toBeUndefined()
   })
-  it.each(['read-only', 'workspace-write'] as const)('refuses unsupported %s at plan boundary', access => {
+  it.each(['read-only', 'workspace-write'] as const)('refuses to silently adapt a native plan to %s access', access => {
     expect(() => grokBuildAdapter.plan({ ...input, access }, 'abc')).toThrow('full-access')
   })
-  it.each(['read-only', 'workspace', 'workspace-write'])(
+  it.each(['read-only', 'workspace'])(
     'does not advertise unverified official profile %s as a supported preset',
     preset => {
       expect(() =>
@@ -62,6 +62,35 @@ describe('Grok native adapter', () => {
       ).toThrow('Grok native requires full-access')
     },
   )
+  it('uses a distinct Host-confined workspace plan with private state and bounded native tool approval', () => {
+    const plan = grokBuildAdapter.plan(
+      {
+        ...input,
+        preset: 'workspace-write',
+        access: 'workspace-write',
+        runner: { ...input.runner, permission: 'workspace-write' },
+      },
+      'abc',
+    )
+    expect(plan.privateState).toBe('grok-build')
+    expect(plan.env.HOME).toBe('${RUN_DIR}/home')
+    expect(plan.env.GROK_HOME).toBe('${RUN_DIR}/grok')
+    expect(plan.argv.slice(-8)).toEqual([
+      '--permission-mode',
+      'acceptEdits',
+      '--allow',
+      'Write',
+      '--allow',
+      'Edit',
+      '--allow',
+      'Bash',
+    ])
+    expect(plan.argv).not.toContain('--always-approve')
+    expect(plan.argv).not.toContain('--sandbox')
+    expect(grokBuildAdapter.descriptor.permissions.find(p => p.id === 'workspace-write')?.confinement).toBe(
+      'host-sandbox',
+    )
+  })
   it('ends stdin without writing task or protocol commands', () => {
     const io = { write: vi.fn(), end: vi.fn() }
     grokBuildAdapter.createSession(input, 'abc').start(io)

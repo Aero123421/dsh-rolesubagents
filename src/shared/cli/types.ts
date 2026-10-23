@@ -35,12 +35,14 @@ export const ACCESS_ORDER: Readonly<Record<AccessLevel, number>> = Object.freeze
  * What enforces a preset's limits:
  * - `os-sandbox`: an operating-system sandbox of the CLI (Codex), which also covers its shell commands
  *   and resolves symbolic links;
+ * - `host-sandbox`: DSH's configured process sandbox wraps the entire CLI; its enforcement metadata
+ *   is reported (including partial support on older kernels), with the same file-policy vocabulary as DSH;
  * - `tool-scope`: the CLI's own tool permissions (which tools exist, which paths they may write). Before a
  *   workspace-write run of such a preset the engine checks the workspace and refuses when the CLI's scope
  *   could reach outside it (see `docs/external-cli.md`);
  * - `none`: no limit (full access).
  */
-export type Confinement = 'os-sandbox' | 'tool-scope' | 'none'
+export type Confinement = 'os-sandbox' | 'host-sandbox' | 'tool-scope' | 'none'
 
 /** One CLI-native permission preset offered in the editor. */
 export interface PermissionPreset {

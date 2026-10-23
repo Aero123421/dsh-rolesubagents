@@ -56,8 +56,24 @@ describe('Pi native plan and safe probe', () => {
     expect(plan.preflight).toBeUndefined()
     expect(plan.cancelGraceMs).toBe(5000)
   })
-  it.each(['read-only', 'workspace-write'] as const)('refuses unsupported %s plans', access => {
+  it.each(['read-only', 'workspace-write'] as const)('refuses to silently adapt a native plan to %s access', access => {
     expect(() => piAdapter.plan({ ...input, access }, 'abc')).toThrow('full-access')
+  })
+  it('uses a distinct Host-confined workspace plan without replacing native RPC semantics', () => {
+    const plan = piAdapter.plan(
+      {
+        ...input,
+        preset: 'workspace-write',
+        access: 'workspace-write',
+        runner: { ...input.runner, permission: 'workspace-write' },
+      },
+      'abc',
+    )
+    expect(plan.privateState).toBe('pi')
+    expect(plan.env.HOME).toBe('${RUN_DIR}/home')
+    expect(plan.env.PI_CODING_AGENT_DIR).toBe('${RUN_DIR}/pi')
+    expect(plan.argv).toEqual(piAdapter.plan(input, 'abc').argv)
+    expect(piAdapter.descriptor.permissions.find(p => p.id === 'workspace-write')?.confinement).toBe('host-sandbox')
   })
   it('probes only early-exit version, not extension-loading help/models/auth commands', async () => {
     const run = vi.fn<ProbeRunner>(async () => ({ code: 0, stdout: '1.3.0\n', stderr: '', timedOut: false }))

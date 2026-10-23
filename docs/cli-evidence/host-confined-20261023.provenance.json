@@ -1,0 +1,247 @@
+{
+  "sourceReport": "artifacts/host-confined-metadata-final-20261023.json",
+  "sourceReportSha256": "7d20798fd4faa4f140c2c2a60200855a39bc5b931ee3e0a62db166de8a0e452a",
+  "sourceLog": "artifacts/host-confined-metadata-final-20261023.log",
+  "sourceLogSha256": "52e951bb2e81777052917f5f15aa2da4d8f73115e57e194e0ad0585aa705f408",
+  "redaction": "Binary paths reduced to basenames; checkout paths in log replaced. Outcomes, fingerprints and alias observations unchanged.",
+  "qualification": "Raw real-CLI host-policy observations only; NOT complete CompatibilityEvidence and NOT an inode-isolation or network confinement certificate.",
+  "hostSandbox": {
+    "mode": "workspace-write",
+    "backend": "landlock-run",
+    "enforcement": "partial",
+    "observations": [
+      {
+        "cli": "grok-build",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          },
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Grok ordinary parent reads and edits inside a venv workspace without source-state writes"
+      },
+      {
+        "cli": "grok-build",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Grok denies ordinary outside-file edits after genuine model/tool execution"
+      },
+      {
+        "cli": "grok-build",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Grok denies writes through an escaping symlink"
+      },
+      {
+        "cli": "grok-build",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Grok observes host hardlink alias semantics without claiming inode isolation"
+      },
+      {
+        "cli": "grok-build",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Grok managed off cannot disable the outer DSH file policy"
+      },
+      {
+        "cli": "grok-build",
+        "calls": [],
+        "case": "host-confined Grok missing Host sandbox refuses before model or native startup"
+      },
+      {
+        "cli": "grok-build",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          },
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Grok native shell runs inside the same ordinary file boundary"
+      },
+      {
+        "cli": "grok-build",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Grok cancellation stops the actual confined stream and owned processes"
+      },
+      {
+        "cli": "grok-build",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Grok real wall timeout stops the confined stream and owned processes"
+      },
+      {
+        "cli": "pi",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          },
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Pi ordinary parent reads and edits inside a venv workspace without source-state writes"
+      },
+      {
+        "cli": "pi",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Pi denies ordinary outside-file edits after genuine model/tool execution"
+      },
+      {
+        "cli": "pi",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Pi denies writes through an escaping symlink"
+      },
+      {
+        "cli": "pi",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Pi observes host hardlink alias semantics without claiming inode isolation"
+      },
+      {
+        "cli": "pi",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Pi native extension starts inside the file boundary"
+      },
+      {
+        "cli": "pi",
+        "calls": [],
+        "case": "host-confined Pi missing Host sandbox refuses before model or native startup"
+      },
+      {
+        "cli": "pi",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          },
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Pi native shell runs inside the same ordinary file boundary"
+      },
+      {
+        "cli": "pi",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Pi cancellation stops the actual confined stream and owned processes"
+      },
+      {
+        "cli": "pi",
+        "calls": [
+          {
+            "mode": "workspace-write",
+            "workspaceRoot": "<workspace>",
+            "runner": "landlock-run",
+            "enforcement": "partial"
+          }
+        ],
+        "case": "host-confined Pi real wall timeout stops the confined stream and owned processes"
+      }
+    ]
+  },
+  "limitations": [
+    "Same DSH path-based file policy as parent; /tmp remains writable.",
+    "Existing hard-link aliases can share writes outside workspace paths.",
+    "Network/process visibility/readable credentials are not restricted by this file policy.",
+    "Pi snapshots static API-key entries only; browser/OAuth refresh state is not copied."
+  ]
+}

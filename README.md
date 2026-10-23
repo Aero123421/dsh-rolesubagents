@@ -87,7 +87,8 @@ A role whose **Runs on** is a CLI runs its child once as a separate program on t
 
 ### Requirements
 
-- Install the CLI on the DSH host and sign in with it there, as the same OS user that runs DSH (or forward the variable that holds its API key, see [External CLIs](#external-clis-settings)).
+- Install the CLI on the DSH host and authenticate as the same OS user that runs DSH (or forward its API-key variable, see [External CLIs](#external-clis-settings)). Grok/Pi workspace-write supports forwarded API keys or configured static keys, not browser/OAuth sign-ins; those require explicit `native` under a full-access parent.
+- Grok/Pi workspace-write additionally requires the Host’s existing `ctx.sandbox.confine` service. DSH `0.2.1-rc.2` standard profile provides it; older/unavailable or failed providers cause a clear refusal before any unconfined CLI launch. Linux is tested; other operating systems are not certified.
 - Compatibility is evidence-scoped, not a semver promise. Historical documentation names Codex `0.163.0`, Claude Code `2.1.303`, Antigravity `1.4.2`, and OpenCode `1.19.3`, but does not record a complete dated environment/preset/suite matrix. A version probe alone is not validation. See [compatibility evidence and comparison](docs/cli-compatibility.md) for the exact conditions required for a tested result; unknown/missing/failed/skipped checks must not be treated as success.
 
 ### Setting up a role
@@ -103,8 +104,10 @@ A role whose **Runs on** is a CLI runs its child once as a separate program on t
    | Permission | One of the CLI's permission presets (below). A delegated run never stops to ask for approval, so this decides what it may do |
    | Timeout (minutes) | The run is stopped after this long; 1–1440, empty for 30 |
 
-3. **Read-only** permits only a verified read-only preset (see [Read-only](#read-only-on-a-cli)). Grok Build and Pi have no such native preset: this combination is rejected in the editor and a stored incompatible role is switched off during normalization.
+3. **Read-only** permits only a verified read-only preset (see [Read-only](#read-only-on-a-cli)). Grok Build and Pi have no supported read-only preset: this combination is rejected in the editor and a stored incompatible role is switched off during normalization.
 4. Save, then start a new session.
+
+For Grok/Pi in an ordinary workspace-write session, select **Workspace write** (the new default). A saved explicit `native` selection stays native and is refused under a restricted parent; change it explicitly rather than expecting silent lowering.
 
 Switching a role to a CLI drops its fork context, DSH model, and Agent preset; switching back to DSH drops the CLI fields.
 
@@ -164,28 +167,28 @@ Every run gets the task text through the CLI's input, and the role's instruction
 | | |
 |---|---|
 | How it is driven | `grok --output-format streaming-json --cwd <cwd> --prompt-file <private task file> [--model <model>] [--reasoning-effort <effort>] [--rules <instructions>]`; task file removed after the run |
-| Preset | **Native harness** only (`native`): keeps native tools, settings, authentication and extensions. Requires a full-access parent; read-only/workspace-write are unsupported and refused before startup. No blanket extension disabling, new sandbox, or automatic permission bypass |
+| Presets | **Workspace write** (default, `workspace-write`): mandatory DSH Host file sandbox, with private state (below); adds `--permission-mode acceptEdits --allow Write --allow Edit --allow Bash` because headless Grok otherwise cancels tool writes. These flags are not the security boundary. **Native harness** (`native`): native tools/settings/auth/extensions unchanged; requires a full-access parent. Read-only is unsupported |
 | Instructions | `--rules`, appended to the native instructions |
-| Model and credentials | Native Grok configuration/authentication; optionally select a model/effort or forward a required key variable by name. `GROK_DISABLE_AUTOUPDATER=1` prevents adapter-triggered updater activity |
+| Model and credentials | Optionally select a model/effort. Workspace write uses a private settings snapshot and static/forwarded API keys; browser sign-ins require native. Native keeps Grok configuration/authentication. `GROK_DISABLE_AUTOUPDATER=1` prevents adapter-triggered updater activity |
 | Connection test | Version only. Authentication and model catalog remain unknown |
 
-Grok **does provide** official OS sandbox profiles (`--sandbox read-only` / `--sandbox workspace`); this is different from Pi's lack of a built-in permission boundary. The adapter's `native` choice does not select or verify those profiles, nor force them off. A full-access parent is a DSH admission condition, not an instruction to bypass Grok permissions. Restrictive presets must first demonstrate the effective boundary and management-policy conflict behavior for the tested binary/OS; passing a requested flag alone is insufficient. See the [upstream review](docs/grok-sandbox-upstream-review.md) and [real-binary investigation](docs/grok-sandbox-investigation.md). Their integration remains deferred; this PR does not advertise verified Grok restricted presets.
+Grok **does provide** official OS sandbox profiles (`--sandbox read-only` / `--sandbox workspace`). The new workspace-write path instead wraps Grok independently with DSH's existing sandbox; it does not rely on Grok native `--sandbox` flags. The [upstream review](docs/grok-sandbox-upstream-review.md) and [real-binary investigation](docs/grok-sandbox-investigation.md) remain historical evidence: Bubblewrap was unavailable here and managed `off` overrode a requested native profile. Explicit `native` still neither selects/verifies those profiles nor forces them off.
 
 #### Pi (`pi`)
 
 | | |
 |---|---|
 | How it is driven | `pi --mode rpc --no-session [--model <provider/model>] [--thinking <effort>] [--append-system-prompt <private instructions file>]`; task sent as an RPC prompt on stdin |
-| Preset | **Native harness** only (`native`): keeps native configuration, authentication, tools and extensions; requires a full-access parent. No read-only/workspace-write guarantee is fabricated |
+| Presets | **Workspace write** (default, `workspace-write`): mandatory DSH Host file sandbox and private state (below), with the same RPC protocol. **Native harness** (`native`): keeps native configuration/authentication/tools/extensions; requires a full-access parent. Read-only is unsupported |
 | Completion and cancellation | Waits for `agent_settled`, not merely `agent_end`, and returns the final assistant message. Cancellation requests `clear_queue`, waits for its acknowledgment, requests `abort`, then closes stdin after acknowledgment (with engine termination fallback). Interactive extension requests are canceled, never automatically approved |
-| Model and credentials | Native Pi settings/authentication and extensions; optionally select `provider/model` and thinking level. No persistent session is requested; `PI_SKIP_VERSION_CHECK=1` is set |
+| Model and credentials | Optionally select `provider/model` and thinking level. Workspace write snapshots settings/models and only static `api_key` auth entries; forwarded API keys also work. Browser/OAuth sign-ins require native. No persistent session is requested; `PI_SKIP_VERSION_CHECK=1` is set |
 | Connection test | Version only. Pi 1.3.0's help/model-list commands can initialize extensions, so they are not used as supposedly side-effect-free discovery |
 
-Native CLI settings, hooks and extensions are intentionally retained, so their own side effects and network access remain possible. This is not an OS sandbox or a claim that arbitrary extension code is confined.
+**Grok/Pi private state:** a private Node bootstrap runs **inside** the DSH sandbox and prepares model/settings snapshots and Pi's static `api_key`-only auth under a private `${RUN_DIR}` in `/tmp`. Source configs/auth remain unchanged; browser/OAuth stores are not copied or rotated. Global resource trees are not recursively copied and relative resources have a changed base, so this is not full native configuration parity. Project or explicitly configured executable resources that load run within the same OS file boundary. Native retains its original configuration, hooks and extensions without this wrapper; their own side effects remain possible.
 
 ### Access ceiling
 
-DSH's sandbox and approvals do not reach inside a CLI, so the plugin decides the preset before it starts:
+The plugin decides the preset before startup. Most adapters use the CLI's own permissions; Grok/Pi workspace-write additionally wraps the process with DSH's existing file sandbox:
 
 - The ceiling is **read-only** when the calling agent's role is read-only. Otherwise it follows the parent session's sandbox mode: `read-only` → read-only, `danger-full-access` → full access, anything else (including approval modes such as Auto review, or no sandbox service) → workspace write.
 - A legacy preset above the ceiling is lowered only when a verified preset exists for that level (and logged). Missing mappings refuse the run. An explicit native preset above the ceiling is refused, not silently changed to a different restricted harness. The parent is never promoted and the plugin does not automatically enable permission bypass.
@@ -195,14 +198,15 @@ DSH's sandbox and approvals do not reach inside a CLI, so the plugin decides the
 
 ### Workspace confinement
 
-Below full access, what a CLI may change is enforced in one of two ways:
+Below full access, what a CLI may change is enforced as follows:
 
 | Preset | Enforced by |
 |---|---|
+| Grok Build / Pi **Workspace write** | DSH’s existing `ctx.sandbox.confine` OS file policy, including CLI/bootstrap and preflights; see scope and caveats below |
 | Codex **Read-only**, **Workspace write** | Codex's operating-system sandbox, which also covers shell commands and resolves symbolic links |
 | Claude Code **Read-only**, **Edit files (no shell)**; Antigravity **Read-only**, **Edit files**; OpenCode **Read-only**, **Edit files** | The CLI's own tool permissions: which tools exist (no shell) and which paths its file tools may write. There is no operating-system sandbox |
 
-For the second kind, the plugin checks the working directory before a workspace-write run and **refuses the delegation** (with a short reason the parent sees) when:
+For the tool-permission kind, the plugin checks the working directory before a workspace-write run and **refuses the delegation** (with a short reason the parent sees) when:
 
 - the directory tree contains a symbolic link that leads outside the parent's workspace (or outside the directory when the workspace is unknown); the CLI's file tools would follow it. The check includes `.git` and follows internal directory links once per real path. Unreadable directories are refused. A directory too large to check (over 100,000 entries or 2 seconds) is refused too;
 - OpenCode only: the directory lies below the top-level of a git repository. OpenCode's file tools reach the whole repository, not just the directory (verified: a write to a sibling directory succeeds, and `apply_patch` can move a file anywhere in the repository), so delegate with the repository's top-level as `cwd`.
@@ -211,6 +215,12 @@ Claude Code and Antigravity keep their file tools inside the run's directory (ve
 
 Below full access OpenCode also refuses a project that has `.opencode/plugin` or `.opencode/plugins` code: OpenCode 1.19.3 runs it at start even with the project configuration disabled.
 
+### Grok/Pi Host file policy and limits
+
+Workspace write uses **the same path-based file policy as parent DSH Bash**, not a new VM or custom sandbox. CWD and `/tmp` are writable; global reads, network access and process visibility are not restricted. Inside regular-file writes work; direct and symlink-following outside regular-file writes are denied. No recursive whole-workspace preflight is performed, so ordinary Python venvs are supported.
+
+**Existing hard-link inode aliases can share writes outside the writable root** (observed with real Pi). This is not hardlink-safe or absolute outside-effect isolation. Every host-confined result includes the hard-link/network/process caveat. On the tested Linux kernel, Landlock ABI 4 gives **partial** enforcement (notably lacking device ioctl handling); a fixed additional warning is shown in results and logged. Partial enforcement is not relabeled full enforcement. Missing/failed confinement refuses launch, never falls back to native. See [host-confined validation](docs/host-confined-cli-validation.md) for actual evidence and limitations; historical native qualifications do not qualify this new preset.
+
 ### Read-only on a CLI
 
 | CLI | What Read-only does |
@@ -218,7 +228,7 @@ Below full access OpenCode also refuses a project that has `.opencode/plugin` or
 | Codex | Runs in Codex's `read-only` sandbox |
 | Claude Code | Only the read tools (`Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`), no shell, in `dontAsk` mode: anything that would need approval is refused. No setting sources are loaded (user, project, and local settings, allow rules, hooks, `CLAUDE.md`), so they cannot widen it; this also skips a model, environment, or `apiKeyHelper` set in those settings |
 | Antigravity | Only the read tools (view files, search, list folders); no shell |
-| Grok Build / Pi | Unsupported in the native harness. A read-only role is rejected/disabled rather than started with broader access |
+| Grok Build / Pi | Unsupported for both presets. A read-only role is rejected/disabled rather than started with broader access |
 | OpenCode | Every tool denied except reading, searching, and listing files; `.env` files stay unreadable. The project's OpenCode configuration and `AGENTS.md` are not loaded; a project with `.opencode/plugin(s)` code is refused |
 
 ### External CLIs settings

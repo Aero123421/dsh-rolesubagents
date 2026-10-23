@@ -128,6 +128,8 @@ const en = {
   'ed.permissionReadOnly': 'Read-only roles can use only a read-only preset.',
   'ed.permissionOption': '{name} — {access}',
   'confinement.os-sandbox': "Enforced by {cli}'s sandbox, which also covers its shell commands.",
+  'confinement.host-sandbox':
+    'Runs the entire {cli} CLI through the Host DSH sandbox, allowing workspace and sandbox temporary writes. Older kernels may provide partial enforcement, reported in the result. Uses private per-run settings/model state and static API-key credentials; browser sign-ins and full global resources require the native preset. This is the same path-based file policy as parent DSH tools: existing hard-link aliases can share writes across roots. Network/process access is not restricted.',
   'confinement.tool-scope': "Enforced by {cli}'s own tool permissions (no operating-system sandbox).",
   'confinement.tool-scope-write':
     "Enforced by {cli}'s own tool permissions (no operating-system sandbox), so a delegation is refused when its working directory contains a symbolic link that leads outside the workspace.",
@@ -152,6 +154,7 @@ const en = {
 
   'preset.read-only': 'Read-only',
   'preset.workspace-write': 'Workspace write',
+  'preset.host-workspace': 'DSH-confined workspace (private CLI state)',
   'preset.danger-full-access': 'Full access (no sandbox)',
   'preset.acceptEdits': 'Edit files (no shell)',
   'preset.nativeAcceptEdits': 'Native accept-edits (keep settings and extensions)',
@@ -376,6 +379,8 @@ const ja: Record<Key, string> = {
   'ed.permissionReadOnly': '読み取り専用のロールでは、読み取り専用のプリセットだけを選べます。',
   'ed.permissionOption': '{name} — {access}',
   'confinement.os-sandbox': '{cli} のサンドボックスで制限します（シェルコマンドも対象です）。',
+  'confinement.host-sandbox':
+    '{cli} CLI全体をホストDSHのsandbox内で実行し、ワークスペースとsandboxの一時領域への書き込みを許可します。古いカーネルでは部分施行となり結果に明記します。実行専用の設定・モデル情報と静的APIキーを利用し、ブラウザ認証や完全なグローバル資源はnativeが必要です。親DSHと同じパス単位の権限であり、既存のハードリンクは境界外の同一ファイルと書き込みを共有し得ます。ネットワーク・プロセスは制限しません。',
   'confinement.tool-scope': '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。',
   'confinement.tool-scope-write':
     '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。そのため、作業ディレクトリにワークスペースの外を指すシンボリックリンクがあると、委譲を拒否します。',
@@ -400,6 +405,7 @@ const ja: Record<Key, string> = {
 
   'preset.read-only': '読み取り専用',
   'preset.workspace-write': 'ワークスペースへの書き込み',
+  'preset.host-workspace': 'DSH制限付きワークスペース（実行専用CLI状態）',
   'preset.danger-full-access': 'フルアクセス（サンドボックスなし）',
   'preset.acceptEdits': 'ファイル編集のみ（シェルなし）',
   'preset.nativeAcceptEdits': 'ネイティブ編集（設定・拡張を維持）',

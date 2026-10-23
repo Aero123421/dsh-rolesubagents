@@ -2,9 +2,11 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { grokBuildAdapter } from '../../src/host/cli/grok-build/index.ts'
+import { cases as hostConfinedCases } from './host-confined.mjs'
 import { createOwnedEnvironmentScanner } from '../../tests/support/process-ownership.mjs'
 
 export async function cases(h) {
+  await hostConfinedCases(h)
   async function withGrok(body, sandboxMode = 'danger-full-access', missingKey = false, faultInjection = false) {
     const ws = h.workspace({ 'README.md': 'native fixture' })
     const home = h.workspace()

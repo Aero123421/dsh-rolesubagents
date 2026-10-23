@@ -328,7 +328,7 @@ function RunnerFields(props: {
                   disabled={!permissionAllowed(runner.cli, preset.id, role.readOnly)}
                 >
                   {t('ed.permissionOption', {
-                    name: presetName(t, preset.id),
+                    name: preset.confinement === 'host-sandbox' ? t('preset.host-workspace') : presetName(t, preset.id),
                     access: preset.nativeHarness ? t('access.native') : accessName(t, preset.access),
                   })}
                 </option>
