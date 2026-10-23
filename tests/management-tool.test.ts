@@ -45,7 +45,9 @@ describe('manage_roles tool adapter', () => {
     const schema = t.tool.parameters as Schema
     expect(t.tool.name).toBe(MANAGEMENT_TOOL_NAME)
     expect(schema.required).toContain('action')
+    expect(t.tool.description).toMatch(/help/i)
     expect(schema.properties?.action?.enum).toEqual([
+      'help',
       'list',
       'get',
       'capabilities',
@@ -118,6 +120,40 @@ describe('manage_roles tool adapter', () => {
     expect(result).toEqual({ ok: true, args, aborted: false })
     expect(result).not.toHaveProperty('optional')
   })
+  it('forwards help and cancellation through the same authority boundary as other reads', async () => {
+    const t = setup()
+    const controller = new AbortController()
+    controller.abort()
+    expect(await t.run({ action: 'help' }, t.owner, controller.signal)).toEqual({
+      ok: true,
+      args: { action: 'help' },
+      aborted: true,
+    })
+    expect(t.execute).toHaveBeenCalledWith(t.owner, { action: 'help' }, controller.signal)
+    t.state.allowed = false
+    expect(await t.run({ action: 'help' })).toMatchObject({ ok: false, code: 'management-disabled' })
+    expect(t.execute).toHaveBeenCalledTimes(2)
+  })
+  it.each(['missing', 'child', 'replaced', 'disposed'] as const)(
+    'does not let help bypass the %s tool-owner guard',
+    async kind => {
+      const t = setup()
+      const owner =
+        kind === 'missing'
+          ? undefined
+          : kind === 'child'
+            ? fakeAgent('child')
+            : kind === 'replaced'
+              ? fakeAgent(t.owner.id, t.owner.session)
+              : t.owner
+      if (kind === 'disposed') t.state.live = false
+      expect(await t.tool.execute({ action: 'help' }, execContext(owner))).toMatchObject({
+        ok: false,
+        code: 'stale-management-tool',
+      })
+      expect(t.execute).not.toHaveBeenCalled()
+    },
+  )
   it('does not cache ON permission in a captured tool definition', async () => {
     const t = setup()
     const captured: ToolDefinition = t.tool
@@ -166,9 +202,14 @@ describe('manage_roles tool adapter', () => {
       audit: { list: async () => ({ entries: [], durable: false }), append: async () => false },
     })
     const captured = buildManagementTool(owner, service)
+    expect(await captured.execute({ action: 'help' }, execContext(owner))).toMatchObject({ ok: true, kind: 'help' })
     expect(await captured.execute({ action: 'list' }, execContext(owner))).toMatchObject({ ok: true })
     allowed = false
     revision++
+    expect(await captured.execute({ action: 'help' }, execContext(owner))).toMatchObject({
+      ok: false,
+      code: 'management-disabled',
+    })
     expect(await captured.execute({ action: 'list' }, execContext(owner))).toMatchObject({
       ok: false,
       code: 'management-disabled',
@@ -200,7 +241,7 @@ describe('manage_roles tool adapter', () => {
   })
   it('classifies only valid read actions as concurrency-safe', () => {
     const t = setup()
-    for (const action of ['list', 'get', 'capabilities', 'models'])
+    for (const action of ['help', 'list', 'get', 'capabilities', 'models'])
       expect(t.tool.isConcurrencySafe?.({ action })).toBe(true)
     for (const action of ['preview', 'apply', 'apply_current', 'invented'])
       expect(t.tool.isConcurrencySafe?.({ action })).toBe(false)

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { managementAuthorization } from '../src/host/management/auth.ts'
+import type { roleManagementHelp } from '../src/host/management/help.ts'
 import { createManagementAudit } from '../src/host/management/audit.ts'
 import {
   createRoleManagement,
@@ -109,18 +110,20 @@ function setup(options: Partial<Pick<ManagementDeps, 'metadataTimeoutMs' | 'life
     },
   )
   let sequence = 0
+  const token = vi.fn(() => `token-${++sequence}`)
+  const active = vi.fn((owner: AgentPort) => {
+    if (state.activeFailure) throw new Error('SECRET_ACTIVE')
+    return catalogs.get(owner)
+  })
   const service = createRoleManagement({
     settings,
     authorize,
     catalog: catalogFns as unknown as ManagementDeps['catalog'],
-    active: owner => {
-      if (state.activeFailure) throw new Error('SECRET_ACTIVE')
-      return catalogs.get(owner)
-    },
+    active,
     applyCurrent,
     audit,
     now: () => state.clock,
-    token: () => `token-${++sequence}`,
+    token,
     planTtlMs: 100,
     ...options,
   })
@@ -145,6 +148,8 @@ function setup(options: Partial<Pick<ManagementDeps, 'metadataTimeoutMs' | 'life
     catalogFns,
     audit,
     applyCurrent,
+    active,
+    token,
     service,
     run,
     gate,
@@ -157,6 +162,217 @@ function expectFailure(reply: ManagementReply, code: string) {
 }
 
 describe('Host role management service', () => {
+  it('returns static JSON help without consulting roles, metadata, history or write machinery', async () => {
+    const t = setup()
+    t.state.value.roles = [
+      { id: 'secret-role', description: 'SECRET_DESCRIPTION', instructions: 'SECRET_INSTRUCTIONS' },
+    ]
+    t.state.activeFailure = true
+    const before = structuredClone(t.state.value)
+    const reply = await t.run({ action: 'help' })
+    expect(reply).toMatchObject({ ok: true, kind: 'help' })
+    expect(Object.keys(reply).sort()).toEqual([
+      'actions',
+      'examples',
+      'kind',
+      'ok',
+      'promptExample',
+      'promptFields',
+      'purpose',
+      'rules',
+      'sequence',
+    ])
+    expect(reply.promptFields).toEqual(
+      expect.objectContaining({
+        'role.description': expect.any(String),
+        'role.instructions': expect.any(String),
+        'delegate.prompt': expect.any(String),
+        'delegate.description': expect.any(String),
+      }),
+    )
+    expect(Object.keys(reply.actions as object)).toEqual([
+      'help',
+      'list',
+      'get',
+      'capabilities',
+      'models',
+      'preview',
+      'apply',
+      'apply_current',
+    ])
+    expect(JSON.parse(JSON.stringify(reply))).toEqual(reply)
+    expect(JSON.stringify(reply)).not.toMatch(/SECRET_|secret-role|session-owner|session-1|\/never\/execute/)
+    expect(reply).not.toHaveProperty('revision')
+    expect(reply).not.toHaveProperty('currentSession')
+    expect(t.port.describe).toHaveBeenCalled()
+    expect(t.port.mutate).not.toHaveBeenCalled()
+    expect(t.audit.list).not.toHaveBeenCalled()
+    expect(t.audit.append).not.toHaveBeenCalled()
+    for (const fn of Object.values(t.catalogFns)) expect(fn).not.toHaveBeenCalled()
+    expect(t.active).not.toHaveBeenCalled()
+    expect(t.applyCurrent).not.toHaveBeenCalled()
+    expect(t.token).not.toHaveBeenCalled()
+    expect(t.state.value).toEqual(before)
+    expect(t.state.revision).toBe(10)
+    expect(t.state.persistedWrites).toBe(0)
+
+    t.state.value.roles = [{ id: 'different-secret', instructions: 'SECRET_CHANGED' }]
+    t.state.revision = 99
+    t.catalogs.clear()
+    expect(await t.run({ action: 'help' })).toEqual(reply)
+  })
+  it('returns deeply detached help across concurrent requests and subsequent calls', async () => {
+    const t = setup()
+    const replies = await Promise.all(Array.from({ length: 8 }, () => t.run({ action: 'help' })))
+    const expected = JSON.parse(JSON.stringify(replies[0]))
+    const poison = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return
+      for (const child of Object.values(value)) poison(child)
+      if (Array.isArray(value)) value.push('SECRET_MUTATION')
+      else (value as Record<string, unknown>).poison = 'SECRET_MUTATION'
+    }
+    for (const reply of replies) {
+      expect(reply).toEqual(expected)
+      expect(reply).not.toBe(expected)
+    }
+    poison(replies[0])
+    for (const reply of replies.slice(1)) expect(reply).toEqual(expected)
+    expect(await t.run({ action: 'help' })).toEqual(expected)
+    expect(t.token).not.toHaveBeenCalled()
+    expect(t.port.mutate).not.toHaveBeenCalled()
+  })
+  it.each(['topic', 'id', 'target', 'expectedRevision', 'changes', 'planId', 'allowAiRoleManagement'])(
+    'accepts no help field other than action (%s)',
+    async field => {
+      const t = setup()
+      expectFailure(await t.run({ action: 'help', [field]: 'SECRET_INPUT' }), 'invalid-request')
+      expect(t.port.describe).not.toHaveBeenCalled()
+      expect(t.token).not.toHaveBeenCalled()
+      expect(t.port.mutate).not.toHaveBeenCalled()
+    },
+  )
+  it('authorizes help as a read for eligible read-only and ordinary fork parents', async () => {
+    const t = setup()
+    t.readers.add(t.agent)
+    t.state.mode = 'read-only'
+    expect(await t.run({ action: 'help' })).toMatchObject({ ok: true, kind: 'help' })
+    const fork = fakeAgent(
+      'fork',
+      fakeSession('fork-session', {
+        parentSession: t.agent.session.id,
+        origin: 'web',
+        delegationDepth: 0,
+      }),
+    )
+    t.live.add(fork)
+    expect(await t.run({ action: 'help' }, fork)).toMatchObject({ ok: true, kind: 'help' })
+    expectFailure(await t.preview(), 'read-only-caller')
+    expect(t.port.mutate).not.toHaveBeenCalled()
+  })
+  it.each(['gate', 'child', 'recorded-child', 'stale', 'missing', 'disposed', 'service-disposed'] as const)(
+    'does not bypass existing %s authorization for help',
+    async reason => {
+      const t = setup()
+      let owner: AgentPort | undefined = t.agent
+      let code = 'caller-unavailable'
+      if (reason === 'gate') {
+        t.gate(false)
+        code = 'management-disabled'
+      }
+      if (reason === 'child') {
+        owner = fakeAgent('child', fakeSession('child-session', { origin: 'subagent', delegationDepth: 1 }))
+        t.live.add(owner)
+        code = 'child-not-authorized'
+      }
+      if (reason === 'recorded-child') {
+        t.children.add(t.agent)
+        code = 'child-not-authorized'
+      }
+      if (reason === 'stale') t.live.delete(t.agent)
+      if (reason === 'missing') owner = undefined
+      if (reason === 'disposed') t.state.disposed = true
+      if (reason === 'service-disposed') {
+        t.service.dispose()
+        code = 'management-unavailable'
+      }
+      expectFailure(await t.service.execute(owner, { action: 'help' }), code)
+      expect(t.audit.list).not.toHaveBeenCalled()
+      expect(t.token).not.toHaveBeenCalled()
+      expect(t.port.mutate).not.toHaveBeenCalled()
+    },
+  )
+  it('checks cancellation after parsing and authorization before returning help', async () => {
+    const t = setup()
+    const controller = new AbortController()
+    controller.abort(new Error('SECRET_ABORT'))
+    const reply = await t.run({ action: 'help' }, t.agent, controller.signal)
+    expect(reply.ok).toBe(false)
+    expect(JSON.stringify(reply)).not.toContain('SECRET_')
+    expect(t.port.describe).toHaveBeenCalled()
+    t.gate(false)
+    expectFailure(await t.run({ action: 'help' }, t.agent, controller.signal), 'management-disabled')
+    expectFailure(await t.run({ action: 'help', topic: 'roles' }, t.agent, controller.signal), 'invalid-request')
+    expect(t.audit.list).not.toHaveBeenCalled()
+    expect(t.token).not.toHaveBeenCalled()
+    expect(t.port.mutate).not.toHaveBeenCalled()
+  })
+  it('executes the documented management examples against the actual service without delegating', async () => {
+    const t = setup()
+    const help = (await t.run({ action: 'help' })) as ReturnType<typeof roleManagementHelp>
+    expect(help).toMatchObject({ ok: true, kind: 'help' })
+    const examples = help.examples
+    expect(Object.keys(examples).sort()).toEqual([
+      'apply',
+      'apply_current',
+      'create',
+      'delegate',
+      'delete',
+      'get',
+      'list',
+      'note',
+      'update',
+    ])
+    expect(examples.delegate).toMatchObject({
+      role: examples.get.id,
+      description: expect.any(String),
+      prompt: expect.any(String),
+    })
+    expect(examples.create.changes[0]?.role).toMatchObject({
+      id: examples.get.id,
+      description: expect.any(String),
+      instructions: expect.any(String),
+      readOnly: true,
+    })
+    const listed = await t.run(examples.list)
+    expect(listed).toMatchObject({ ok: true, revision: 10, currentSession: { revision: 'session-1' } })
+    const create = await t.run({ ...examples.create, expectedRevision: listed.revision })
+    expect(create).toMatchObject({ ok: true, planId: expect.any(String) })
+    expect(t.port.mutate).not.toHaveBeenCalled()
+    expect(await t.run({ ...examples.apply, planId: create.planId })).toMatchObject({ ok: true, globalSaved: true })
+    const fetched = await t.run(examples.get)
+    expect(fetched).toMatchObject({ ok: true, role: examples.create.changes[0]?.role })
+    const fresh = await t.run(examples.list)
+    expect(
+      await t.run({
+        ...examples.apply_current,
+        expectedRevision: fresh.revision,
+        expectedSessionRevision: (fresh.currentSession as { revision: string }).revision,
+      }),
+    ).toMatchObject({ ok: true, globalSaved: true, currentApplied: true })
+    expect(t.catalogs.get(t.agent)?.roles).toContainEqual(expect.objectContaining({ id: examples.get.id }))
+    for (const example of [examples.update, examples.delete]) {
+      const current = await t.run(examples.list)
+      const preview = await t.run({ ...example, expectedRevision: current.revision })
+      expect(preview).toMatchObject({ ok: true, planId: expect.any(String) })
+      expect(await t.run({ ...examples.apply, planId: preview.planId })).toMatchObject({ ok: true, globalSaved: true })
+      if (example === examples.update) {
+        expect(await t.run(examples.get)).toMatchObject({ ok: true, role: examples.update.changes[0]?.patch })
+      }
+    }
+    expectFailure(await t.run(examples.get), 'role-not-found')
+    expect(t.state.persistedWrites).toBe(3)
+    expect(t.applyCurrent).toHaveBeenCalledTimes(1)
+  })
   it('reports saved and active catalogs separately and never exposes opaque settings', async () => {
     const t = setup()
     const listed = await t.run({ action: 'list' })

@@ -32,8 +32,12 @@ const runner: ValueSchemaSpec = {
 }
 const editable = {
   enabled: { type: 'boolean' },
-  description: { type: 'string' },
-  instructions: { type: 'string' },
+  description: { type: 'string', description: 'Parent-facing: when to choose this role, not child instructions.' },
+  instructions: {
+    type: 'string',
+    description:
+      'Child-facing reusable approach, constraints and expected report. The specific task belongs in delegate.prompt.',
+  },
   context: { type: 'string', enum: ['spawn', 'fork'] },
   forkScope: nullable({ type: 'string', enum: ['full', 'task'] }),
   readOnly: { type: 'boolean' },
@@ -63,12 +67,12 @@ export function buildManagementTool(
   return defineTool({
     name: MANAGEMENT_TOOL_NAME,
     description:
-      "Manage this Host/profile's saved subagent role definitions, not running children. Requires the user-enabled AI role-management switch and an eligible live parent session; children cannot use it. Read list/get first for settings and current-session revisions; capabilities/models show candidate metadata, not verified authentication or model availability. To create/update/delete: preview a bounded changes batch with expectedRevision, inspect its diff, then apply its planId. Saving affects new root conversations only; apply_current explicitly updates only this parent's FUTURE delegate catalog using the latest settings and session revisions. Wait for the next model/tool boundary before using new delegate IDs; already-bound workflow programs, admitted delegations, existing children and other conversations are unchanged. Cannot edit its own permission switch, CLI executables, environment or credentials. A conflict requires reread/new preview, never blind retry.",
+      "Manage this Host/profile's saved subagent role definitions, not running children. Requires the user-enabled AI role-management switch and an eligible live parent session; children cannot use it. Use action help for prompt-field guidance, examples and the safe sequence. Read list/get first for settings and current-session revisions; capabilities/models show candidate metadata, not verified authentication or model availability. To create/update/delete: preview a bounded changes batch with expectedRevision, inspect its diff, then apply its planId. Saving affects new root conversations only; apply_current explicitly updates only this parent's FUTURE delegate catalog using the latest settings and session revisions. Wait for the next model/tool boundary before using new delegate IDs; already-bound workflow programs, admitted delegations, existing children and other conversations are unchanged. Cannot edit its own permission switch, CLI executables, environment or credentials. A conflict requires reread/new preview, never blind retry.",
     parameters: {
       action: {
         type: 'string',
         required: true,
-        enum: ['list', 'get', 'capabilities', 'models', 'preview', 'apply', 'apply_current'],
+        enum: ['help', 'list', 'get', 'capabilities', 'models', 'preview', 'apply', 'apply_current'],
       },
       id: { type: 'string', description: 'get only: exact saved role id.' },
       target: {
@@ -110,7 +114,7 @@ export function buildManagementTool(
               properties: {
                 ...creatable,
                 id: { type: 'string', required: true },
-                description: { type: 'string', required: true },
+                description: { ...editable.description, required: true },
               },
             },
             patch: { type: 'object', additionalProperties: false, properties: editable },
@@ -119,7 +123,7 @@ export function buildManagementTool(
       },
     },
     output: { schema: outputSchema, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
-    isConcurrencySafe: args => ['list', 'get', 'capabilities', 'models'].includes(args.action),
+    isConcurrencySafe: args => ['help', 'list', 'get', 'capabilities', 'models'].includes(args.action),
     async execute(args, exec) {
       const actor = (exec as { agent?: AgentPort }).agent
       if (actor !== owner || !isLive())

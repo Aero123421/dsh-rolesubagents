@@ -28,6 +28,7 @@ These are boundaries of this capability, not a claim that it can restrain unrela
 
 | `action` | Input and result |
 | --- | --- |
+| `help` | No extra arguments. Fixed guidance, prompt-field distinctions, schematic calls and safe sequence. Requires the same live parent and enabled gate; allowed for read-only parents. No write, preview plan, model lookup, audit query or child launch. |
 | `list` | Saved role summaries, global settings `revision`, current session catalog state, repair status and recent audit metadata. Descriptions are shortened and instructions are represented by character counts. |
 | `get` | Exact saved `id`; returns the full **known** role fields, including instructions, plus global/current revisions. |
 | `capabilities` | Optional `target` (`dsh` or a CLI ID); returns supported contexts, required route fields, permission/effort metadata and service-presence information. Advertised permissions are not caller authorization. |
@@ -37,6 +38,19 @@ These are boundaries of this capability, not a claim that it can restrain unrela
 | `apply_current` | Fresh global `expectedRevision` and exact string `expectedSessionRevision` from `currentSession.revision`; explicitly refreshes only the calling parent's future delegation catalog. |
 
 Unknown action-specific fields are rejected: this is not an arbitrary config-path/JSON-patch API. The tool never accepts a caller-selected settings namespace or another session to refresh.
+
+### Help and the four prompt/display fields
+
+Start with `{ "action": "help" }` for a short model-facing guide. The response is static and contains no live settings or role contents; example revisions and plan/session IDs must be replaced with fresh returned values. Its examples are not executed by reading help. Reuse a suitable existing role rather than creating near-duplicates for one-off tasks.
+
+| Field | Audience and purpose |
+| --- | --- |
+| Saved role `description` | Parent: when to choose this role; not a child instruction. |
+| Saved role `instructions` | Child: reusable approach, constraints and report format, delivered as additional role context, not higher-priority authority. |
+| `delegate.prompt` | Child: this particular task, targets, context and completion criteria. Fresh children do not see the parent conversation. |
+| `delegate.description` | Short display label for this particular task; not the saved role description. |
+
+For example: describe a reviewer as “use for reviewing changes without edits”; instruct it to report severity, evidence and suggested fixes; request a specific authentication diff in `delegate.prompt`; label that task “Review authentication changes.” Text saying “do not edit” is not a permission setting: also use `readOnly: true` where intended and supported. Neither instructions nor help grant permissions.
 
 ### Change syntax and validation
 

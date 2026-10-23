@@ -436,6 +436,23 @@ try {
   assert.equal(live.mounts(), 1)
   pass('canonical settings ON exposes management without reloading source plugin')
 
+  const helpProfile = await readFile(patchPath, 'utf8')
+  const helpRevision = live.descriptor().revision
+  const helpMetadata = { ...live.metadata }
+  const helpAgents = live.agents.length
+  const help = await live.call(live.parent, { action: 'help' })
+  assert.equal(help.ok, true)
+  assert.equal(help.kind, 'help')
+  assert.equal(typeof help.promptFields['role.description'], 'string')
+  assert.equal(typeof help.promptFields['delegate.prompt'], 'string')
+  assert.equal(help.examples.create.action, 'preview')
+  assert.equal(help.examples.delegate.role, 'code_reviewer')
+  assert.equal(live.descriptor().revision, helpRevision)
+  assert.equal(await readFile(patchPath, 'utf8'), helpProfile)
+  assert.deepEqual(live.metadata, helpMetadata)
+  assert.equal(live.agents.length, helpAgents)
+  pass('real ToolRuntime help returns prompt guidance without profile writes, metadata lookup or child launch')
+
   const modelList = await live.call(live.parent, { action: 'models', target: 'dsh' })
   assert.equal(modelList.ok, true)
   assert.equal(live.metadata.models, 0)
