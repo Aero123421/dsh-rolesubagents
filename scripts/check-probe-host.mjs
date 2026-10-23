@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Optional installed-DSH integration: real Connection HTTP + Typert Gateway + probe and role-write safety.
+ * Optional installed-DSH integration: real Connection HTTP + Typert Gateway + probe, role-write safety and role display.
  * Node >=22.19 (tested 22.23.4). No GUI, real CLI, inference, installed profile or production settings are used.
  * HTTP listener, in-memory owner credentials, subprocess boundary and read-only role-safety settings are fixtures.
  */
@@ -26,6 +26,8 @@ try {
   const { default: Registry } = await import('@deepseek-ai/dsh-typert-registry')
   const { mountProbeService } = await import('../src/host/external/probe-service.ts')
   const { mountManagementRemote } = await import('../src/host/management/remote.ts')
+  const { mountRoleDisplayService } = await import('../src/host/role-display-service.ts')
+  const { roleDisplayCaller } = await import('../src/client/role-display.ts')
   const { managementSettings } = await import('../src/host/management/settings.ts')
   const { probeFailureOf } = await import('../src/client/controller.ts')
   const routes = new Map()
@@ -276,6 +278,83 @@ try {
     assert.equal(probeFailureOf(error), 'endpoint-unavailable')
   }
   console.log('PASS missing, unavailable and unloaded writeSafety service cannot produce a positive attestation')
+  // Role badges use the same authenticated transport, never a configuration endpoint.
+  const displayEndpoint = 'rolesubagentsRoleDisplay/query'
+  const displayLifetime = new AbortController()
+  const displayRole = {
+    id: 'reviewer',
+    builtin: 'general',
+    instructions: 'SYNTHETIC_PRIVATE_INSTRUCTIONS',
+    model: { provider: 'SYNTHETIC_PRIVATE_PROVIDER' },
+    runner: { env: { SYNTHETIC_PRIVATE_ENV: 'value' } },
+  }
+  const displayCall = childIds =>
+    client.connection.rpc.call('/api', displayEndpoint, { args: { childIds } }, AbortSignal.timeout(5000))
+  const displayInvoke = (childIds, headers = {}) =>
+    fetch(`${origin}/api/${displayEndpoint}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, ...headers },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'role-display-check',
+        method: displayEndpoint,
+        payload: { args: { childIds } },
+      }),
+      signal: AbortSignal.timeout(5000),
+    })
+  await assert.rejects(displayCall(['saved-child']), error => probeFailureOf(error) === 'endpoint-unavailable')
+  await mountRoleDisplayService(ctx, {
+    state: {
+      ready: Promise.resolve(),
+      readRoleById: id => (id === 'saved-child' || id === 'external-activation' ? displayRole : undefined),
+    },
+    isDisposed: () => displayLifetime.signal.aborted,
+    lifetime: displayLifetime.signal,
+  })
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+  const expectedDisplay = { roleId: 'reviewer', displayName: 'reviewer', builtin: 'general' }
+  const displayAnswer = await displayCall(['saved-child', 'unknown-child', 'external-activation', 'saved-child'])
+  assert.deepEqual(displayAnswer, { ok: true, value: [expectedDisplay, null, expectedDisplay, expectedDisplay] })
+  assert(!JSON.stringify(displayAnswer).includes('SYNTHETIC_PRIVATE'))
+  assert.deepEqual(Object.keys(displayAnswer.value[0]).sort(), ['builtin', 'displayName', 'roleId'])
+  const clientRoles = await roleDisplayCaller(client)(
+    ['saved-child', 'unknown-child', 'external-activation'],
+    AbortSignal.timeout(5000),
+  )
+  assert.deepEqual(
+    { ...clientRoles },
+    {
+      'saved-child': { roleId: 'reviewer', displayName: 'reviewer' },
+      'external-activation': { roleId: 'reviewer', displayName: 'reviewer' },
+    },
+  )
+  assert.equal((await displayCall(Array(100).fill('saved-child'))).value.length, 100)
+  for (const bad of [Array(101).fill('saved-child'), ['../config'], ['x'.repeat(257)], [null], {}])
+    assert.equal((await displayCall(bad)).ok, false)
+  assert.equal(
+    (await client.connection.rpc.call('/api', displayEndpoint, { args: { wrong: [] } }, AbortSignal.timeout(5000)))
+      .error.code,
+    'gateway/arguments-invalid',
+  )
+  assert.equal((await displayInvoke(['saved-child'], { cookie: '' })).status, 401)
+  assert.equal((await displayInvoke(['saved-child'], { origin: 'https://untrusted.invalid' })).status, 403)
+  console.log(
+    'PASS role-display actual client caller → HTTP → Gateway → Remote: positional saved identities, metadata allowlist, batch/ID bounds, authentication and Origin fence',
+  )
+  const displayRuntime = [...ctx.registry.values()].find(
+    runtime =>
+      runtime.name === 'RolesubagentsRoleDisplayService' || runtime.callback.name === 'RolesubagentsRoleDisplayService',
+  )
+  const displayFiber = displayRuntime && [...displayRuntime.fibers][0]
+  assert(displayFiber, 'role-display must have a disposable native service fiber')
+  displayLifetime.abort()
+  assert.equal((await displayCall(['saved-child'])).ok, false)
+  await displayFiber.dispose()
+  assert.equal(ctx.get('rolesubagentsRoleDisplay'), undefined)
+  assert.deepEqual(Object.keys(await roleDisplayCaller(client)(['saved-child'], AbortSignal.timeout(5000))), [])
+  console.log(
+    'PASS role-display disposal refuses captured calls and actual client degrades to unbadged rows after unload',
+  )
   await gatewayScope.dispose()
   const noGateway = await invoke()
   assert.equal(noGateway.status, 404)

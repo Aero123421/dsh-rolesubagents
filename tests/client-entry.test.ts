@@ -187,6 +187,39 @@ describe('client entry', () => {
 })
 
 describe('role-write safety production wiring', () => {
+  it('preserves guarded saves and reset wiring when both catalog overrides are installed', async () => {
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({
+      ok: true,
+      value: { safe: true, revision: 1, reason: 'literal-role-settings' },
+    }))
+    const f = fakeContext('en', {
+      connection: { rpc: { call } },
+      sessions: { refreshProjections() {} },
+      uiWorkspace: { openSession() {} },
+      sidebarRight: { openResource() {} },
+    })
+    Object.assign(f.ctx.slots, {
+      spec: (key: string) => ({ kind: key.endsWith('actions') ? 'list' : 'single', scope: 'session' }),
+    })
+    apply(f.ctx)
+    expect(f.registrations.map(entry => entry.slot)).toEqual([
+      'conversation.session.header.actions',
+      'conversation.session.header.lineage',
+      'plugins.bundle.config',
+    ])
+    const controller = controllerOf(f.registrations.find(entry => entry.slot === 'plugins.bundle.config'))
+    controller.setEnabled(false)
+    await controller.save()
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(call.mock.calls[0]?.[1]).toBe(ROLE_WRITE_SAFETY_ENDPOINT)
+    expect(f.form.calls).toHaveLength(1)
+    f.eventListeners.get('connection/reset')?.()
+    f.unload()
+    expect(f.registrations).toHaveLength(0)
+    expect(f.eventListeners.size).toBe(0)
+    expect(document.head.querySelector('style[data-plugin-css="dsh-rolesubagents/catalog"]')).toBeNull()
+  })
+
   it('requires the fixed metadata-only endpoint and reads the connection lazily on each attempt', async () => {
     const services: Record<string, unknown> = {}
     const { ctx } = fakeContext('en', services)

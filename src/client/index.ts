@@ -21,6 +21,8 @@
  */
 
 import type { CliId } from '../shared/cli/index.ts'
+import { mountCatalog } from './catalog-mount.ts'
+import { roleDisplayCaller } from './role-display.ts'
 import { createController, type ProbeCall, ProbeUnavailableError, type RoleWriteSafetyCall } from './controller.ts'
 import { type ConnectionLike, type DshClientContext, ENTRY_ID, PACKAGE_NAME, type RemoteResult } from './dsh.ts'
 import { RolesPage } from './RolesPage.tsx'
@@ -107,6 +109,7 @@ function activeLocale(ctx: DshClientContext): string {
 }
 
 export function apply(ctx: DshClientContext): void {
+  mountCatalog(ctx, { getRoles: roleDisplayCaller(ctx) })
   const probe = probeCaller(ctx)
   const controller = createController({
     form: ctx.configForms.get(ENTRY_ID),

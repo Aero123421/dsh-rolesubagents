@@ -50,6 +50,7 @@ import {
 import { mountManagementRemote } from './management/remote.ts'
 import { buildManagementTool, MANAGEMENT_TOOL_NAME } from './management/tool.ts'
 import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
+import { mountRoleDisplayService } from './role-display-service.ts'
 import { createRoleState } from './state.ts'
 import { buildTool, type PendingChild, TOOL_NAME } from './tool.ts'
 import { workflowTool } from './workflow.ts'
@@ -661,6 +662,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
         )
       })
   }
+
+  void mountRoleDisplayService(ctx, { state, isDisposed: () => disposed, lifetime: lifetime.signal })
 
   void mountManagementRemote(ctx, {
     isDisposed: () => disposed,

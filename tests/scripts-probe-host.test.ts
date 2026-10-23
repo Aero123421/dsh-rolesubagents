@@ -6,7 +6,7 @@ import { expect, it } from 'vitest'
 const checkout = resolve(process.env.DSH_CHECKOUT ?? '/usr/lib/node_modules/@deepseek-ai/dsh')
 const available = existsSync(resolve(checkout, 'node_modules/@deepseek-ai/dsh-api-gateway/lib/index.js'))
 
-it('keeps both wire endpoints behind disposable identity and loopback-only HTTP', () => {
+it('keeps optional wire endpoints behind disposable identity and loopback-only HTTP', () => {
   const source = readFileSync(resolve('scripts/check-probe-host.mjs'), 'utf8')
   const isolation = source.indexOf('const isolated = isolateCheckEnvironment()')
   expect(isolation).toBeGreaterThanOrEqual(0)
@@ -14,6 +14,8 @@ it('keeps both wire endpoints behind disposable identity and loopback-only HTTP'
     '@deepseek-ai/cordis',
     '../src/host/management/remote.ts',
     '../src/host/management/settings.ts',
+    '../src/host/role-display-service.ts',
+    '../src/client/role-display.ts',
   ])
     expect(source.indexOf(`await import('${specifier}')`)).toBeGreaterThan(isolation)
   expect(source).toContain("server.listen(0, '127.0.0.1', resolve)")
@@ -48,6 +50,9 @@ it.skipIf(!available)(
     )
     expect(result.stdout).not.toMatch(/[?&](?:auth|token)=|set-cookie:|cookie:/i)
     expect(result.stdout).not.toContain('SYNTHETIC_WIRE_MARKER')
+    expect(result.stdout).not.toContain('SYNTHETIC_PRIVATE')
+    expect(result.stdout).toContain('role-display actual client caller → HTTP → Gateway → Remote')
+    expect(result.stdout).toContain('role-display disposal refuses captured calls')
     expect(result.stdout).toContain('PASS missing Gateway and missing Remote both produce ambiguous HTTP 404')
     expect(result.stdout).toContain('isolated HOME/profile, no real CLI/model calls')
   },
