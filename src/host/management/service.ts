@@ -7,6 +7,7 @@ import type { AgentPort } from '../ports.ts'
 import type { ManagementAudit, ManagementAuditEntry } from './audit.ts'
 import type { createManagementCatalog } from './catalog.ts'
 import { ManagementFailure, type managementSettings } from './settings.ts'
+import { roleManagementHelp } from './help.ts'
 
 export interface ActiveRoleCatalog {
   readonly revision: string
@@ -47,7 +48,7 @@ interface Plan {
   result?: ManagementReply
   pending?: Promise<ManagementReply>
 }
-const ACTIONS = ['list', 'get', 'capabilities', 'models', 'preview', 'apply', 'apply_current'] as const
+const ACTIONS = ['help', 'list', 'get', 'capabilities', 'models', 'preview', 'apply', 'apply_current'] as const
 const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
 const ownKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
   Object.keys(value).every(k => keys.includes(k))
@@ -170,6 +171,7 @@ export function createRoleManagement(deps: ManagementDeps) {
       fixed('invalid-request', 'Choose a supported manage_roles action.')
     const args = raw as Record<string, unknown> & { action: (typeof ACTIONS)[number] }
     const keys: Record<(typeof ACTIONS)[number], readonly string[]> = {
+      help: ['action'],
       list: ['action'],
       get: ['action', 'id'],
       capabilities: ['action', 'target'],
@@ -193,6 +195,7 @@ export function createRoleManagement(deps: ManagementDeps) {
     const args = parse(raw)
     const { agent, ceiling, current } = allowed(actor, mutation(args.action))
     signal?.throwIfAborted()
+    if (args.action === 'help') return roleManagementHelp()
     if (args.action === 'list') {
       const projection = knownRoles(current.value)
       const history = await deps.audit.list().catch(() => ({ entries: [], durable: false }))
