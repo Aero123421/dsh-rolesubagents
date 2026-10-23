@@ -276,7 +276,8 @@ export interface HostContext {
   get(name: 'sandboxPolicy'): SandboxPolicyPort | undefined
   get(name: 'sandbox'): SandboxPort | undefined
   get(name: string): unknown
-  on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
+  /** Native Context serially awaits creation listeners before the Agent's first turn. */
+  on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void | Promise<void>): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown
   on(event: 'tools/change', listener: () => void): unknown
   on(

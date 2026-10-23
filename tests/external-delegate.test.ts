@@ -55,7 +55,7 @@ interface BootOptions {
   readonly onRun?: FakeSubprocessOptions['onRun']
 }
 
-function boot(options: BootOptions = {}) {
+async function boot(options: BootOptions = {}) {
   const root = workspace()
   const ws = join(root, 'ws')
   const world = fakeWorld()
@@ -80,7 +80,7 @@ function boot(options: BootOptions = {}) {
     { adapters: () => adapter },
   )
   const parent = world.newAgent('parent')
-  world.emitCreated(parent)
+  await world.emitCreated(parent)
   const call = (args: Record<string, unknown>, signal?: AbortSignal) =>
     registeredTool(parent).execute(
       { description: 'do it', prompt: 'the task', cwd: ws, ...args },
@@ -99,7 +99,7 @@ describe('delegate: external roles', () => {
   })
 
   it('starts through a one-off provider without DSH-only start options and removes it again', async () => {
-    const { world, call, adapter, ws, subprocess } = boot()
+    const { world, call, adapter, ws, subprocess } = await boot()
     const value = (await call({ role: 'coder' })) as { kind: string; subagentId: string }
     expect(value).toEqual({ kind: 'activation', subagentId: expect.stringMatching(new RegExp(`^${UUID}$`)) })
     const spec = world.subagents.startActivation.mock.calls[0]?.[0]
@@ -135,8 +135,8 @@ describe('delegate: external roles', () => {
     expect(subprocess.processes).toHaveLength(1)
   })
 
-  it('renders the CLI name in the start line', () => {
-    const { parent } = boot()
+  it('renders the CLI name in the start line', async () => {
+    const { parent } = await boot()
     const tool = registeredTool(parent)
     const render = tool.output?.render as (args: unknown, value: { subagentId: string }) => { text: string }[]
     expect(render({ role: 'coder' }, { subagentId: 'id-1' })[0]?.text).toBe('started Codex subagent id-1')
@@ -149,13 +149,13 @@ describe('delegate: external roles', () => {
     ['auto', 'workspace-write', 'workspace-write'],
     ['danger-full-access', 'danger-full-access', 'full-access'],
   ])('lowers the role preset to a %s parent', async (mode, preset, access) => {
-    const { call, adapter } = boot({ mode })
+    const { call, adapter } = await boot({ mode })
     await call({ role: 'coder' })
     expect((adapter as ReturnType<typeof testAdapter>).inputs[0]).toMatchObject({ preset, access })
   })
 
   it('keeps a read-only parent read-only: only read-only roles, always the read-only preset', async () => {
-    const { world, call, adapter } = boot()
+    const { world, call, adapter } = await boot()
     // Record the parent as a read-only DSH child by delegating to the read-only DSH role first.
     await call({ role: 'reader' })
     const readOnlyChild = world.children.at(-1)
@@ -175,7 +175,7 @@ describe('delegate: external roles', () => {
   })
 
   it('refuses beyond the delegation depth before registering anything', async () => {
-    const { world, parent } = boot()
+    const { world, parent } = await boot()
     world.subagents.resolveMaxDepth.mockReturnValue(0)
     await expect(
       registeredTool(parent).execute({ description: 'd', prompt: 'p', role: 'coder' }, execContext(parent)),
@@ -184,13 +184,13 @@ describe('delegate: external roles', () => {
   })
 
   it('keeps the child inside the parent workspace below full access', async () => {
-    const { world, call, root, ws } = boot({ mode: 'workspace-write' })
+    const { world, call, root, ws } = await boot({ mode: 'workspace-write' })
     await expect(call({ role: 'coder', cwd: join(root, 'elsewhere') })).rejects.toThrow(
       /outside the parent's workspace/,
     )
     expect(world.externalProviders.size).toBe(0)
     await call({ role: 'coder', cwd: join(ws, 'sub') })
-    const full = boot({ mode: 'danger-full-access' })
+    const full = await boot({ mode: 'danger-full-access' })
     await full.call({ role: 'coder', cwd: join(full.root, 'elsewhere') })
   })
 
@@ -201,7 +201,7 @@ describe('delegate: external roles', () => {
   ] as const)(
     'refuses an explicit cwd below full access when the workspace root is unknown (%s)',
     async (_name, kind) => {
-      const { world, call, ws, adapter, parent } = boot({ mode: 'workspace-write' })
+      const { world, call, ws, adapter, parent } = await boot({ mode: 'workspace-write' })
       if (kind === undefined) delete world.services.sandboxPolicy
       else if (kind === 'throws')
         world.services.sandboxPolicy = {
@@ -227,7 +227,7 @@ describe('delegate: external roles', () => {
   )
 
   it('keeps an explicit cwd at full access when the policy names no workspace root', async () => {
-    const { world, call, root, adapter } = boot()
+    const { world, call, root, adapter } = await boot()
     world.services.sandboxPolicy = { resolve: () => ({ mode: 'danger-full-access' }) }
     await call({ role: 'coder', cwd: join(root, 'elsewhere') })
     expect((adapter as ReturnType<typeof testAdapter>).inputs.at(-1)).toMatchObject({ access: 'full-access' })
@@ -245,7 +245,7 @@ describe('delegate: external roles', () => {
       [() => Promise.resolve(), undefined],
     ]
     for (const [disposer, warning] of cases) {
-      const { world, call } = boot()
+      const { world, call } = await boot()
       world.subagents.registerProvider.mockImplementation(provider => {
         world.externalProviders.set(provider.name, provider)
         return disposer
@@ -268,17 +268,17 @@ describe('delegate: external roles', () => {
         throw new Error('Codex runner is not implemented yet')
       },
     }
-    const stub = boot({ adapter: failing })
+    const stub = await boot({ adapter: failing })
     await expect(stub.call({ role: 'coder' })).rejects.toThrow(/^Codex runner is not implemented yet$/)
     expect(stub.world.externalProviders.size).toBe(0)
 
-    const missing = boot({ clis: { codex: { executable: '/nowhere/codex' } } })
+    const missing = await boot({ clis: { codex: { executable: '/nowhere/codex' } } })
     missing.world.services.subprocess = fakeSubprocess({ executables: {} })
     await expect(missing.call({ role: 'coder' })).rejects.toThrow(
       /^Codex was not found \(set its path in the plugin settings\)$/,
     )
 
-    const none = boot()
+    const none = await boot()
     delete none.world.services.subprocess
     await expect(none.call({ role: 'coder' })).rejects.toThrow(/subprocess service/)
     // DSH roles keep working without it.
@@ -287,13 +287,13 @@ describe('delegate: external roles', () => {
   })
 
   it('reads the live CLI settings at each delegation', async () => {
-    const { call, subprocess } = boot({ clis: { codex: { executable: '/opt/codex' } } })
+    const { call, subprocess } = await boot({ clis: { codex: { executable: '/opt/codex' } } })
     await call({ role: 'coder' })
     expect(subprocess.resolveCalls[0]?.command).toBe('/opt/codex')
   })
 
   it('disposes live external runs when the plugin unloads', async () => {
-    const { world, call } = boot({ onRun: () => {} })
+    const { world, call } = await boot({ onRun: () => {} })
     await call({ role: 'coder' })
     const run = world.externalRuns[0]
     if (run === undefined) throw new Error('no run')
@@ -302,7 +302,7 @@ describe('delegate: external roles', () => {
   })
 
   it('never spawns a run that was still starting when the plugin unloaded', async () => {
-    const { world, call, subprocess } = boot({ onRun: () => {} })
+    const { world, call, subprocess } = await boot({ onRun: () => {} })
     let release!: () => void
     const gate = new Promise<void>(resolve => {
       release = resolve
@@ -321,7 +321,7 @@ describe('delegate: external roles', () => {
   })
 
   it('aborts a run when DSH aborts its signal (interrupt_agent)', async () => {
-    const { world, call } = boot({ onRun: () => {} })
+    const { world, call } = await boot({ onRun: () => {} })
     const controller = new AbortController()
     world.subagents.startActivation.mockImplementationOnce(async spec => {
       const provider = world.externalProviders.get(spec.provider)

@@ -108,6 +108,31 @@ async function checkNativeWorkflow() {
   assert.deepEqual(test.options, [configured])
   pass('real guest receives configured workflow route')
 
+  test = await run('return await agent("JSON options", args.options);', { args: { options: { label: 'from JSON' } } })
+  assert.equal(test.result.stopReason, 'completed')
+  assert.deepEqual(test.options, [configured])
+  pass('real guest receives defaults for options arriving through host-realm args')
+
+  test = await run(`const options = {
+    get label() { if (this !== options) throw Error('changed receiver'); return 'accessor'; }
+  }; return await agent('getter options', options);`)
+  assert.equal(test.result.stopReason, 'completed')
+  assert.deepEqual(test.options, [configured])
+  pass('native option materialization reads accessors with their original receiver')
+
+  for (const options of [
+    'Object.assign(Object.create(null), {label: "null prototype"})',
+    'Object.defineProperty({}, "unexpected", {get() { throw Error("hidden getter"); }})',
+  ]) {
+    const script = `return await agent('plain options', ${options});`
+    const native = await run(script, {}, false)
+    assert.equal(native.result.stopReason, 'completed', options)
+    test = await run(script)
+    assert.equal(test.result.stopReason, 'completed', options)
+    assert.deepEqual(test.options, [configured])
+  }
+  pass('null-prototype and hidden option properties preserve native materialization')
+
   test = await run('return await agent("native fallback");', {}, false)
   assert.equal(test.result.stopReason, 'completed')
   assert.deepEqual(test.options, [undefined])
@@ -142,18 +167,33 @@ async function checkNativeWorkflow() {
   for (const options of [
     'null',
     '[]',
+    'Object.setPrototypeOf([], null)',
+    'Object.setPrototypeOf([], Object.prototype)',
     '42',
     '{unexpected: true}',
     '{provider: 42}',
     '{model: 42}',
+    '{provider: undefined}',
+    '{model: undefined}',
+    '{get label() { throw Error("invalid option"); }}',
+    'Object.defineProperty({}, Symbol("invalid"), {value: true})',
+    'new Proxy({}, {getPrototypeOf() { throw Error("invalid prototype"); }})',
+    'new Proxy({}, {ownKeys() { throw Error("invalid keys"); }})',
+    'new Proxy({label: "label"}, {get() { throw Error("invalid read"); }})',
     'new Date()',
     'new (class Options {})()',
   ]) {
-    test = await run(`return await parallel([() => agent('bad', ${options})]);`)
-    assert.equal(test.result.stopReason, 'error', options)
-    assert.equal(test.starts.length, 0, options)
+    for (const combine of [call => `parallel([() => ${call}])`, call => `pipeline([1], () => ${call})`]) {
+      const script = `return await ${combine(`agent('bad', ${options})`)};`
+      const native = await run(script, {}, false)
+      assert.equal(native.result.stopReason, 'error', options)
+      assert.equal(native.starts.length, 0, options)
+      test = await run(script)
+      assert.equal(test.result.stopReason, 'error', options)
+      assert.equal(test.starts.length, 0, options)
+    }
   }
-  pass('malformed options remain fatal through parallel, before child admission')
+  pass('malformed options retain native fatal errors through parallel and pipeline before child admission')
 
   // Native guest validates string type, not non-emptiness; backend route
   // resolution may reject these later. The adapter must not silently fix them.

@@ -402,6 +402,22 @@ describe('AI role-management permission', () => {
 })
 
 describe('role write-safety diagnostics', () => {
+  it('reports accepted but unconfirmed saves without discarding input or suggesting an automatic retry', async () => {
+    const { fake } = await mount()
+    fake.form.mutate = async () => true
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Description for the parent'), {
+      target: { value: 'keep submitted description' },
+    })
+    fireEvent.click(button('Save'))
+    await settle()
+    expect(footerMessage()).toContain('The Host accepted the save')
+    expect(footerMessage()).toContain('write may already be committed')
+    expect((screen.getByLabelText('Description for the parent') as HTMLTextAreaElement).value).toBe(
+      'keep submitted description',
+    )
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+  })
   it('explains expression-backed settings without discarding input or preventing independent OFF', async () => {
     const guard = vi.fn<RoleWriteSafetyCall>(async () =>
       ok({ safe: false, revision: 1, reason: 'expression-backed-role-settings' }),

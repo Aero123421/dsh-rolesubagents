@@ -318,7 +318,8 @@ export interface FakeWorld {
   readonly contexts: RuntimeContext[]
   /** A new Agent with its own Session, registered with the `sessions` service. Nothing is emitted. */
   newAgent(id: string, header?: SessionPort['header']): FakeAgent
-  emitCreated(agent: AgentPort, source?: string): void
+  /** Like native Context.serial, waits for every listener before the first turn. */
+  emitCreated(agent: AgentPort, source?: string): Promise<void>
   emitDisposed(agent: AgentPort): void
   emitToolsChange(): void
   emitVolatileUpdate(): void
@@ -336,7 +337,7 @@ export interface FakeWorld {
  * (depth one deeper than the parent) and fires `agent/created` with source `startup` before it resolves.
  */
 export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
-  const created: ((payload: CreatedPayload) => void)[] = []
+  const created: ((payload: CreatedPayload) => void | Promise<void>)[] = []
   const disposed: ((payload: DisposedPayload) => void)[] = []
   const sessionEvents: SessionListener[] = []
   const toolsChanged: (() => void)[] = []
@@ -411,7 +412,7 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
           delegationDepth: (parent.session.header.delegationDepth ?? 0) + 1,
         })
         world.children.push(child)
-        world.emitCreated(child, 'startup')
+        await world.emitCreated(child, 'startup')
         return { childId }
       }),
     },
@@ -420,8 +421,8 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
       sessions.set(agent.session.id, agent.session)
       return agent
     },
-    emitCreated(agent, source = 'startup') {
-      for (const listener of created) listener({ agent, source })
+    async emitCreated(agent, source = 'startup') {
+      for (const listener of [...created]) await listener({ agent, source })
     },
     emitDisposed(agent) {
       for (const listener of disposed) listener({ agent })
@@ -468,14 +469,26 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
     return undefined
   }
 
-  function on(event: 'agent/created', listener: (payload: CreatedPayload) => void): unknown
+  function on(event: 'agent/created', listener: (payload: CreatedPayload) => void | Promise<void>): unknown
   function on(event: 'agent/disposed', listener: (payload: DisposedPayload) => void): unknown
   function on(event: 'session/event', listener: SessionListener): unknown
   function on(event: 'tools/change', listener: () => void): unknown
   function on(event: string, listener: (...args: never[]) => void): unknown {
-    if (event === 'agent/created') created.push(listener as (payload: CreatedPayload) => void)
-    else if (event === 'agent/disposed') disposed.push(listener as (payload: DisposedPayload) => void)
-    else if (event === 'tools/change') {
+    if (event === 'agent/created') {
+      const fn = listener as (payload: CreatedPayload) => void | Promise<void>
+      created.push(fn)
+      return () => {
+        const index = created.indexOf(fn)
+        if (index >= 0) created.splice(index, 1)
+      }
+    } else if (event === 'agent/disposed') {
+      const fn = listener as (payload: DisposedPayload) => void
+      disposed.push(fn)
+      return () => {
+        const index = disposed.indexOf(fn)
+        if (index >= 0) disposed.splice(index, 1)
+      }
+    } else if (event === 'tools/change') {
       const fn = listener as () => void
       toolsChanged.push(fn)
       return () => {
@@ -498,7 +511,6 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
         if (index >= 0) sessionEvents.splice(index, 1)
       }
     } else throw new Error(`unexpected event ${event}`)
-    return () => {}
   }
 
   const ctx: HostContext = {

@@ -98,7 +98,11 @@ export interface RoleState {
   writeRole(session: SessionPort, role: RoleDefinition): void
   /** Settles when the storage domain is open (or the store has degraded to memory only). */
   readonly ready: Promise<void>
-  /** Settle every write issued so far; rejects with the first write failure. */
+  /**
+   * Wait for writes admitted through readiness, including writes another flush is waiting on.
+   * Each flush acknowledges only its captured failures, after all captured writes settle;
+   * consumers capturing the same write see the same failure, but a later rollback flush can succeed.
+   */
   flush(): Promise<void>
   /** Flush outstanding writes and close the domain, if any. */
   close(): Promise<void>
@@ -141,21 +145,27 @@ function roleOf(data: unknown): RoleDefinition | undefined {
 export function createRoleState(ctx: HostContext): RoleState {
   const snapshots = new Map<string, SnapshotRecord>()
   const roles = new Map<string, RoleRecord>()
-  const pending: Promise<void>[] = []
+  // Successful writes are pruned immediately; failures live only until a covering flush acknowledges them.
+  const pending = new Set<Promise<void>>()
   let domain: DomainPort | undefined
   let degraded = false
   let degradedReason: string | undefined
+  let closing: Promise<void> | undefined
 
   const persist = (table: string, key: string, value: SnapshotRecord | RoleRecord): void => {
     if (domain === undefined) return
     const target = domain
-    const write = target.table(table).put(key, value)
-    pending.push(write)
-    write.catch(error => {
-      ctx.logger.warn(
-        `rolesubagents: could not persist ${table} state for session ${key}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    })
+    // Also track synchronous backend failures through the same flush contract.
+    const write = Promise.resolve().then(() => target.table(table).put(key, value))
+    pending.add(write)
+    void write.then(
+      () => pending.delete(write),
+      error => {
+        ctx.logger.warn(
+          `rolesubagents: could not persist ${table} state for session ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      },
+    )
   }
 
   const ready = (async (): Promise<void> => {
@@ -167,20 +177,30 @@ export function createRoleState(ctx: HostContext): RoleState {
     }
     try {
       domain = await facility.open(STATE_DOMAIN)
-      // Adopt the stored image, then replay any writes made while opening.
+      // Replay only writes admitted while opening, never the historical rows we load below.
+      for (const [key, record] of snapshots) persist(SNAPSHOTS_TABLE, key, record)
+      for (const [key, record] of roles) persist(ROLES_TABLE, key, record)
       for (const [key, value] of domain.table(SNAPSHOTS_TABLE).entries()) {
         if (!snapshots.has(key)) snapshots.set(key, value as SnapshotRecord)
       }
       for (const [key, value] of domain.table(ROLES_TABLE).entries()) {
         if (!roles.has(key)) roles.set(key, value as RoleRecord)
       }
-      for (const [key, record] of snapshots) persist(SNAPSHOTS_TABLE, key, record)
-      for (const [key, record] of roles) persist(ROLES_TABLE, key, record)
     } catch (error) {
       degraded = true
       degradedReason = `the ${STATE_DOMAIN_NAME} storage domain could not be opened: ${error instanceof Error ? error.message : String(error)}`
     }
   })()
+
+  const flush = async (): Promise<void> => {
+    await ready
+    const writes = [...pending]
+    const results = await Promise.allSettled(writes)
+    // Do not clear failures from writes admitted while this flush was waiting.
+    for (const write of writes) pending.delete(write)
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure?.status === 'rejected') throw failure.reason
+  }
 
   return {
     ready,
@@ -194,6 +214,7 @@ export function createRoleState(ctx: HostContext): RoleState {
       return snapshotOf(snapshots.get(session.id)) ?? snapshotOf(legacyRecord(session, ROLES_RECORD))
     },
     writeSnapshot(session, settings) {
+      if (closing) throw new Error('role state is closed')
       const record: SnapshotRecord = { version: 1, settings }
       snapshots.set(session.id, record)
       persist(SNAPSHOTS_TABLE, session.id, record)
@@ -202,18 +223,19 @@ export function createRoleState(ctx: HostContext): RoleState {
       return roleOf(roles.get(session.id)) ?? roleOf(legacyRecord(session, ROLE_RECORD))
     },
     writeRole(session, role) {
+      if (closing) throw new Error('role state is closed')
       const record: RoleRecord = { version: 1, role }
       roles.set(session.id, record)
       persist(ROLES_TABLE, session.id, record)
     },
-    async flush() {
-      await ready
-      await Promise.all(pending.splice(0))
-    },
-    async close() {
-      await ready
-      await Promise.allSettled(pending.splice(0))
-      await domain?.close()
+    flush,
+    close() {
+      closing ??= (async () => {
+        // Drain even failed writes before releasing the domain; their failures were logged above.
+        await flush().catch(() => {})
+        await domain?.close()
+      })()
+      return closing
     },
   }
 }

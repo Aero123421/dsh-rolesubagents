@@ -104,6 +104,7 @@ export type RoleSaveIssue =
   | 'expression-backed-role-settings'
   | 'role-write-safety-unavailable'
   | 'role-write-safety-conflict'
+  | 'role-save-unconfirmed'
 
 /** Check raw Host syntax safety at the exact revision about to be written. */
 export type RoleWriteSafetyCall = (expectedRevision: number, signal: AbortSignal) => Promise<RemoteResult<unknown>>
@@ -495,7 +496,7 @@ export function createController(options: ControllerOptions): Controller {
       },
       expanded,
       canEdit,
-      canSave: canEdit && dirty && issues.length === 0 && !conflict && !roleSafetyWaitForForm,
+      canSave: canEdit && (dirty || repaired.length > 0) && issues.length === 0 && !conflict && !roleSafetyWaitForForm,
       canAdd: canEdit && canAddRole(current),
       catalog,
       presets,
@@ -540,10 +541,9 @@ export function createController(options: ControllerOptions): Controller {
     const acceptedGate = managementEnabled(snapshot)
     if (acceptedGate !== lastManagementEnabled && managementSave !== 'saving') managementSave = 'idle'
     lastManagementEnabled = acceptedGate
-    if (snapshot.status !== 'ready') {
-      if (save !== 'saving' && saveIssue !== 'role-write-safety-conflict') draft = undefined
-      conflict = false
-    } else if (save !== 'saving') {
+    // A temporary namespace disappearance hides the editor, not the user's inputs.
+    // Reconcile the retained draft only when an authoritative ready view returns.
+    if (snapshot.status === 'ready' && save !== 'saving') {
       if (draft === undefined) {
         rebase(snapshot)
         save = 'idle'
@@ -551,21 +551,22 @@ export function createController(options: ControllerOptions): Controller {
         const host = hostSettings(snapshot)
         const raw = rawRoles(snapshot)
         const rawUnchanged = sameRawRoles(draft.rawBaseRoles, raw)
-        if (!isDirty(draft)) {
+        if (!isDirty(draft) && saveIssue !== 'role-save-unconfirmed') {
+          rebase(snapshot)
+          save = 'idle'
+        } else if (
+          host.problems.length === 0 &&
+          sameSettings(draftSettings(draft), host.settings) &&
+          sameRawRoles(mergeKnownRoles(draft.rawBaseRoles, draftSettings(draft).roles, origins(draft)), raw)
+        ) {
+          // The mirror confirms exactly this draft, including its untouched opaque metadata.
           rebase(snapshot)
           save = 'idle'
         } else if (sameSettings(draft.base, host.settings) && rawUnchanged) {
           // A disjoint live setting (notably the management gate) changed. Keep every input/editor.
           draft = { ...draft, revision: snapshot.revision }
           repaired = host.problems
-          conflict = false
-        } else if (
-          sameSettings(draftSettings(draft), host.settings) &&
-          sameRawRoles(mergeKnownRoles(draft.rawBaseRoles, draftSettings(draft).roles, origins(draft)), raw)
-        ) {
-          // Another writer accepted exactly this draft, including its untouched opaque metadata.
-          rebase(snapshot)
-          save = 'idle'
+          conflict = saveIssue === 'role-save-unconfirmed'
         } else {
           conflict = true
         }
@@ -576,7 +577,7 @@ export function createController(options: ControllerOptions): Controller {
 
   /** Apply a draft edit when editing is allowed; a no-op edit publishes nothing. */
   function edit(change: (current: Draft) => Draft, after?: (next: Draft, previous: Draft) => void): void {
-    if (draft === undefined || !state.canEdit) return
+    if (disposed || draft === undefined || !state.canEdit) return
     const previous = draft
     const next = change(previous)
     if (next === previous) return
@@ -594,6 +595,7 @@ export function createController(options: ControllerOptions): Controller {
   }
 
   async function loadCatalog(): Promise<void> {
+    if (disposed) return
     const run = ++catalogRun
     catalog = { ...catalog, status: 'loading' }
     publish()
@@ -610,6 +612,7 @@ export function createController(options: ControllerOptions): Controller {
   }
 
   async function loadPresets(): Promise<void> {
+    if (disposed) return
     const run = ++presetRun
     presets = { ...presets, status: 'loading' }
     publish()
@@ -644,7 +647,7 @@ export function createController(options: ControllerOptions): Controller {
   }
 
   async function runProbe(cli: CliId): Promise<void> {
-    if (probe === undefined || !probes.available || !isCliId(cli)) return
+    if (disposed || probe === undefined || !probes.available || !isCliId(cli)) return
     probeRuns.get(cli)?.abort()
     const run = new AbortController()
     probeRuns.set(cli, run)
@@ -691,6 +694,7 @@ export function createController(options: ControllerOptions): Controller {
     getSnapshot: () => state,
     setEnabled: enabled => edit(current => setEnabled(current, enabled)),
     async setAllowAiRoleManagement(enabled) {
+      if (disposed) return
       const sent = form.getSnapshot()
       const revision = sent.revision
       if (
@@ -751,13 +755,13 @@ export function createController(options: ControllerOptions): Controller {
     addRole: () => edit(addBlankRole, openNewRow),
     addTemplate: templateId => edit(current => addTemplateRole(current, templateId), openNewRow),
     toggleEditor(uid) {
-      if (draft === undefined) return
+      if (disposed || draft === undefined) return
       expanded = expanded === uid ? undefined : uid
       if (expanded !== undefined) loadReference()
       publish()
     },
     async save() {
-      if (draft === undefined || !state.canSave) return
+      if (disposed || draft === undefined || !state.canSave) return
       const sent = draft
       const sentForm = form.getSnapshot()
       const sentEpoch = formEpoch
@@ -814,11 +818,13 @@ export function createController(options: ControllerOptions): Controller {
         }
       }
       let landed = false
+      let sentRoles: readonly unknown[] = []
       try {
+        sentRoles = mergeKnownRoles(sent.rawBaseRoles, settings.roles, origins(sent))
         landed = await form.mutate(
           [
             { op: 'set', path: ['enabled'], value: settings.enabled },
-            { op: 'set', path: ['roles'], value: mergeKnownRoles(sent.rawBaseRoles, settings.roles, origins(sent)) },
+            { op: 'set', path: ['roles'], value: sentRoles },
             { op: 'set', path: ['workflowModel'], value: settings.workflowModel ?? null },
             { op: 'set', path: ['clis'], value: settings.clis ?? {} },
           ],
@@ -830,8 +836,22 @@ export function createController(options: ControllerOptions): Controller {
       if (disposed) return
       const snapshot = form.getSnapshot()
       if (landed) {
-        if (snapshot.status === 'ready') rebase(snapshot)
-        save = 'saved'
+        const held = hostSettings(snapshot)
+        if (
+          snapshot.status === 'ready' &&
+          sameSettings(settings, held.settings) &&
+          held.problems.length === 0 &&
+          sameRawRoles(sentRoles, rawRoles(snapshot))
+        ) {
+          rebase(snapshot)
+          save = 'saved'
+        } else {
+          // Acceptance is not proof that a shared form's mirror has caught up.
+          // Preserve the submitted draft; neither claim failure nor retry a possibly committed write.
+          conflict = true
+          save = 'idle'
+          saveIssue = 'role-save-unconfirmed'
+        }
       } else if (snapshot.revision !== sent.revision) {
         // Reconcile the refused write, but never retry it. A gate-only change can safely
         // advance the draft fence; real role/metadata changes still produce a conflict.
@@ -844,7 +864,7 @@ export function createController(options: ControllerOptions): Controller {
       publish()
     },
     discard() {
-      if (save === 'saving' || managementSave === 'saving') return
+      if (disposed || save === 'saving' || managementSave === 'saving') return
       const snapshot = form.getSnapshot()
       if (snapshot.status === 'ready') rebase(snapshot)
       save = 'idle'

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Await role storage and persistence during native Agent creation, preserve restored read-only roles, clean up failed registrations, and defer/coalesce sandbox re-pinning until Session event publication finishes. Disposed Agents and plugin callbacks cannot re-install tools.
+- Drain shared storage writes without retaining completed promises or rewriting historical rows on open. Concurrent flushes observe their covered failures; acknowledged failures do not poison subsequent rollback/recovery. Close is idempotent and refuses late writes.
+- Explicit child-model defaults clear inherited reasoning effort; missing LLM validation, replaced providers and incompatible full-history providers refuse before delegation. Workflow defaults accept cross-realm plain options while leaving malformed values and property reads to native validation.
+- Preserve drafts through temporary settings namespace loss. An accepted write is not reported as saved until its exact settings/opaque metadata are mirrored; unconfirmed writes retain inputs and never retry automatically. Allow deliberate repair-only saves through the existing safety check, and ignore stale UI actions after disposal.
+- Add isolated native delegation/restart/compaction regression checks (`pnpm check:delegation`); keep the existing dependency/engine floors unchanged. See [validation and remaining PR5 scope](<docs/lifecycle-validation-20261024.md>).
+
 ## 0.3.0
 
 - Add opt-in `manage_roles` administration of this Host/profile's role definitions: list/get, capability/model references, bounded create/update/delete previews, revision-fenced apply, and explicit caller-only current-catalog refresh. The separate **Allow AI role management** switch defaults OFF, persists immediately through the Host form, and is not part of a Session's role snapshot or the master Subagents switch.
