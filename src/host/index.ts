@@ -136,13 +136,18 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   const state = createRoleState(ctx)
   /** Set by the effect cleanup: late callbacks (storage opening, probe import) must not touch an inactive context. */
   let disposed = false
+  let stateReady = false
+  void state.ready.then(() => {
+    stateReady = true
+  })
+  const disposedAgents = new WeakSet<AgentPort>()
   /** Run work after the store is ready, unless the plugin was unloaded first; never rejects. */
-  const whenReady = (label: string, task: () => void): void => {
+  const whenReady = (label: string, task: () => void | Promise<void>): void => {
     state.ready
-      .then(() => {
+      .then(async () => {
         if (disposed) return
         try {
-          task()
+          await task()
         } catch (error) {
           if (!disposed) {
             ctx.logger.warn(`rolesubagents: ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -196,6 +201,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   }
 
   const roleOf = (agent: AgentPort): RoleDefinition | undefined => {
+    // A prompt/authorization read can precede storage opening; do not cache an incomplete image.
+    if (!stateReady) return undefined
     const sessionState = stateOf(agent.session.id)
     if (sessionState.role === undefined) sessionState.role = state.readRole(agent.session) ?? null
     return sessionState.role ?? undefined
@@ -525,9 +532,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       install(agent, child.snapshot)
       return
     }
+    if (roleOf(agent)?.readOnly === true) pinReadOnly(agent)
     const snapshot = snapshotFor(agent)
     install(agent, snapshot)
-    if (roleOf(agent)?.readOnly === true) pinReadOnly(agent)
   }
 
   ctx.systemPrompt.context({
@@ -536,7 +543,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     interpolate: false,
     required: true,
     text: ({ agent }) => {
-      if (agent === undefined) return ''
+      if (disposed || agent === undefined || disposedAgents.has(agent)) return ''
       const prepared = installed.get(agent)
       if (prepared !== undefined) {
         refreshWorkflow(agent, prepared)
@@ -561,12 +568,23 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     },
   })
 
-  const guarded = (agent: AgentPort, _source: string): void => {
+  const guarded = async (agent: AgentPort, _source: string): Promise<void> => {
+    await state.ready
+    if (disposed || disposedAgents.has(agent)) return
+    let failClosed = pending.get(agent.id)?.role.readOnly === true || readOnlySessions.has(agent.session)
     try {
+      failClosed ||= state.readRole(agent.session)?.readOnly === true
       onCreated(agent)
+      // Native agent/created is serially awaited before the first turn.
+      await state.flush()
     } catch (error) {
-      // A read-only child must not start writable: abort its creation.
-      if (pending.get(agent.id)?.role.readOnly === true) throw error
+      if (disposed || disposedAgents.has(agent)) return
+      const prepared = installed.get(agent)
+      installed.delete(agent)
+      disposePrepared(prepared)
+      stateOf(agent.session.id).toolInstalled = false
+      // Restored roles must fail closed just like reserved children, including partial installation.
+      if (failClosed) throw error
       // Anything else only costs this Agent the tool; a throw would abort its creation.
       ctx.logger.warn(
         `rolesubagents: could not prepare agent ${agent.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -576,7 +594,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
 
   const stopCreated = ctx.on('agent/created', ({ agent, source }) => guarded(agent, source))
   const stopTools = ctx.on('tools/change', () => {
-    if (!refreshingWorkflow) workflowEpoch++
+    if (!disposed && !refreshingWorkflow) workflowEpoch++
   })
   // Volatile commits update all live references before this event. Visibility follows on/off;
   // execution independently checks the authoritative settings descriptor and its CAS revision.
@@ -587,8 +605,14 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     if (!read(config.allowAiRoleManagement, false)) management.revoke()
     for (const [agent, prepared] of installed) refreshManagement(agent, prepared)
   })
-  const stopModelCatalog = onDynamic('llm/adapters-updated', () => referenceCatalog.invalidate('dsh'))
+  const stopModelCatalog = onDynamic('llm/adapters-updated', () => {
+    if (!disposed) referenceCatalog.invalidate('dsh')
+  })
+  const repins = new Set<SessionPort>()
   const stopDisposed = ctx.on('agent/disposed', ({ agent }) => {
+    if (disposed) return
+    disposedAgents.add(agent)
+    repins.delete(agent.session)
     management.disposeAgent(agent)
     const prepared = installed.get(agent)
     installed.delete(agent)
@@ -596,19 +620,30 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     sessions.delete(agent.session.id)
   })
   const stopSession = ctx.on('session/event', (session, event) => {
-    if (event.type !== 'sandbox/mode' || sandboxModeOf(event.data) === 'read-only') return
-    if (!isReadOnlySession(session)) return
-    try {
-      holdReadOnly(session)
-    } catch (error) {
-      ctx.logger.warn(
-        `rolesubagents: could not re-pin read-only on session ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
+    if (disposed || event.type !== 'sandbox/mode' || sandboxModeOf(event.data) === 'read-only') return
+    if (!isReadOnlySession(session) || repins.has(session)) return
+    repins.add(session)
+    // Session publication is synchronous and non-reentrant. Append only after every listener saw the event.
+    queueMicrotask(() => {
+      if (!repins.delete(session) || disposed) return
+      try {
+        holdReadOnly(session)
+      } catch (error) {
+        ctx.logger.warn(
+          `rolesubagents: could not re-pin read-only on session ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    })
   })
-  // Agents that already exist are prepared once the stored state is readable.
-  whenReady('preparing existing agents', () => {
-    for (const agent of ctx.agents.list()) guarded(agent, 'resume')
+  // Already-live agents have no creation caller to reject; clean up and log each failure independently.
+  whenReady('preparing existing agents', async () => {
+    for (const agent of ctx.agents.list()) {
+      try {
+        await guarded(agent, 'resume')
+      } catch (error) {
+        if (!disposed) ctx.logger.warn(`rolesubagents: could not prepare existing agent ${agent.id}: ${String(error)}`)
+      }
+    }
   })
 
   // Adapter housekeeping (e.g. stale generated files) runs once per plugin start; failures are only logged.
@@ -616,7 +651,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     const housekeeping = adapter.housekeeping?.bind(adapter)
     if (housekeeping === undefined) continue
     Promise.resolve()
-      .then(() => housekeeping(process.env.HOME ?? homedir()))
+      .then(() => {
+        if (!disposed) return housekeeping(process.env.HOME ?? homedir())
+      })
       .catch(error => {
         if (disposed) return
         ctx.logger.warn(
@@ -635,6 +672,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     cliSettings: () => currentSettings().clis,
     isDisposed: () => disposed,
     onResult: (result, admittedSettings) => {
+      if (disposed) return
       referenceProbes.set(result.cli, {
         result,
         settings: JSON.stringify(admittedSettings[result.cli] ?? {}),
@@ -651,6 +689,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   ctx.effect(
     () => () => {
       disposed = true
+      repins.clear()
       lifetime.abort(new Error('the rolesubagents plugin was unloaded'))
       for (const run of [...runs]) {
         run.dispose().catch(error => {

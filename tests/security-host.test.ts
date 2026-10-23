@@ -33,11 +33,11 @@ function modes(session: FakeSession): unknown[] {
   return recordsOf(session, SANDBOX)
 }
 
-function boot(roles = ROLES) {
+async function boot(roles = ROLES) {
   const world = fakeWorld()
   apply(world.ctx, { roles })
   const parent = world.newAgent('parent')
-  world.emitCreated(parent)
+  await world.emitCreated(parent)
   const delegate = async (roleId?: string) => {
     const tool = registeredTool(parent)
     await tool.execute({ ...ARGS, ...(roleId === undefined ? {} : { role: roleId }) }, execContext(parent))
@@ -49,23 +49,34 @@ function boot(roles = ROLES) {
 }
 
 describe('read-only sandbox stays pinned', () => {
-  it('re-appends read-only after a later sandbox/mode change', async () => {
-    const { world, delegate } = boot()
+  it('coalesces read-only re-pins after synchronous sandbox publication', async () => {
+    const { world, delegate } = await boot()
     const child = await delegate('reviewer')
     expect(modes(child.session)).toEqual([{ mode: 'read-only' }])
+    let publishing = true
+    const append = child.session.append.bind(child.session)
+    child.session.append = (type, data) => {
+      if (publishing && data.mode === 'read-only') throw new Error('non-reentrant publication')
+      return append(type, data)
+    }
     world.emitSandbox(child.session, 'workspace-write')
     world.emitSandbox(child.session, 'danger-full-access')
+    expect(modes(child.session).at(-1)).toEqual({ mode: 'danger-full-access' })
+    expect(child.guards[0]?.({ name: 'bash', arguments: {} })).toMatch(/not read-only/)
+    publishing = false
+    await Promise.resolve()
     expect(modes(child.session)).toEqual([
       { mode: 'read-only' },
       { mode: 'workspace-write' },
-      { mode: 'read-only' },
       { mode: 'danger-full-access' },
       { mode: 'read-only' },
     ])
+    expect(world.logger.warn).not.toHaveBeenCalled()
+    await world.teardown()
   })
 
   it('does not pin a role that is not read-only, including the parent', async () => {
-    const { world, parent, delegate } = boot()
+    const { world, parent, delegate } = await boot()
     const child = await delegate('worker')
     world.emitSandbox(child.session, 'workspace-write')
     world.emitSandbox(parent.session, 'danger-full-access')
@@ -74,20 +85,20 @@ describe('read-only sandbox stays pinned', () => {
   })
 
   it('re-pins on resume when the stored mode is no longer read-only', async () => {
-    const { world, delegate } = boot()
+    const { world, delegate } = await boot()
     const child = await delegate('reviewer')
     child.session.append('sandbox/mode', { mode: 'workspace-write' })
     const fresh = fakeWorld(world.storage)
     apply(fresh.ctx, { roles: ROLES })
     await fresh.settle()
     const resumed = fakeAgent('resumed', child.session)
-    fresh.emitCreated(resumed, 'resume')
+    await fresh.emitCreated(resumed, 'resume')
     expect(modes(child.session).at(-1)).toEqual({ mode: 'read-only' })
     expect(resumed.guards).toHaveLength(1)
   })
 
   it('logs and leaves the session when a re-pin is rejected', async () => {
-    const { world, delegate } = boot()
+    const { world, delegate } = await boot()
     const child = await delegate('reviewer')
     const original = child.session.append.bind(child.session)
     child.session.append = (type, data) => {
@@ -95,6 +106,7 @@ describe('read-only sandbox stays pinned', () => {
       return original(type, data)
     }
     world.emitSandbox(child.session, 'workspace-write')
+    await Promise.resolve()
     expect(world.logger.warn).toHaveBeenCalledWith(
       expect.stringContaining(`could not re-pin read-only on session ${child.session.id}`),
     )
@@ -107,10 +119,22 @@ describe('read-only sandbox stays pinned', () => {
     expect(guard({ name: 'read', arguments: {} })).toBeUndefined()
   })
 
-  it('stops watching after the plugin is unloaded', async () => {
-    const { world, delegate } = boot()
+  it.each(['plugin', 'agent'])('cancels an already queued re-pin on %s disposal', async owner => {
+    const { world, delegate } = await boot()
     const child = await delegate('reviewer')
-    world.teardown()
+    world.emitSandbox(child.session, 'workspace-write')
+    const closing = owner === 'plugin' ? world.teardown() : undefined
+    if (owner === 'agent') world.emitDisposed(child)
+    await Promise.resolve()
+    expect(modes(child.session).at(-1)).toEqual({ mode: 'workspace-write' })
+    await closing
+    await world.teardown()
+  })
+
+  it('stops watching after the plugin is unloaded', async () => {
+    const { world, delegate } = await boot()
+    const child = await delegate('reviewer')
+    await world.teardown()
     world.emitSandbox(child.session, 'workspace-write')
     expect(modes(child.session).at(-1)).toEqual({ mode: 'workspace-write' })
   })
@@ -118,7 +142,7 @@ describe('read-only sandbox stays pinned', () => {
 
 describe('read-only tool guard', () => {
   it('refuses MCP and plugin writes and still allows reads and a read-only child', async () => {
-    const { delegate } = boot()
+    const { delegate } = await boot()
     const child = await delegate('reviewer')
     const guard = child.guards[0]
     if (guard === undefined) throw new Error('read-only child has no guard')
@@ -135,14 +159,14 @@ describe('read-only tool guard', () => {
   })
 
   it('does not install a guard on a writable child', async () => {
-    const { parent, delegate } = boot()
+    const { parent, delegate } = await boot()
     const child = await delegate('worker')
     expect(child.guards).toEqual([])
     expect(parent.guards).toEqual([])
   })
 
   it('removes the guard when the child is disposed', async () => {
-    const { world, delegate } = boot()
+    const { world, delegate } = await boot()
     const child = await delegate('reviewer')
     world.emitDisposed(child)
     expect(child.guardDisposers[0]).toHaveBeenCalledTimes(1)
@@ -152,7 +176,7 @@ describe('read-only tool guard', () => {
 
 describe('fork inheritance warning and task scope', () => {
   it('warns in the tool result and the child context when a fork copies history', async () => {
-    const { world, parent, delegate } = boot()
+    const { world, parent, delegate } = await boot()
     const child = await delegate('fork')
     expect(world.logger.warn).toHaveBeenCalledWith(expect.stringContaining('prompt injection'))
     expect(world.runtimeContext(child)).toBe(FORK_INHERIT_WARNING)
@@ -165,7 +189,7 @@ describe('fork inheritance warning and task scope', () => {
   })
 
   it('applies a read-only role when creation is announced with a source other than startup', async () => {
-    const { world, parent } = boot()
+    const { world, parent } = await boot()
     world.subagents.startActivation.mockImplementation(async spec => {
       const childId = spec.childId ?? 'missing-child'
       const child = world.newAgent(childId, {
@@ -174,7 +198,7 @@ describe('fork inheritance warning and task scope', () => {
         delegationDepth: (spec.request.parent.session.header.delegationDepth ?? 0) + 1,
       })
       world.children.push(child)
-      world.emitCreated(child, 'compact')
+      await world.emitCreated(child, 'compact')
       return { childId }
     })
     const tool = registeredTool(parent)
@@ -187,7 +211,7 @@ describe('fork inheritance warning and task scope', () => {
   })
 
   it('does not start a fresh role when its provider copies the parent conversation', async () => {
-    const { world, parent } = boot()
+    const { world, parent } = await boot()
     world.providers.set('spawn', fakeProvider('spawn', { inheritsParentContext: true }))
     await expect(registeredTool(parent).execute(ARGS, execContext(parent))).rejects.toThrow(
       /must not inherit the parent conversation/,
@@ -212,7 +236,7 @@ describe('fork inheritance warning and task scope', () => {
       ],
     })
     const parent = world.newAgent('parent')
-    world.emitCreated(parent)
+    await world.emitCreated(parent)
     await registeredTool(parent).execute({ ...ARGS, role: 'wide' }, execContext(parent))
     expect(world.subagents.startActivation.mock.calls.at(-1)?.[0].provider).toBe('spawn')
     expect(world.logger.warn).toHaveBeenCalledWith(expect.stringContaining('does not inherit the parent conversation'))
@@ -221,7 +245,7 @@ describe('fork inheritance warning and task scope', () => {
 
   it('starts a task-scoped fork without the parent log and without the injection warning', async () => {
     const taskFork = builtinRole('fork', { forkScope: 'task' })
-    const { world, parent, delegate } = boot([GENERAL, taskFork, WORKER, REVIEWER])
+    const { world, parent, delegate } = await boot([GENERAL, taskFork, WORKER, REVIEWER])
     const child = await delegate('fork')
     expect(world.subagents.startActivation.mock.calls.at(-1)?.[0].provider).toBe('spawn')
     expect(world.logger.warn).not.toHaveBeenCalled()

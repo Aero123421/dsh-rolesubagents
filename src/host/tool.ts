@@ -210,14 +210,11 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
           : {
               provider: role.model.provider,
               model: role.model.model,
-              ...(role.model.reasoningEffort === undefined ? {} : { reasoningEffort: role.model.reasoningEffort }),
+              // Own undefined clears a same-route parent's effort before native model-default resolution.
+              reasoningEffort: role.model.reasoningEffort,
             }
-      if (agentOptions !== undefined) {
-        if (provider.capabilities.agentOptions !== true) {
-          throw new Error(`role "${role.id}": provider "${providerName}" cannot set the child model`)
-        }
-        await deps.ctx.get('llm')?.resolveCallConfig(agentOptions, signal)
-        checkAlive()
+      if (agentOptions !== undefined && provider.capabilities.agentOptions !== true) {
+        throw new Error(`role "${role.id}": provider "${providerName}" cannot set the child model`)
       }
       if (
         role.agentPreset !== undefined &&
@@ -229,6 +226,24 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
         throw new Error(
           `role "${role.id}" must not inherit the parent conversation, but provider "${providerName}" copies it`,
         )
+      }
+      if (inheritsHistory && provider.inheritsParentContext !== true) {
+        throw new Error(
+          `role "${role.id}" requires the parent conversation, but provider "${providerName}" does not copy it`,
+        )
+      }
+      if (agentOptions !== undefined) {
+        const llm = deps.ctx.get('llm')
+        if (llm === undefined) {
+          throw new Error('cannot resolve the selected child LLM route because the `llm` service is unavailable')
+        }
+        await llm.resolveCallConfig(agentOptions, signal)
+        checkAlive()
+        if (deps.ctx.subagents.getProvider(providerName) !== provider) {
+          throw new Error(
+            `subagent provider "${providerName}" changed while resolving the child LLM route; retry the delegation`,
+          )
+        }
       }
       const maxDepth = deps.ctx.subagents.resolveMaxDepth(undefined)
       const childId = randomUUID()

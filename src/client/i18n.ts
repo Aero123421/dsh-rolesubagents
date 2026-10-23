@@ -234,6 +234,8 @@ const en = {
   'foot.saved':
     'Saved. New root conversations use these settings. AI can explicitly use apply_current to update its own roles for future delegations, never existing children. Running sessions keep their workflow default model.',
   'foot.failed': 'Could not save. Check the connection and try again.',
+  'foot.role-save-unconfirmed':
+    'The Host accepted the save, but the current settings view has not confirmed it. Your draft is retained. Check the latest settings before retrying; the write may already be committed.',
   'foot.expression-backed-role-settings':
     'Executable expressions or other unsupported role settings cannot be safely saved from this page. Edit the native profile configuration instead. Your draft is unchanged.',
   'foot.role-write-safety-unavailable':
@@ -503,6 +505,8 @@ const ja: Record<Key, string> = {
   'foot.saved':
     '保存しました。設定は新しい親の会話に適用されます。AIが明示的にapply_currentを使うと、自分の今後の委任用ロールだけを更新でき、既存の子は変更しません。実行中セッションのワークフローの既定モデルは変わりません。',
   'foot.failed': '保存できませんでした。接続を確認して、もう一度お試しください。',
+  'foot.role-save-unconfirmed':
+    'Hostは保存を受け付けましたが、現在の設定表示では反映を確認できていません。入力は保持しています。既に保存済みの可能性があるため、再試行前に最新の設定を確認してください。',
   'foot.expression-backed-role-settings':
     '実行可能な式や、対応外の形式・規模を含むロール設定は、この画面から安全に保存できません。ネイティブのプロファイル設定で編集してください。入力中の内容は保持しています。',
   'foot.role-write-safety-unavailable':

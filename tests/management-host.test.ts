@@ -142,7 +142,7 @@ describe('manage_roles Host integration', () => {
     const t = await setup()
     const old = tool(t.root, 'delegate')
     const other = t.world.newAgent('other')
-    t.world.emitCreated(other)
+    await t.world.emitCreated(other)
     await old.execute(delegateArgs, execContext(t.root))
     const child = t.world.children[0]!
     const childEnum = enumOf(tool(child, 'delegate'))
@@ -199,11 +199,11 @@ describe('manage_roles Host integration', () => {
   it('allows a user fork with parentSession lineage but rejects actual delegated headers', async () => {
     const t = await setup()
     const fork = t.world.newAgent('user-fork', { origin: 'fork', parentSession: t.root.session.id, delegationDepth: 0 })
-    t.world.emitCreated(fork)
+    await t.world.emitCreated(fork)
     expect((await call(fork, { action: 'list' })).ok).toBe(true)
     for (const header of [{ origin: 'subagent' }, { delegationDepth: 1 }]) {
       const child = t.world.newAgent(`header-${JSON.stringify(header)}`, header)
-      t.world.emitCreated(child)
+      await t.world.emitCreated(child)
       expect(activeTool(child, 'manage_roles')).toBeUndefined()
     }
     await t.world.teardown()
@@ -298,7 +298,8 @@ describe('manage_roles Host integration', () => {
       const blocked = barrier()
       t.snapshotHooks.before = key => (key === 'session-flush-blocker' ? blocked.promise : undefined)
       const blocker = t.world.newAgent('flush-blocker')
-      t.world.emitCreated(blocker)
+      const creating = t.world.emitCreated(blocker)
+      await t.world.settle()
       const args = {
         action: 'apply_current',
         expectedRevision: state.revision,
@@ -330,6 +331,7 @@ describe('manage_roles Host integration', () => {
           t.revision(),
         )
       blocked.release()
+      await creating
       expect(await running).toMatchObject({
         ok: false,
         currentApplied: false,
@@ -365,12 +367,14 @@ describe('manage_roles Host integration', () => {
         parentSession: t.root.session.id,
         delegationDepth: 0,
       })
-      t.world.emitCreated(fork)
+      const creating = t.world.emitCreated(fork)
+      await t.world.settle()
       expect(enumOf(tool(fork, 'delegate'))).not.toContain('fresh_worker')
       expect(enumOf(old)).not.toContain('fresh_worker')
       if (change === 'off') t.toggle(false)
       else t.world.services.sandboxPolicy = { resolve: () => ({ mode: 'read-only', workspaceRoot: process.cwd() }) }
       blocked.release()
+      await creating
       expect(await running).toMatchObject({
         ok: false,
         currentApplied: false,
@@ -411,6 +415,8 @@ describe('manage_roles Host integration', () => {
     }
     const running = refresh(t.root)
     let busy: Promise<Record<string, unknown>> | undefined
+    let creating: Promise<void> | undefined
+    let creatingFork: Promise<void> | undefined
     try {
       await entered.promise
       expect(snapshotHasFresh(t.world.storedSnapshot(t.root.session.id))).toBe(true)
@@ -419,7 +425,8 @@ describe('manage_roles Host integration', () => {
       expect(replacement.session.id).toBe(t.root.session.id)
       expect(replacement === t.root).toBe(false)
       t.world.agents = [replacement]
-      t.world.emitCreated(replacement, 'resume')
+      creating = t.world.emitCreated(replacement, 'resume')
+      await t.world.settle()
       const replacementDelegate = tool(replacement, 'delegate')
       expect(enumOf(replacementDelegate)).not.toContain('fresh_worker')
       expect(replacementDelegate.description).not.toContain('Replacement-only worker')
@@ -441,11 +448,12 @@ describe('manage_roles Host integration', () => {
         parentSession: replacement.session.id,
         delegationDepth: 0,
       })
-      t.world.emitCreated(fork)
+      creatingFork = t.world.emitCreated(fork)
       await t.world.settle()
       expect(enumOf(tool(fork, 'delegate'))).not.toContain('fresh_worker')
       expect(snapshotHasFresh(t.world.storedSnapshot(fork.session.id))).toBe(false)
       blocked.release()
+      await creating
       expect(await running).toMatchObject({
         ok: false,
         globalSaved: true,
@@ -474,6 +482,8 @@ describe('manage_roles Host integration', () => {
       blocked.release()
       await running
       await busy
+      await creating
+      await creatingFork
       await t.world.teardown()
     }
   })
@@ -658,6 +668,39 @@ describe('manage_roles Host integration', () => {
       await admitted
       await t.world.teardown()
     }
+  })
+
+  it('acknowledges a candidate write failure so rollback and a subsequent refresh can succeed', async () => {
+    const t = await setup()
+    await save(t, [create])
+    const previous = tool(t.root, 'delegate')
+    const writes: boolean[] = []
+    let failed = false
+    t.snapshotHooks.before = (key, value) => {
+      if (key !== t.root.session.id) return
+      const candidate = snapshotHasFresh(value)
+      writes.push(candidate)
+      if (candidate && !failed) {
+        failed = true
+        throw new Error('CANDIDATE_STORAGE_SECRET')
+      }
+    }
+    const result = await refresh(t.root)
+    expect(result).toMatchObject({
+      ok: false,
+      globalSaved: true,
+      currentApplied: false,
+      sessionOutcome: 'restored',
+      code: 'session-storage-failed',
+    })
+    expect(JSON.stringify(result)).not.toContain('CANDIDATE_STORAGE_SECRET')
+    expect(writes).toEqual([true, false])
+    expect(tool(t.root, 'delegate')).toBe(previous)
+    expect(snapshotHasFresh(t.world.storedSnapshot(t.root.session.id))).toBe(false)
+    expect(await refresh(t.root)).toMatchObject({ ok: true, currentApplied: true, sessionDurable: true })
+    expect(writes).toEqual([true, false, true])
+    expect(enumOf(tool(t.root, 'delegate'))).toContain('fresh_worker')
+    await t.world.teardown()
   })
 
   it('restores registry and Session state if registration fails after successful persistence', async () => {

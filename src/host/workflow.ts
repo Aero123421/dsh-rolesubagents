@@ -7,18 +7,37 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { WorkflowModel } from '../shared/roles.ts'
 
-/** Adapt the documented agent() script binding without changing other hooks. */
+/**
+ * Adapt plain agent() options across VM realms; preserve native materialization.
+ * Introspection is best-effort, not a transparency guarantee for stateful proxies.
+ */
 export function workflowScript(script: string, model: WorkflowModel): string {
   const route = JSON.stringify({ provider: model.provider, model: model.model })
   return `return await ((agent) => (async () => {\n${script}\n})())(
     ((original) => (prompt, options) => {
       if (options === undefined) return original(prompt, ${route});
-      if (options !== null && typeof options === 'object'
-          && (Object.getPrototypeOf(options) === Object.prototype || Object.getPrototypeOf(options) === null)
-          && options.provider === undefined && options.model === undefined) {
-        return original(prompt, { ...options, ...${route} });
+      let adapted = options;
+      try {
+        if (options !== null && typeof options === 'object' && !Array.isArray(options)) {
+          const prototype = Object.getPrototypeOf(options);
+          if (prototype === null || Object.getPrototypeOf(prototype) === null) {
+            const descriptors = Object.getOwnPropertyDescriptors(options);
+            if (!Object.hasOwn(descriptors, 'provider') && !Object.hasOwn(descriptors, 'model')) {
+              for (const [key, descriptor] of Object.entries(descriptors)) {
+                if (descriptor.enumerable) descriptors[key] = {
+                  enumerable: true, configurable: descriptor.configurable,
+                  get: () => options[key]
+                };
+              }
+              adapted = Object.defineProperties(Object.create(prototype, descriptors),
+                Object.getOwnPropertyDescriptors(${route}));
+            }
+          }
+        }
+      } catch {
+        // Let native validation classify malformed options, including throwing proxy traps.
       }
-      return original(prompt, options);
+      return original(prompt, adapted);
     })(agent)
   );`
 }

@@ -110,6 +110,147 @@ describe('state', () => {
   })
 })
 
+describe('retained drafts and acknowledged saves', () => {
+  it.each(['unavailable', 'loading'] as const)(
+    'keeps dirty inputs across %s and rejects conflicting returned data',
+    status => {
+      const { controller, fake } = setup()
+      const uid = uidOf(controller, 'worker')
+      controller.toggleEditor(uid)
+      controller.patchRole(uid, { instructions: 'retain my draft' })
+      fake.set({ status, value: undefined, revision: undefined })
+      expect(controller.getSnapshot()).toMatchObject({ draft: undefined, canSave: false })
+      fake.set({ status: 'ready', revision: 1, value: { enabled: false, roles: DEFAULT_ROLES } })
+      expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, canSave: false, expanded: uid })
+      expect(rows(controller).find(row => row.uid === uid)?.role.instructions).toBe('retain my draft')
+    },
+  )
+  it('allows explicit save of normalization repairs without an unrelated role edit', async () => {
+    const { controller, fake } = setup({ value: { enabled: true, roles: [{ id: 'Bad Id' }, ...DEFAULT_ROLES] } })
+    expect(controller.getSnapshot()).toMatchObject({ dirty: false, canSave: true })
+    await controller.save()
+    expect(fake.calls).toHaveLength(1)
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', repaired: [], canSave: false })
+  })
+  it.each(['ready', 'unavailable'] as const)(
+    'retains an accepted save until its %s mirror confirms the submitted values',
+    async status => {
+      const { controller, fake } = setup()
+      controller.patchRole(uidOf(controller, 'worker'), { instructions: 'accepted but not mirrored' })
+      let written: Record<string, unknown> | undefined
+      fake.form.mutate = async ops => {
+        written = { ...(fake.form.getSnapshot().value as Record<string, unknown>) }
+        for (const op of ops) if (op.op === 'set') written[op.path[0] ?? ''] = structuredClone(op.value)
+        if (status === 'unavailable') fake.set({ status })
+        return true
+      }
+      await controller.save()
+      expect(controller.getSnapshot()).toMatchObject({
+        save: 'idle',
+        conflict: true,
+        canSave: false,
+        saveIssue: 'role-save-unconfirmed',
+      })
+      fake.set({ status: 'ready', revision: 2 })
+      expect(controller.getSnapshot()).toMatchObject({
+        dirty: true,
+        conflict: true,
+        canSave: false,
+        saveIssue: 'role-save-unconfirmed',
+      })
+      expect(rows(controller).find(row => row.role.id === 'worker')?.role.instructions).toBe(
+        'accepted but not mirrored',
+      )
+      fake.set({ value: written, revision: 3 })
+      expect(controller.getSnapshot()).toMatchObject({ dirty: false, conflict: false, saveIssue: undefined })
+      expect(rows(controller).find(row => row.role.id === 'worker')?.role.instructions).toBe(
+        'accepted but not mirrored',
+      )
+    },
+  )
+  it.each([
+    { enabled: true, roles: [{ id: 'Bad Id' }, ...DEFAULT_ROLES] },
+    { enabled: true, roles: DEFAULT_ROLES, workflowModel: { provider: 'p' } },
+  ])(
+    'keeps an accepted repair-only submission unconfirmed until its exact canonical mirror arrives: %j',
+    async malformed => {
+      const guard = vi.fn<RoleWriteSafetyCall>(async revision =>
+        ok({ safe: true, revision, reason: 'literal-role-settings' }),
+      )
+      const { controller, fake } = setup({ value: malformed }, 'en', undefined, guard)
+      let submitted: Record<string, unknown> = {}
+      let calls = 0
+      fake.form.mutate = async ops => {
+        calls++
+        submitted = Object.fromEntries(ops.filter(op => op.op === 'set').map(op => [op.path[0], op.value]))
+        return true
+      }
+      await controller.save()
+      expect(controller.getSnapshot()).toMatchObject({
+        dirty: false,
+        conflict: true,
+        canSave: false,
+        saveIssue: 'role-save-unconfirmed',
+      })
+      fake.set({ revision: 2, value: { ...malformed, allowAiRoleManagement: true } })
+      expect(controller.getSnapshot()).toMatchObject({
+        dirty: false,
+        conflict: true,
+        canSave: false,
+        saveIssue: 'role-save-unconfirmed',
+      })
+      await controller.save()
+      expect(calls).toBe(1)
+      expect(guard).toHaveBeenCalledTimes(1)
+      fake.set({ revision: 3, value: { ...submitted, allowAiRoleManagement: true } })
+      expect(controller.getSnapshot()).toMatchObject({
+        dirty: false,
+        conflict: false,
+        canSave: false,
+        repaired: [],
+        saveIssue: undefined,
+      })
+    },
+  )
+
+  it('does not erase opaque metadata when acceptance is followed by a competing mirror', async () => {
+    const stored = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, opaque: 'original' } : role))
+    const { controller, fake } = setup({ value: { enabled: true, roles: stored } })
+    controller.patchRole(uidOf(controller, 'worker'), { instructions: 'submitted' })
+    fake.form.mutate = async ops => {
+      const values = Object.fromEntries(ops.filter(op => op.op === 'set').map(op => [op.path[0], op.value]))
+      fake.set({
+        revision: 2,
+        value: {
+          ...values,
+          roles: (values.roles as Record<string, unknown>[]).map(role =>
+            role.id === 'worker' ? { ...role, opaque: 'other writer' } : role,
+          ),
+        },
+      })
+      return true
+    }
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, saveIssue: 'role-save-unconfirmed' })
+    expect(controller.getSnapshot().draft?.rawBaseRoles).toEqual(stored)
+  })
+  it('does not start writes or reference/probe reads from stale actions after disposal', async () => {
+    const probe = vi.fn<ProbeCall>()
+    const { controller, fake, remote } = setup({}, 'en', probe)
+    controller.setEnabled(false)
+    controller.dispose()
+    await controller.save()
+    await controller.setAllowAiRoleManagement(true)
+    controller.loadReference()
+    controller.loadWorkflowCatalog()
+    controller.probeCli('codex')
+    expect(fake.calls).toHaveLength(0)
+    expect(remote.session.modelCatalog).not.toHaveBeenCalled()
+    expect(remote.agentPresets.list).not.toHaveBeenCalled()
+    expect(probe).not.toHaveBeenCalled()
+  })
+})
+
 describe('editing', () => {
   it('opens the editor of an added or duplicated role and closes the editor of a deleted one', () => {
     const { controller, remote } = setup()
