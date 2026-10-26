@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Await external CLI run disposal during plugin unload, including process exit, temporary-file cleanup and managed-range exit. A failed disposer is logged without interrupting other run or storage cleanup.
+- Await external CLI run disposal during plugin unload, including process exit, temporary-file cleanup and managed-range exit. Keep settled results tracked until disposal finishes, so an already-pending range drain is included. A failed disposer is logged without interrupting other run or storage cleanup.
 
 ## 0.5.0
 

@@ -6,7 +6,7 @@ Environment: Linux x86_64, Node 24.19.0, package-pinned pnpm 10.28.0.
 
 ## Change and contract
 
-Host effect cleanup captures each tracked external run's disposal and includes those promises in its existing settlement barrier. Each disposal starts independently; rejection or a synchronous throw is logged, while other run disposals and audit/Session storage cleanup continue. Delegation admission, adapter cancellation grace, engine result/dispose semantics, ports, settings, dependencies and DSH API usage remain unchanged. The checked-in Host bundle is regenerated.
+Host effect cleanup captures each tracked external run's disposal and includes those promises in its existing settlement barrier. Each disposal starts independently; rejection or a synchronous throw is logged, while other run disposals and audit/Session storage cleanup continue. The engine retains every spawned run in the tracker until disposal finishes: a settled result does not prove that its managed range is empty. Result delivery is not delayed by range disposal, and repeated disposal calls still share the same promise. Delegation admission, adapter cancellation grace, ports, settings, dependencies and DSH API usage remain unchanged. The checked-in Host bundle is regenerated.
 
 This waits for disposal settlement, not guaranteed success of a failing disposer. Existing engine behavior still owns termination and `waitForExit` error handling. No additional unload timeout is introduced: a pending disposer keeps unload pending.
 
@@ -16,11 +16,14 @@ The tests use `fakeWorld`, `fakeSubprocess`, the actual `apply → delegate → 
 
 | Check | Before | After |
 | --- | --- | --- |
-| Existing lint, three TypeScript configs, tests and committed-bundle reproducibility | Pass; 1,511 tests pass, 2 existing skips | Pass; 1,516 tests pass, the same 2 skips |
-| New `external-unload.test.ts` on the exact base | 5 expected failures | 5 pass |
-| Focused unload/engine/delegate/state suites | — | 75 pass |
+| Existing lint, three TypeScript configs, tests and committed-bundle reproducibility | Pass; 1,511 tests pass, 2 existing skips | Pass; 1,518 tests pass, the same 2 skips |
+| Initial unload regressions on the exact base | 5 expected failures | 5 pass |
+| Result-settled/range-pending regressions on first candidate `44dea0881a245c431f05704a229e9bb95526ba90` | 2 expected failures | 2 pass |
+| Focused unload/engine/delegate/state suites | — | 77 pass |
 
 New coverage delays process exit and managed-range exit independently, verifies files survive until process exit and are removed before unload acknowledgement, and reloads the plugin only after the old lifetime is drained. Both immediate termination and graceful cancellation are covered. Two concurrent runs exercise disposal rejection and synchronous throw independently, including continued storage close. Success, CLI failure, explicit retry, already-started cancellation and fresh per-run files are preserved. Existing engine/delegate coverage also exercises timeout, startup cancellation, background-child sweep and idempotent disposal.
+
+Independent review identified a second snapshot race in the first candidate: `result.finally` removed the run before `dispose` finished waiting for its managed range. Two additional barrier tests first resolve the result and remove run files, then begin unload with disposal either not yet started or already waiting in `waitForExit`. Both failed on `44dea0881a245c431f05704a229e9bb95526ba90` because unload resolved before the range barrier. Both now keep unload pending, reuse one idempotent range sweep, preserve the completed result, and permit a fresh lifetime after release. Engine tests also assert tracker retention after successful/aborted result settlement and removal after disposal. Completed runs remain owned until DSH calls dispose or plugin unload does so; no automatic result-triggered disposal is added.
 
 Commands (from the repository unless an absolute path is shown):
 

@@ -166,7 +166,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       )
     }
   })
-  /** Live external runs; disposed on unload (DSH does not stop them when a plugin unloads). */
+  /** Undisposed external runs; drained on unload, even when their results already settled. */
   const runs: RunTracker = new Set()
   /** Aborted on unload: a delegation still starting (executable lookup, files, pre-flight) then never spawns. */
   const lifetime = new AbortController()

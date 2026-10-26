@@ -60,6 +60,59 @@ async function boot(cancellable = false) {
 }
 
 describe('plugin unload external-run barrier', () => {
+  it.each(['not started', 'pending'])('waits after result settlement when range disposal is %s', async state => {
+    const t = await boot()
+    let releaseRange!: () => void
+    const range = new Promise<void>(resolve => {
+      releaseRange = resolve
+    })
+    const spawn = t.subprocess.spawn.bind(t.subprocess)
+    const rangeWait = vi.fn(async () => {
+      await range
+      return true
+    })
+    t.subprocess.spawn = spec => ({ ...spawn(spec), waitForExit: rangeWait })
+    let unloading: Promise<void> | undefined
+    try {
+      await t.call()
+      const run = t.world.externalRuns[0]!
+      const process = t.subprocess.processes[0]!
+      process.stdout(line({ type: 'text', text: 'settled answer' }))
+      process.stdout(line({ type: 'done' }))
+      process.exit(0)
+      expect((await run.result).stopReason).toBe('completed')
+      expect(existsSync(dirname(t.file(0)))).toBe(false)
+      let disposing: Promise<void> | undefined
+      if (state === 'pending') {
+        disposing = run.dispose()
+        await vi.waitFor(() => expect(rangeWait).toHaveBeenCalledTimes(1))
+        expect(run.dispose()).toBe(disposing)
+      }
+      let unloaded = false
+      unloading = t.world.teardown().then(() => {
+        unloaded = true
+      })
+      await t.world.settle()
+      expect(unloaded).toBe(false)
+      expect(rangeWait).toHaveBeenCalledTimes(1)
+      expect(process.terminated).toBe(1)
+      expect(t.subprocess.processes).toHaveLength(1)
+      releaseRange()
+      await Promise.all([unloading, disposing])
+      expect(unloaded).toBe(true)
+      expect(t.closes).toContain('rolesubagents')
+      expect((await run.result).stopReason).toBe('completed')
+      const next = await t.load('reloaded-after-settlement')
+      await next()
+      expect(t.subprocess.processes).toHaveLength(2)
+      expect(existsSync(t.file(1))).toBe(true)
+    } finally {
+      releaseRange()
+      await t.cleanup()
+      await unloading
+    }
+  })
+
   it.each([false, true])(
     'waits for exit, file cleanup and range exit before reload (graceful: %s)',
     async cancellable => {
