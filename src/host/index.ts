@@ -166,7 +166,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       )
     }
   })
-  /** Live external runs; disposed on unload (DSH does not stop them when a plugin unloads). */
+  /** Undisposed external runs; drained on unload, even when their results already settled. */
   const runs: RunTracker = new Set()
   /** Aborted on unload: a delegation still starting (executable lookup, files, pre-flight) then never spawns. */
   const lifetime = new AbortController()
@@ -694,13 +694,15 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       disposed = true
       repins.clear()
       lifetime.abort(new Error('the rolesubagents plugin was unloaded'))
-      for (const run of [...runs]) {
-        run.dispose().catch(error => {
+      const runClosings = [...runs].map(async run => {
+        try {
+          await run.dispose()
+        } catch (error) {
           ctx.logger.warn(
             `rolesubagents: could not stop external run ${run.id}: ${error instanceof Error ? error.message : String(error)}`,
           )
-        })
-      }
+        }
+      })
       runs.clear()
       unsubscribe(stopCreated)
       unsubscribe(stopTools)
@@ -716,7 +718,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       installed.clear()
       sessions.clear()
       pending.clear()
-      return Promise.allSettled([...currentRefreshes])
+      return Promise.allSettled([...runClosings, ...currentRefreshes])
         .then(async () => {
           await auditClosing
           await state.close()

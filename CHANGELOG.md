@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Await external CLI run disposal during plugin unload, including process exit, temporary-file cleanup and managed-range exit. Keep settled results tracked until disposal finishes, so an already-pending range drain is included. A failed disposer is logged without interrupting other run or storage cleanup.
+
 ## 0.5.0
 
 - Add read-only `manage_roles` `help`: fixed prompt-field guidance, action descriptions, schematic create/update/delete calls and the preview/apply/current-refresh sequence. Distinguish parent-facing role descriptions, child instructions, task prompts and display labels. Preserve live parent/gate/cancellation checks; no settings write, preview plan, metadata lookup or child launch occurs.

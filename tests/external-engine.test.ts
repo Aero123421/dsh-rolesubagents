@@ -105,11 +105,12 @@ describe('startExternalRun: a successful run', () => {
     expect(process?.stdinText()).toBe('fix the bug ✓')
     expect(process?.stdinEnded).toBe(true)
     expect(t.adapter.nonces).toEqual(['abcdef012345'])
-    expect(t.runs.size).toBe(0)
+    expect(t.runs.has(run)).toBe(true)
     expect(t.logger.warn).not.toHaveBeenCalled()
     expect(process?.terminated).toBe(0)
     await run.dispose()
     await run.dispose()
+    expect(t.runs.size).toBe(0)
     // dispose sweeps the (already empty) managed range once.
     expect(process?.terminated).toBe(1)
   })
@@ -344,6 +345,8 @@ describe('startExternalRun: failures, timeout and cancellation', () => {
     expect(result).toEqual({ output: [{ type: 'text', text: 'half' }], stopReason: 'aborted' })
     expect(t.adapter.sessions[0]?.cancelled).toBe(1)
     expect(t.subprocess.processes[0]?.terminated).toBe(1)
+    expect(t.runs.has(run)).toBe(true)
+    await run.dispose()
     expect(t.runs.size).toBe(0)
   })
 
