@@ -164,7 +164,8 @@ write the CLI's state.
    containment below full access (`assertCwdAllowed`, symlinks resolved; skipped when the workspace root is
    unknown, which only DSH's default directory can reach), and calls `startExternalRun` with the workspace root.
 5. DSH owns the run from here: it notifies the parent with the result, aborts `request.signal` on
-   `interrupt_agent`, and disposes the run. The plugin also tracks live runs and disposes them on unload.
+   `interrupt_agent`, and disposes the run. The plugin also tracks live runs and disposes them on unload,
+   awaiting every captured disposal before unload completes; a failed disposal is logged without stopping the others or storage cleanup.
 
 ## Engine lifecycle (`engine.ts`)
 
