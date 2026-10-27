@@ -510,6 +510,21 @@ describe('saving', () => {
     expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('keeps a retained draft when the Host accepts a save the mirror has not confirmed', async () => {
+    const { fake } = await mount()
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable role worker' }))
+    expect(screen.getByRole('switch', { name: 'Enable role worker' }).getAttribute('aria-checked')).toBe('false')
+    fake.form.mutate = async (ops, revision) => {
+      fake.calls.push({ ops, revision })
+      return true
+    }
+    fireEvent.click(button('Save'))
+    await screen.findByText(/Your draft is retained/)
+    expect(screen.queryByRole('button', { name: 'Reload latest settings' })).toBeNull()
+    expect(screen.getByRole('switch', { name: 'Enable role worker' }).getAttribute('aria-checked')).toBe('false')
+    expect((button('Discard') as HTMLButtonElement).disabled).toBe(false)
+  })
+
   it('reports a conflict and reloads the latest settings on request', async () => {
     const { fake } = await mount()
     fake.outcome = 'refuse'
