@@ -335,7 +335,7 @@ function Footer({ state }: { state: PageState }) {
           {message.text}
         </p>
         <div className="dshrs-footer-actions">
-          {state.conflict ? (
+          {state.conflict && state.saveIssue !== 'role-save-unconfirmed' ? (
             <Button disabled={blocked} onClick={() => c.discard()}>
               {t('foot.reload')}
             </Button>

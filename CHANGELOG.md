@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Await external CLI run disposal during plugin unload, including process exit, temporary-file cleanup and managed-range exit. Keep settled results tracked until disposal finishes, so an already-pending range drain is included. A failed disposer is logged without interrupting other run or storage cleanup.
+- Update bundled Zod to 4.6.7 so storage and audit array parsing no longer retains an issue object for every element of an oversized array (GHSA-mrhx-c7xc-m3w5). A pnpm override keeps the DSH packages' Zod on the same version; mixing 4.4 and 4.6 made `tsc` grow without bound. Development-only Vitest 4.1.12 and Happy DOM 21.0.4 close GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp, and GHSA-834v-8h66-3h79.
+- Keep the retained draft when the Host accepts a role save but the settings mirror has not confirmed it. The footer no longer offers “Reload latest settings” in that state, because that action rebases onto the current mirror and can discard the unconfirmed draft.
 
 ## 0.5.0
 
