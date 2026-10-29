@@ -71,7 +71,7 @@ const DRAIN_MS = 2_000
 const PROBE_STDOUT_BYTES = 1024 * 1024
 const PROBE_STDERR_BYTES = 64 * 1024
 
-/** Live runs owned by the plugin; disposed when the plugin unloads. */
+/** Undisposed runs owned by the plugin, including settled results with a managed range still to drain. */
 export type RunTracker = Set<SubagentRunPort>
 
 /** Randomness used by the engine; tests replace it for stable values. */
@@ -98,7 +98,7 @@ export interface EngineDeps {
   /** DSH's optional existing file-effect sandbox; selected host-sandbox presets never run without it. */
   readonly sandbox?: () => SandboxPort | undefined
   readonly logger: LoggerPort
-  /** Every live run is added here until it settles or is disposed. */
+  /** Every spawned run stays here until disposal finishes, even after its result settles. */
   readonly runs: RunTracker
   /** Host environment; defaults to `process.env`. */
   readonly hostEnv?: Readonly<Record<string, string | undefined>>
@@ -827,8 +827,6 @@ function superviseRun(parts: Supervised): SubagentRunPort {
   contained(() => session.start(io), crash)
 
   // --- settlement -------------------------------------------------------------------------------------------
-  /** Untracked once settled; assigned below, before the result can settle. */
-  let tracked: SubagentRunPort | undefined
   const result = (async (): Promise<SubagentResultPort> => {
     let exit: { code: number | null; signal: string | null } = { code: null, signal: null }
     try {
@@ -911,7 +909,6 @@ function superviseRun(parts: Supervised): SubagentRunPort {
       for (const timer of timers.splice(0)) clearTimeout(timer)
       spec.signal.removeEventListener('abort', onAbort)
       await files.remove()
-      if (tracked !== undefined) deps.runs.delete(tracked)
     }
   })()
 
@@ -947,7 +944,7 @@ function superviseRun(parts: Supervised): SubagentRunPort {
       return disposal
     },
   }
-  tracked = run
-  if (!settled) deps.runs.add(run)
+  // Result settlement does not establish that the managed range is empty; only disposal does.
+  deps.runs.add(run)
   return run
 }

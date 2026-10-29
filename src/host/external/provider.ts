@@ -129,7 +129,9 @@ export async function startExternalDelegation(delegation: ExternalDelegation): P
           throw error
         },
       )
-      return { id: run.id, result, dispose: () => run.dispose() }
+      // Keep the engine's tracked identity: Host unload and DSH must dispose the
+      // same run, and waiting for its result must include the history observer.
+      return Object.assign(run, { result })
     },
   }
   const unregister = register(provider)

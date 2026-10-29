@@ -163,7 +163,8 @@ write the CLI's state.
    containment below full access (`assertCwdAllowed`, symlinks resolved; skipped when the workspace root is
    unknown, which only DSH's default directory can reach), and calls `startExternalRun` with the workspace root.
 5. DSH owns the run from here: it notifies the parent with the result, aborts `request.signal` on
-   `interrupt_agent`, and disposes the run. The plugin also tracks live runs and disposes them on unload.
+   `interrupt_agent`, and disposes the run. The plugin tracks runs until disposal finishes, including settled results, and disposes them on unload,
+   awaiting every captured disposal before unload completes; a failed disposal is logged without stopping the others or storage cleanup.
 
 ## Engine lifecycle (`engine.ts`)
 
@@ -178,7 +179,9 @@ startExternalRun                       (every await checks the delegation signal
     (private-state snapshots/plan files are created inside the confined bootstrap)
 superviseRun
   session.start(io) → stdout lines → session.line … → exit → drain (≤ 2 s)
-  → session.finish → toSubagentResult → files removed → untracked
+  → session.finish → toSubagentResult → files removed → result settled (still tracked)
+dispose
+  → await result → terminate managed range → waitForExit → untracked
 ```
 
 - **Environment** (`env.ts`): DSH's subprocess service merges the overlay over its scrubbed copy of the Host

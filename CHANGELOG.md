@@ -10,6 +10,7 @@
 - Fix child management restriction setup when the inherited `manage_roles` tool is absent, preserving strong read-only startup and live denial of child administration.
 - Add explicit Web model refresh for Codex, Antigravity and OpenCode, with validated candidates, source/timestamps and last-good caching. Claude suggestions remain static; Grok/Pi discovery remains unavailable. No automatic CLI upgrading.
 - See [release notes and validation](<docs/releases/v0.6.0.md>); historical checks do not certify this release.
+- Await external CLI run disposal during plugin unload, including process exit, temporary-file cleanup and managed-range exit. Keep settled results tracked until disposal finishes, so an already-pending range drain is included. A failed disposer is logged without interrupting other run or storage cleanup.
 
 ## 0.5.0
 
