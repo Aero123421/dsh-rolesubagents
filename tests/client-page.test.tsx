@@ -759,6 +759,63 @@ describe('runs on an external CLI', () => {
     },
   )
 
+  it.each(['agy', 'codex'] as const)(
+    'refreshes %s models explicitly and retains selected values and dynamic efforts on failure',
+    async cli => {
+      const probe = fakeProbe()
+      probe.mockResolvedValueOnce(probeAnswer(cli, { models: [{ id: 'live-model', efforts: ['high'] }] }))
+      await mount({ probe })
+      fireEvent.click(button('Edit role worker'))
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: cli } })
+      expect(probe).not.toHaveBeenCalled()
+      fireEvent.click(button('Refresh models'))
+      await settle()
+      const editor = editorOf('worker')
+      const model = input(editor.getByLabelText('Model'))
+      fireEvent.change(model, { target: { value: 'live-model' } })
+      const effort = select(editor.getByLabelText('Reasoning effort'))
+      expect([...effort.options].map(option => option.value)).toEqual(['', 'high'])
+      fireEvent.change(effort, { target: { value: 'high' } })
+      probe.mockResolvedValueOnce(probeAnswer(cli, { models: [{ id: 'live-model', efforts: ['low'] }] }))
+      fireEvent.click(button('Refresh models'))
+      await settle()
+      expect(effort.value).toBe('high')
+      expect([...effort.options].map(option => option.value)).toEqual(['', 'low', 'high'])
+      probe.mockRejectedValueOnce(new Error('private diagnostic'))
+      fireEvent.click(button('Refresh models'))
+      await settle()
+      expect(model.value).toBe('live-model')
+      expect(effort.value).toBe('high')
+      expect(editor.getByText(/Showing the last successful model list/)).toBeTruthy()
+      expect(editor.getByText(/Last successful model list/)).toBeTruthy()
+      expect(editor.getByText(/Diagnostics could not reach the Host reliably/)).toBeTruthy()
+      expect(document.body.textContent).not.toContain('private diagnostic')
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: 'claude-code' } })
+      expect(screen.queryByRole('button', { name: 'Refresh models' })).toBeNull()
+      expect(editor.getByText(/Built-in Claude aliases/)).toBeTruthy()
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: 'pi' } })
+      expect(screen.queryByRole('button', { name: 'Refresh models' })).toBeNull()
+      expect(editor.getByText(/Live model discovery is not supported/)).toBeTruthy()
+    },
+  )
+
+  it.each([
+    ['models-timeout', 'en', /model-list command timed out/],
+    ['models-unavailable', 'en', /model-list command failed/],
+    ['models-timeout', 'ja', /一覧コマンドがタイムアウト/],
+    ['models-unavailable', 'ja', /一覧コマンドが失敗/],
+    ['secret failure text', 'en', /returned no usable model list/],
+  ] as const)('explains allowlisted %s model discovery failures in %s', async (message, locale, expected) => {
+    const probe = fakeProbe()
+    probe.mockResolvedValueOnce(probeAnswer('opencode', { message }))
+    const { controller } = await mount({ probe, locale })
+    update(() => controller.refreshCliModels('opencode'))
+    await settle()
+    const card = document.querySelector('[aria-label="OpenCode"]') as HTMLElement
+    expect(within(card).getByText(expected)).toBeTruthy()
+    expect(document.body.textContent).not.toContain('secret failure text')
+  })
+
   it('asks OpenCode for a provider and a model, with suggestions from the connection test', async () => {
     const probe = fakeProbe()
     probe.mockResolvedValue(

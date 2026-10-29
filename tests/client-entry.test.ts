@@ -397,7 +397,11 @@ describe('CLI connection test wiring', () => {
     expect(controller.getSnapshot().probes.available).toBe(true)
     controller.probeCli('codex')
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'error', issue: 'remote-unavailable' })
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({
+      status: 'error',
+      issue: 'remote-unavailable',
+      checkedAt: expect.any(Number),
+    })
     expect(controller.getSnapshot().probes.available).toBe(true)
     wired.eventListeners.get('connection/reset')?.()
     expect(controller.getSnapshot().probes.available).toBe(true)

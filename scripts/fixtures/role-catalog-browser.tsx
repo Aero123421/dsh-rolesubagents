@@ -60,6 +60,8 @@ let revision = 0
 let locale = 'en'
 let metadata: 'ready' | 'missing' | 'unavailable' | 'pending' = 'ready'
 let unmounted = false
+let externalUnavailable = false
+let workerRunning = true
 const emit = () => {
   revision++
   for (const listener of changes) listener()
@@ -76,7 +78,10 @@ const props: CatalogProps = {
     useSyncExternalStore(subscribe, () => revision)
     return select(state)
   },
-  useSessionStatus: select => select(new Map([['worker', { running: true }]])),
+  useSessionStatus: select => select(new Map([['worker', { running: workerRunning }]])),
+  openParent: id => {
+    assert(id === 'root', 'Inspector parent scope')
+  },
   openChild: address => {
     calls.open.push(address)
   },
@@ -104,6 +109,30 @@ const props: CatalogProps = {
     resets.add(listener)
     return () => {
       resets.delete(listener)
+    }
+  },
+  getExternalRuns: async parentSessionId => {
+    if (externalUnavailable) throw new Error('Expected fixture external outage')
+    return {
+      durable: true,
+      runs:
+        parentSessionId === 'root'
+          ? [
+              {
+                id: 'external',
+                parentSessionId: 'root',
+                roleId: 'worker',
+                cli: 'codex',
+                label: 'External',
+                model: 'fixture-model',
+                status: 'succeeded',
+                startedAt: '2026-10-25T12:00:00.000Z',
+                endedAt: '2026-10-25T12:00:03.000Z',
+                resultText: `Fixture final result: ${hostile}`,
+                resultTruncated: false,
+              },
+            ]
+          : [],
     }
   },
   getRoles: async (ids, signal) => {
@@ -161,7 +190,7 @@ root.render(
       />
     </section>
     <button type="button" id="outside">
-      Outside focus target
+      Parent chat focus target
     </button>
   </>,
 )
@@ -176,51 +205,161 @@ const wait = async (test: () => unknown, label: string) => {
   }
 }
 const row = (prefix: string) =>
-  Array.from(document.querySelectorAll<HTMLElement>('[role=treeitem]')).find(element =>
+  Array.from(document.querySelectorAll<HTMLElement>('[data-catalog-main]')).find(element =>
     element.getAttribute('aria-label')?.startsWith(prefix),
   )!
-const tree = () => document.querySelector<HTMLElement>('[role=tree]')
+const tree = () => document.querySelector<HTMLElement>('.dshrs-catalog-menu[role=dialog]')
+// Verify actual computed paint, not z-index: translucent theme tokens must not bleed chat text through overlays.
+const checkOpaqueSurface = (element: Element) => {
+  const originalStyle = document.body.style.cssText
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 1
+  const context = canvas.getContext('2d')!
+  try {
+    for (const [theme, token, rgb] of [
+      ['dark', 'rgb(44 44 48 / .86)', [44, 44, 48]],
+      ['light', 'rgb(250 250 252 / .86)', [250, 250, 252]],
+    ] as const) {
+      document.body.style.setProperty('--dsw-specific-menu', token)
+      const computed = getComputedStyle(element).backgroundColor
+      context.clearRect(0, 0, 1, 1)
+      context.fillStyle = computed
+      context.fillRect(0, 0, 1, 1)
+      const pixel = context.getImageData(0, 0, 1, 1).data
+      assert(pixel[3] === 255, `${theme} overlay background must have alpha 1, got ${computed}`)
+      assert(
+        rgb.every((channel, index) => Math.abs(pixel[index]! - channel) <= 1),
+        `${theme} overlay retains theme RGB`,
+      )
+    }
+  } finally {
+    document.body.style.cssText = originalStyle
+  }
+}
 const api = {
+  checkOpaqueMenu() {
+    assert(tree(), 'Menu mounted for opaque surface regression')
+    checkOpaqueSurface(tree()!)
+  },
   ready: () => !!document.querySelector('#root-action button'),
   calls,
   async checkRoot() {
-    await wait(() => row('Worker')?.querySelector('svg path'), 'metadata badge')
-    assert(document.activeElement === row('Worker'), 'ArrowDown must open and focus first tree item')
+    await wait(() => row('Worker')?.querySelector('.dshrs-catalog-role')?.textContent, 'metadata badge')
+    assert(!document.querySelector('[role=tree], [role=treeitem]'), 'No ARIA tree semantics')
+    assert(tree()?.getAttribute('aria-label') === 'Subagents', 'Named Subagents dialog')
+    assert(tree()?.getAttribute('aria-modal') !== 'true', 'Catalog nonmodal')
     assert(!document.querySelector('#child-action button'), 'Child must not duplicate root action')
-    assert(
-      row('Worker').getAttribute('aria-label')?.includes('1050 tokens · 42 seconds active'),
-      'Usage and duration accessibility',
-    )
-    assert(
-      row('Worker').getAttribute('aria-label')?.includes('Implement catalog · Continuable'),
-      'Title and mode accessible',
-    )
+    assert(!row('Ordinary') && !row('External'), 'Completed history collapsed initially')
+    assert(row('Worker') && !row('Ordinary'), 'Running visible in current section ahead of collapsed completed history')
     assert(row(hostile).getAttribute('aria-label')?.includes('Migration required'), 'Migration state accessible')
-    assert(row('Worker').textContent?.includes('0:42'), 'Visible duration')
-    assert(row('Ordinary').getAttribute('aria-label')?.includes('Completed'), 'Completed status')
-    assert(!row('Ordinary').querySelector('svg'), 'Ordinary row must remain undecorated')
-    assert(row('External').getAttribute('aria-disabled') === 'true', 'External disabled')
     assert(
-      row(hostile).querySelector('svg path') && row(hostile).textContent?.includes(hostile),
-      'Custom role is SVG plus escaped text',
+      row(hostile).querySelector('.dshrs-catalog-role')?.textContent === hostile &&
+        row(hostile).textContent?.includes(hostile),
+      'Plain role label and escaped hostile text',
     )
     assert(
       !document.querySelector('img, svg script, [onerror]') && !('__xss' in window),
       'No injected HTML or execution',
     )
-    assert(document.querySelectorAll('#lineage .dshrs-catalog').length === 2, 'Lineage and child catalog mounted')
+    assert(document.querySelectorAll('#lineage .dshrs-catalog').length === 2, 'Sibling and direct-child scope controls')
+    const scopes = Array.from(document.querySelectorAll('#lineage .dshrs-catalog-trigger'))
+    assert(scopes[0]?.getAttribute('aria-label')?.startsWith('Sibling subagents'), 'Sibling scope explicit')
+    assert(scopes[1]?.getAttribute('aria-label')?.startsWith('Subagents:'), 'Direct children scope explicit')
   },
   async checkNested() {
-    await wait(() => row('Nested reviewer')?.querySelector('svg'), 'nested metadata')
-    assert(row('Nested reviewer').getAttribute('aria-level') === '2', 'Nested aria level')
+    await wait(() => row('Nested reviewer')?.querySelector('.dshrs-catalog-role')?.textContent, 'nested metadata')
+    assert(row('Nested reviewer').closest('.dshrs-catalog-group'), 'Nested direct-child group')
+    assert(
+      row('Nested reviewer').getAttribute('aria-label')?.includes('Status unknown'),
+      'Missing evidence remains unknown',
+    )
     assert(calls.refresh.includes('worker'), 'Nested projection requested')
   },
+  checkHistory() {
+    assert(row('Ordinary')?.getAttribute('aria-label')?.includes('Completed'), 'Completed history revealed')
+    assert(!row('Ordinary').querySelector('.dshrs-catalog-role')?.textContent, 'Ordinary row has no invented role')
+    assert(row('External')?.getAttribute('aria-label')?.includes('View result'), 'External result action distinct')
+    assert(row('Worker').getAttribute('aria-label')?.includes('Open chat'), 'Native chat action distinct')
+  },
+  checkLayout() {
+    const menu = tree()!
+    const bounds = menu.getBoundingClientRect()
+    assert(
+      bounds.left >= 0 && bounds.right <= innerWidth && bounds.top >= 0 && bounds.bottom <= innerHeight,
+      'Catalog fits viewport',
+    )
+    assert(
+      menu.scrollWidth <= menu.clientWidth && document.documentElement.scrollWidth <= innerWidth,
+      'Catalog no horizontal overflow',
+    )
+    if (innerWidth > 640) {
+      assert(Math.abs(bounds.width - 384) < 1 && bounds.height <= 472, 'Desktop width 384 and max height 472')
+    } else {
+      assert(
+        bounds.height <= innerHeight * 0.72 + 1 && Math.abs(bounds.bottom - innerHeight) < 1,
+        'Mobile bottom sheet max72dvh',
+      )
+      for (const button of menu.querySelectorAll('button')) {
+        const r = button.getBoundingClientRect()
+        assert(r.height >= 44 && r.width >= 44, 'Mobile touch controls at least 44px')
+      }
+    }
+  },
+  setTheme(light: boolean) {
+    document.body.style.setProperty('--dsw-specific-menu', light ? 'rgb(250 250 252 / .86)' : 'rgb(44 44 48 / .86)')
+    document.body.style.setProperty('--dsw-alias-label-primary', light ? '#222' : '#eee')
+    document.body.style.setProperty('--dsw-alias-label-secondary', light ? '#535968' : '#b3b9c5')
+    document.body.style.background = light ? '#e9edf4' : '#17191e'
+    document.body.style.color = light ? '#222' : '#eee'
+  },
+  setWorkerCompleted(value: boolean) {
+    workerRunning = !value
+    state.byId.worker!.projectionValues!.subagentTiming!.lastTurnCompleted = value
+    emit()
+  },
+  async checkCompletionFocus() {
+    row('Worker').focus()
+    api.setWorkerCompleted(true)
+    await wait(() => !row('Worker'), 'Completed row moves into collapsed history')
+    assert(tree()?.contains(document.activeElement), 'Completion preserves keyboard focus inside catalog')
+    api.setWorkerCompleted(false)
+    await wait(() => row('Worker'), 'Running row restored')
+  },
+  async checkRoleCache() {
+    metadata = 'pending'
+    return true
+  },
+  checkCachedRole() {
+    assert(
+      row('Worker')?.querySelector('.dshrs-catalog-role')?.textContent,
+      'Positive role cache survives close/reopen while next request pending',
+    )
+    metadata = 'ready'
+  },
+  async checkStale() {
+    externalUnavailable = true
+    await wait(() => row('External')?.getAttribute('aria-label')?.includes('Stale'), 'Actual five-second stale poll')
+    assert(
+      row('External').getAttribute('aria-label')?.includes('Completed'),
+      'Last known external state retained, explicitly stale',
+    )
+    assert(
+      document.querySelector('#root-action button')?.getAttribute('aria-label')?.includes('Stale information'),
+      'Trigger stale summary',
+    )
+    externalUnavailable = false
+    await wait(() => !row('External')?.getAttribute('aria-label')?.includes('Stale'), 'External recovery')
+  },
   async checkCurrent() {
-    await wait(() => row('Worker')?.querySelector('svg'), 'lineage metadata')
+    await wait(() => row('Worker')?.querySelector('.dshrs-catalog-role')?.textContent, 'lineage metadata')
     const current = row('Worker')
-    const ordinary = row('Ordinary')
+    const ordinary = row(hostile)
     const label = (element: HTMLElement) => getComputedStyle(element.querySelector('.dshrs-catalog-label')!)
     assert(current.getAttribute('aria-current') === 'true', 'Current child is semantically identified')
+    assert(
+      !row('Ordinary') && tree()?.querySelector('.dshrs-catalog-history')?.getAttribute('aria-expanded') === 'false',
+      'Completed current stays ahead of collapsed history',
+    )
     assert(
       getComputedStyle(current).backgroundColor !== 'rgba(0, 0, 0, 0)' &&
         getComputedStyle(current).backgroundColor !== getComputedStyle(ordinary).backgroundColor,
@@ -234,7 +373,7 @@ const api = {
     try {
       document.body.style.setProperty('--dsw-specific-menu', '#fff')
       document.body.style.setProperty('--dsw-alias-label-primary', '#222')
-      assert(getComputedStyle(tree()!).backgroundColor === 'rgb(255, 255, 255)', 'Light theme menu background')
+      checkOpaqueSurface(tree()!)
       assert(label(current).color === 'rgb(34, 34, 34)', 'Light theme current label inherits readable foreground')
       assert(
         Number(label(current).fontWeight) > Number(label(ordinary).fontWeight),
@@ -248,8 +387,57 @@ const api = {
       document.body.style.cssText = originalStyle
     }
   },
-  checkExternal() {
-    assert(calls.open.length === 0 && calls.aside.length === 0, 'External cannot navigate')
+  async checkExternal() {
+    await wait(() => document.querySelector('.dshrs-run-dialog pre'), 'external result dialog')
+    const dialog = document.querySelector('.dshrs-run-dialog')!
+    assert(calls.open.length === 0 && calls.aside.length === 0, 'External details must not navigate to a child chat')
+    assert(
+      dialog.textContent?.includes('Completed') && dialog.textContent.includes('fixture-model'),
+      'External status and requested model',
+    )
+    assert(
+      dialog.querySelector('pre')?.textContent === `Fixture final result: ${hostile}`,
+      'Escaped retained final result',
+    )
+    assert(!dialog.querySelector('img, [onerror]') && !('__xss' in window), 'Result cannot execute HTML')
+    assert(document.activeElement === dialog.querySelector('button'), 'Inspector initially focuses close')
+    assert(dialog.getAttribute('aria-modal') === 'false' && !tree(), 'Result inspector is distinct nonmodal dialog')
+    assert(!document.querySelector('.dshrs-run-backdrop, [aria-modal=true]'), 'No modal backdrop')
+    const parent = document.querySelector<HTMLButtonElement>('#outside')!
+    parent.focus()
+    assert(
+      document.activeElement === parent && document.querySelector('.dshrs-run-dialog'),
+      'Parent chat remains focusable with inspector open',
+    )
+    ;(dialog.querySelector('button') as HTMLButtonElement).focus()
+  },
+  async checkExternalLayout() {
+    await wait(() => document.querySelector('.dshrs-run-dialog pre'), 'external result layout')
+    const dialog = document.querySelector<HTMLElement>('.dshrs-run-dialog')!
+    checkOpaqueSurface(dialog)
+    const bounds = dialog.getBoundingClientRect()
+    assert(
+      bounds.left >= 0 && bounds.right <= innerWidth && bounds.top >= 0 && bounds.bottom <= innerHeight,
+      'Dialog fits viewport',
+    )
+    assert(
+      dialog.scrollWidth <= dialog.clientWidth && document.documentElement.scrollWidth <= innerWidth,
+      'Dialog has no horizontal overflow',
+    )
+    assert(dialog.textContent?.includes(locale === 'ja' ? '完了' : 'Completed'), 'Localized dialog status')
+    if (innerWidth <= 640) {
+      assert(bounds.height <= innerHeight * 0.72 + 1, 'Inspector mobile max72dvh')
+      for (const button of dialog.querySelectorAll('button'))
+        assert(button.getBoundingClientRect().height >= 44, 'Inspector touch controls')
+    }
+    const close = dialog.querySelector('button')!.getBoundingClientRect()
+    assert(
+      close.left >= bounds.left &&
+        close.right <= bounds.right &&
+        close.top >= bounds.top &&
+        close.bottom <= bounds.bottom,
+      'Close button visible',
+    )
   },
   checkNavigation(kind: 'open' | 'aside', parent: string, child: string) {
     const address = calls[kind].at(-1)
@@ -262,7 +450,7 @@ const api = {
     assert(!tree(), 'Navigation closes menu')
   },
   checkClosed(focus = false) {
-    assert(!tree(), 'Menu dismissed')
+    assert(!tree() && !document.querySelector('.dshrs-run-dialog'), 'Catalog and result inspector dismissed')
     if (focus)
       assert(document.activeElement === document.querySelector('#root-action button'), 'Escape returns trigger focus')
   },
@@ -272,35 +460,37 @@ const api = {
     for (const listener of subscriptions) listener()
   },
   async checkMobile() {
-    await wait(() => tree()?.getAttribute('aria-label') === 'サブエージェント', 'Japanese tree')
-    assert(row('Worker').getAttribute('aria-label')?.includes('1050 トークン · 42 秒稼働'), 'Japanese usage and status')
-    assert(row('Worker').textContent?.includes('実行中'), 'Japanese running status')
+    await wait(() => tree()?.getAttribute('aria-label') === 'サブエージェント', 'Japanese named catalog dialog')
+    assert(row('Worker').textContent?.includes('実行中'), 'Japanese running state')
+    assert(row(hostile).getAttribute('aria-label')?.includes('履歴の更新が必要'), 'Japanese migration state')
     assert(
-      row('Worker').getAttribute('aria-label')?.includes('継続可能') &&
-        row(hostile).getAttribute('aria-label')?.includes('履歴の更新が必要'),
-      'Japanese mode and migration accessible',
+      document.querySelector('#root-action button')?.getAttribute('aria-label')?.includes('実行中 1'),
+      'Japanese accessible running summary',
     )
-    const bounds = tree()!.getBoundingClientRect()
-    assert(bounds.left >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight, 'Menu fits narrow viewport')
+    const role = row('Worker').querySelector<HTMLElement>('.dshrs-catalog-role')!
     assert(
-      tree()!.scrollWidth <= tree()!.clientWidth && document.documentElement.scrollWidth <= innerWidth,
-      'No horizontal overflow',
+      role.textContent === 'worker' && role.scrollWidth <= role.clientWidth,
+      'Mobile worker role fully readable without clipping',
     )
+    api.checkLayout()
   },
   async unavailable() {
     metadata = 'unavailable'
     for (const listener of resets) listener()
-    await wait(() => !row('Worker')?.querySelector('svg'), 'reset removes stale badge')
+    await wait(() => !row('Worker')?.querySelector('.dshrs-catalog-role')?.textContent, 'reset removes stale badge')
     assert(
       signals.slice(0, -1).every(signal => signal.aborted),
       'Reset aborts old metadata requests',
     )
-    assert(row('Worker') && row('Ordinary'), 'Metadata outage preserves navigation')
+    assert(row('Worker') && row(hostile), 'Metadata outage preserves navigation')
   },
   async recoverByRetry() {
     const previous = calls.metadata
     metadata = 'ready'
-    await wait(() => row('Worker')?.querySelector('svg'), 'real five-second metadata retry')
+    await wait(
+      () => row('Worker')?.querySelector('.dshrs-catalog-role')?.textContent,
+      'real five-second metadata retry',
+    )
     assert(calls.metadata > previous, 'Metadata retried without reconnect')
   },
   async projectionError() {

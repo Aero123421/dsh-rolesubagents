@@ -12,7 +12,7 @@ This is an explicit **Host/profile role-configuration administration capability*
 
 The gate is live configuration, intentionally separate from snapshotted `RoleSettings` and the master Subagents switch. Turning management OFF does not delete saved roles, undo earlier commits, disable ordinary delegation, or cancel children. If OFF commits before an old preview's apply, the shared settings revision fences that apply out; a change that committed before OFF is not retroactively rolled back.
 
-The tool is restricted to eligible live parent agents and checks the actual execution caller on every call. Children do not receive management authority through tool inheritance, a role instruction, a captured tool definition, or caller-supplied IDs. A human-created fork is not automatically a subagent merely because it has a `parentSession` link; trusted origin/delegation depth and recorded role identity matter. Mutation checks also respect the caller's read-only state and CLI access ceiling. Hiding the tool is not the only enforcement layer.
+The tool is restricted to eligible live parent agents and checks the actual execution caller on every call. Children do not receive management authority through tool inheritance, a role instruction, a captured tool definition, or caller-supplied IDs. A human-created fork is not automatically a subagent merely because it has a `parentSession` link; trusted origin/delegation depth and recorded role identity matter. Mutation checks also respect the caller's read-only state and CLI access ceiling. Hiding the tool is not the only enforcement layer. Child initialization restricts `manage_roles` only when that tool is actually visible on the inherited surface: an absent parent-local registration must not break child startup, including strongly read-only children. Execution guards and live caller checks still deny child administration.
 
 The management API has **no operation** to change:
 
@@ -71,6 +71,12 @@ Within that literal-only contract, untouched role data and unknown nested model/
 Writable administration requires a successfully resolved supported caller sandbox policy; missing/throwing/unknown policy does not default to writable administration. Read-only parent metadata queries remain possible, but mutation is refused. Agent disposal and permission OFF promptly release that owner's plans and abort metadata waits. Metadata retrieval has a 10-second deadline (up to 30 seconds only through the internal test/service seam); provider-side requests already issued may complete independently, but aborted/invalidated results cannot refill the cache.
 
 Preview plans are bound to the live caller, expire after **10 minutes**, and are bounded to **20 per caller / 100 total**. Changing the settings revision—including OFF/ON—invalidates an old plan's write fence. A successfully applied plan can replay its stored result without writing again while it remains live; pending applies share the same result. This is not an exactly-once guarantee across plugin/process restarts. A missing/expired plan or conflict requires a fresh read and preview, not blind retry.
+
+## One-off execution is not role administration
+
+Use an existing role with `delegate` for a one-off task. DSH spawn roles accept a one-shot `provider` + `model` pair and optional `effort`; effort alone needs a configured role model. A new pair clears old effort unless explicitly supplied. DSH validates the route. Fork roles (including task-only) and external CLI roles reject route/effort overrides. `readOnly: true` can strengthen this execution, never weaken it (`false` is rejected); unsupported CLI read-only presets refuse. Parent restrictions still apply.
+
+These options neither save roles nor mutate the current catalog, and do not require enabling AI management. The start receipt identifies the configured request, not a confirmed actual model/effort or a completed answer. Persistent changes still require the preview/apply sequence below.
 
 ## Sequential example
 

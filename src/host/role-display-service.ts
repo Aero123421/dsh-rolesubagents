@@ -12,8 +12,11 @@ import {
 import { decorateMethod, type TypertModule } from './external/probe-service.ts'
 import type { HostContext } from './ports.ts'
 import type { RoleState } from './state.ts'
+import type { ExternalRunStore } from './external/observability.ts'
+import type { ExternalRunsResult } from '../shared/role-display.ts'
 
 export interface RoleDisplayServiceOptions {
+  readonly externalRuns?: ExternalRunStore
   readonly state: Pick<RoleState, 'ready' | 'readRoleById'>
   readonly isDisposed: () => boolean
   /** Plugin lifetime: pending cold reads must settle even if storage never opens. */
@@ -58,16 +61,46 @@ export function createRoleDisplayServiceClass(typert: TypertModule, options: Rol
   const remote = typert.Remote('query')
   // One service-scoped cancellation source, not a global pending-request registry.
   const lifetime = new AbortController()
-  const signal = options.lifetime ? AbortSignal.any([lifetime.signal, options.lifetime]) : lifetime.signal
-  const ready = abortable(options.state.ready, signal)
+  // Keep `signal` exclusive to Remote method parameters: Typert injects cancellation by
+  // that literal name, and esbuild renames shadowed parameters even without minification.
+  const serviceSignal = options.lifetime ? AbortSignal.any([lifetime.signal, options.lifetime]) : lifetime.signal
+  const ready = abortable(options.state.ready, serviceSignal)
   // The optional service may be disposed without ever receiving a query.
   void ready.catch(() => {})
   return class RolesubagentsRoleDisplayService extends Base {
     constructor(ctx: unknown) {
       super(ctx as never, ROLE_DISPLAY_SERVICE_NAME)
       decorateMethod(remote, this, 'query')
+      decorateMethod(typert.Remote('externalRuns'), this, 'externalRuns')
       // Cordis owns this child context; native disposal cancels cold reads too.
       ;(ctx as Partial<Pick<HostContext, 'effect'>>).effect?.(() => () => lifetime.abort())
+    }
+
+    /** Owner identity is injected by the gateway, never accepted as a wire argument. */
+    async externalRuns(parentSessionId: unknown, signal: AbortSignal): Promise<ExternalRunsResult> {
+      const [id] = validateChildIds([parentSessionId])
+      const authorize = () => {
+        const invocation = (
+          this as unknown as {
+            ctx?: { invocation?: { peer?: { principal?: { kind?: string }; signal?: AbortSignal } } }
+          }
+        ).ctx?.invocation
+        if (invocation?.peer?.principal?.kind !== 'owner' || invocation.peer.signal?.aborted)
+          throw new Error('external run access denied')
+        if (options.isDisposed() || lifetime.signal.aborted || options.lifetime?.aborted)
+          throw new Error('role display service is disposed')
+        signal.throwIfAborted()
+      }
+      authorize()
+      if (!options.externalRuns) throw new Error('external run history unavailable')
+      await abortable(
+        options.externalRuns.ready,
+        AbortSignal.any([signal, lifetime.signal, ...(options.lifetime ? [options.lifetime] : [])]),
+      )
+      authorize()
+      const result = await options.externalRuns.list(id!)
+      authorize()
+      return result
     }
 
     async query(childIds: unknown, signal: AbortSignal): Promise<RoleDisplayResult> {

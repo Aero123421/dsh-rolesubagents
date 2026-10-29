@@ -186,6 +186,7 @@ try {
     'ROLE_E2E_NATIVE_OK',
     seed.session,
   )
+  const overrides = await run('overrides', 'ROLE_E2E_OVERRIDES', 'ROLE_E2E_OVERRIDES_OK')
   // A cold child must restore its assigned role even after the live defaults
   // change. Its original instructions, read-only policy, and inherited high
   // effort must survive the process boundary and real storage reopen.
@@ -221,6 +222,68 @@ try {
     .trim()
     .split('\n')
     .map(line => JSON.parse(line))
+  const overrideChildren = trace.filter(entry => entry.kind === 'override-child')
+  assert.deepEqual([...new Set(overrideChildren.map(entry => entry.label))].sort(), [
+    'override-baseline',
+    'override-effort',
+    'override-ok',
+  ])
+  const overrideRequests = trace.filter(entry => entry.kind === 'request' && entry.parentSession === overrides.session)
+  assert.equal(
+    new Set(overrideRequests.map(entry => entry.sessionId)).size,
+    3,
+    'invalid overrides must fail before spawning',
+  )
+  const stored = trace.filter(entry => entry.kind === 'role-storage')
+  const snapshots = stored.filter(entry => entry.table === 'snapshots' && entry.key === overrides.session)
+  assert(snapshots.length > 0, 'observe actual persisted parent snapshot')
+  for (const snapshot of snapshots) {
+    assert.deepEqual(
+      snapshot.value.settings.roles,
+      roles,
+      'one-shot overrides must not mutate the persisted parent catalog',
+    )
+  }
+  for (const label of ['override-ok', 'override-effort', 'override-baseline']) {
+    const child = overrideChildren.find(entry => entry.label === label)
+    assert(child)
+    const assignment = stored.find(entry => entry.table === 'roles' && entry.key === child.sessionId)?.value.role
+    assert(assignment, `${label}: assigned role must be persisted only for the child`)
+    assert.equal(assignment.id, 'general')
+    assert.equal(assignment.readOnly, label === 'override-ok')
+    if (label === 'override-baseline') assert.equal(assignment.model, undefined)
+    else
+      assert.deepEqual(assignment.model, {
+        provider: 'roles-e2e',
+        model: 'fixture-terra-max',
+        ...(label === 'override-effort' ? { reasoningEffort: 'high' } : {}),
+      })
+  }
+  assert(
+    !stored.some(entry => entry.table === 'roles' && entry.key === overrides.session),
+    'root parent must not receive a one-shot child assignment',
+  )
+  assert(
+    trace.some(
+      entry =>
+        entry.kind === 'resolve-call' &&
+        entry.config?.model === 'fixture-terra-max' &&
+        entry.ownsEffort &&
+        entry.config.reasoningEffort === undefined,
+    ),
+    'replacement route must explicitly clear inherited effort at native resolution',
+  )
+  assert(
+    trace.some(entry => entry.kind === 'resolve-call' && entry.config?.model === 'missing-model'),
+    'unknown model must reach the native resolver and fail before spawn',
+  )
+  assert(
+    trace.some(entry => entry.kind === 'resolve-call' && entry.config?.reasoningEffort === 'impossible'),
+    'invalid effort must reach the native resolver and fail before spawn',
+  )
+  console.log(
+    'PASS one-shot overrides: native route/effort validation, strict pre-spawn failures, read-only dispatch, unchanged persisted parent snapshot, requested-only receipts',
+  )
   const requests = trace.filter(entry => entry.kind === 'request')
   const parent = requests.find(entry => entry.sessionId === seed.session)
   assert(parent)

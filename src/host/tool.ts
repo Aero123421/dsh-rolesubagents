@@ -9,6 +9,11 @@ import { randomUUID } from 'node:crypto'
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { cliDescriptor } from '../shared/cli/index.ts'
 import {
+  type DelegationArgs,
+  resolveDelegationOverrides,
+  validateDelegationArgs,
+} from '../shared/delegation-overrides.ts'
+import {
   type CliSettingsMap,
   FORK_RESULT_WARNING,
   forkInheritsHistory,
@@ -82,12 +87,7 @@ export function toolDescription(roles: readonly RoleDefinition[]): string {
   ].join('\n')
 }
 
-interface ToolArgs {
-  description: string
-  prompt: string
-  role?: string
-  cwd?: string
-}
+type ToolArgs = DelegationArgs
 
 /**
  * Pick the role for one call.
@@ -139,6 +139,26 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
         enum: roles.map(role => role.id),
         description: hasGeneral ? 'Role for this subagent. Omit to use `general`.' : 'Role for this subagent.',
       },
+      provider: {
+        type: 'string',
+        description:
+          'One-shot DSH provider id; supply together with model. Spawn roles only; does not modify the role.',
+      },
+      model: {
+        type: 'string',
+        description:
+          'One-shot DSH model id; supply together with provider. Clears configured effort unless effort is supplied. Not supported for fork or external CLI roles.',
+      },
+      effort: {
+        type: 'string',
+        description:
+          'One-shot DSH reasoning effort id, validated by the native route resolver. Requires a configured role model or explicit provider/model pair; spawn roles only.',
+      },
+      readOnly: {
+        type: 'boolean',
+        description:
+          'Only true is accepted: strengthen this run to read-only. Omission preserves role and parent restrictions; never weakens permissions.',
+      },
       cwd: {
         type: 'string',
         description:
@@ -159,10 +179,19 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
         let text = `started subagent ${value.subagentId}`
         if (typeof requested === 'string' || requested === undefined) {
           try {
-            const chosen = resolveRole(roles, requested === '' ? undefined : requested)
+            const chosen = resolveDelegationOverrides(
+              resolveRole(roles, requested === '' ? undefined : requested),
+              args as DelegationArgs,
+            )
             if (isRunnerRole(chosen)) {
-              text = `started ${cliDescriptor(chosen.runner.cli).displayName} subagent ${value.subagentId}`
+              text = `started ${cliDescriptor(chosen.runner.cli).displayName} subagent ${value.subagentId}\nRunning in the background; this is a start receipt, not a completion result. The final result will return to this parent conversation. Open the subagent entry to view its status and retained result. External CLI runs do not accept follow-up messages.`
             }
+            const model = chosen.model
+            if (model !== undefined) {
+              text += `\nConfigured request: ${model.provider}/${model.model}; effort: ${model.reasoningEffort ?? 'model default'}. Actual model/effort is not confirmed by this start receipt.`
+            }
+            if (chosen.readOnly)
+              text += '\nRead-only: requested/enforced by role policy; parent restrictions also apply.'
             if (forkInheritsHistory(chosen)) text = `${text}\n${FORK_RESULT_WARNING}`
           } catch {
             // A rejected role never renders a successful start.
@@ -173,7 +202,7 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
     },
     isConcurrencySafe: () => true,
     async execute(rawArgs, exec) {
-      const args = rawArgs as unknown as ToolArgs
+      const args = validateDelegationArgs(rawArgs)
       const parent = (exec as { agent?: AgentPort }).agent
       if (parent === undefined) throw new Error('subagent tool requires a calling agent')
       if (deps.isCurrent?.(parent) === false)
@@ -186,10 +215,10 @@ export function buildTool(snapshot: RoleSettings, deps: ToolDeps): ToolDefinitio
         if (deps.isAlive?.(parent) === false) throw new Error('the calling Agent or roles plugin is no longer active')
       }
       checkAlive()
-      const role = resolveRole(roles, args.role)
+      const role = resolveDelegationOverrides(resolveRole(roles, args.role), args)
       const parentReadOnly = deps.state.readRole(parent.session)?.readOnly === true
       if (parentReadOnly) {
-        const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, roles)
+        const denial = readOnlyCallDenial(TOOL_NAME, rawArgs, [role])
         if (denial !== undefined) throw new Error(denial)
       }
       if (isRunnerRole(role)) {

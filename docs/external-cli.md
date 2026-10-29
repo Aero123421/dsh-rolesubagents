@@ -139,8 +139,7 @@ write the CLI's state.
 
 `delegate` in `src/host/tool.ts`:
 
-1. `resolveRole` as for DSH roles. If the calling agent's role is read-only, `readOnlyCallDenial` allows only
-   read-only target roles (a runner role never copies the parent conversation, so a read-only runner role is fine).
+1. Resolve the selected role and apply validated one-shot overrides to a clone, never the saved role/catalog. `provider`/`model`/`effort` overrides are rejected for CLI roles (and DSH fork roles); CLI routing remains adapter-specific configuration. `readOnly: true` selects a supported verified read-only preset or refuses (Grok/Pi); `false` is rejected. If the calling agent's role is read-only, `readOnlyCallDenial` allows only an effectively read-only target (a runner never copies the parent conversation).
 2. `delegateExternal`:
    - a runner role is refused with a clear message when DSH lacks `ctx.subagents.registerProvider`
      (checked in `provider.ts`) or `ctx.subprocess` (checked in `engine.ts`); DSH roles keep working;
@@ -300,6 +299,24 @@ answers.
 Local connection absence, structured Remote errors, HTTP endpoint 404, Host authentication (401/403), transport failure and malformed carriers are separate client states. CLI executable/authentication results are distinct from RPC failures. HTTP 404 is intentionally ambiguous: both absent Gateway and absent Remote method produce it. No inference, update or permission change follows a probe failure.
 
 `scripts/check-probe-host.mjs` exercises installed browser Connection, Host HTTP bridge/auth, Typert Registry/Gateway and actual decorated plugin Remote in an isolated in-process loopback server. It verifies 404 ambiguity, 401/403, argument errors and recovery on DSH `0.2.1-rc.2`; this is not a deployed `dsh web` profile/GUI test or stable-public-API guarantee. The subprocess seam is a fixture, not an actual CLI/model call. Grok/Pi probes run only `--version`; Pi help/model-list commands initialize extensions and are unsuitable for side-effect-free discovery.
+
+### Explicit model refresh in Web
+
+The runner editor's **Refresh models** action reuses `rolesubagentsCli/probe`, only for Codex, Antigravity and OpenCode. No mount, editor-open or catalog reload starts a CLI discovery process. Claude's aliases are explicitly static; Pi/Grok remain version-only probes (no help/model-list discovery). AGY's parsed per-model efforts feed its effort choices, without rewriting a selected value that is no longer listed.
+
+Returned candidates are validated before use; malformed/unsafe IDs are not executable arguments or authoritative model choices. Refresh does not automatically upgrade a CLI, authenticate it or certify model availability.
+
+Client probe diagnostics and retained model candidates are separate. Last-good nonempty candidates and their success timestamp survive loading, transport failures, empty responses and missing authentication; the latest attempt keeps its own timestamp and explanation. A changed saved executable or forwarded-variable list aborts that CLI's pending probe, invalidates its candidates and rejects late replies. Draft edits alone do not change the settings actually probed. Caches are page-session-only and cleared on connection reset; no cross-Host/profile browser persistence is implied.
+
+## External run visibility
+
+Supported Web catalog external rows open a nonmodal result inspector rather than navigating to a child session. Parent-scoped read-only metadata includes role/CLI, requested model, lifecycle timestamps, running/succeeded/failed/cancelled/timeout status, a bounded final answer and fixed safe failure diagnostics. The inspector offers copy, parent navigation and readable/raw escaped text, without a Markdown/HTML renderer or focus trap. Execution details start collapsed; requested model is not a confirmed actual model/effort. A truncated preview is also truncated when copied.
+
+Per-parent polling publishes each success/failure independently and retains last-good data with explicit stale/error and last-success state. A failed scope does not relabel other parents' fresh data. Unknown or non-completed native states never become idle/success merely because execution stopped. See [catalog behavior and bounds](<role-catalog.md>).
+
+Live stdout, stderr and tool-event streaming are not retained or exposed. There is no recovery by scanning old CLI/session histories. The direct parent still receives the ordinary completion result; this view neither replaces delivery nor enables `send_message` or a new stop action. The activation receipt explicitly means background startup, not final completion.
+
+The Host's global retained ring is bounded to 100 records and 7 days; each result preview is capped at 16,384 UTF-16 code units and explicitly marked when truncated. Storage failure degrades to in-memory records, labeled non-durable in the UI. Missing older/expired/evicted records do not imply a run failure: the dialog directs users to the parent's returned result. These records are bounded supplementary visibility, not a full CLI transcript or permanent audit log.
 
 ## Per-CLI summary
 

@@ -8,6 +8,7 @@
  * registered tool, so a hint cannot be consulted.
  */
 
+import { resolveDelegationOverrides } from '../shared/delegation-overrides.ts'
 import { forkInheritsHistory, type RoleDefinition } from '../shared/roles.ts'
 import type { SessionPort } from './ports.ts'
 
@@ -244,7 +245,7 @@ function delegateDenial(args: unknown, roles: readonly RoleDefinition[]): string
     return refuse('delegate', 'the role argument is not a string')
   }
   const requested = isRecord(args) && typeof args.role === 'string' && args.role !== '' ? args.role : undefined
-  const role =
+  let role =
     requested === undefined
       ? roles.find(entry => entry.builtin === 'general')
       : roles.find(entry => entry.id === requested)
@@ -253,6 +254,11 @@ function delegateDenial(args: unknown, roles: readonly RoleDefinition[]): string
       'delegate',
       requested === undefined ? 'no read-only role is the default' : `unknown role "${requested}"`,
     )
+  }
+  try {
+    role = resolveDelegationOverrides(role, isRecord(args) ? args : {})
+  } catch (error) {
+    return refuse('delegate', error instanceof Error ? error.message : 'invalid one-shot overrides')
   }
   if (!role.readOnly) return refuse('delegate', `role "${role.id}" is not read-only`)
   // A runner role always starts fresh in its CLI's read-only mode, so it never copies the parent conversation.
