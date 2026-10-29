@@ -12,7 +12,7 @@
  *                 searches /opt/cli-tools/node_modules/.bin and /opt/cli-tools/bin.
  * - CHECK_CLI_CASE  only run cases whose name contains this text (case-insensitive).
  *
- * What is real: Cordis, SessionStore, AgentRegistry, SystemPrompt, ToolRuntime, the storage stack
+ * What is real: Cordis, SessionStore, SessionProjectionRegistry, AgentRegistry, SystemPrompt, ToolRuntime, the storage stack
  * (Storage + JSON backend in a temp dir + DomainFacility), LocalSubprocessRuntime and
  * SubagentRuntime from DSH, and this plugin's own `apply` (loaded from src/ with Node's type
  * stripping). What is stubbed: the parent Agent (a real Session with a recording inbox, as DSH's
@@ -76,6 +76,7 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { hostResolveHook } from './host-resolve-hook.mjs'
 import { isolateCheckEnvironment } from './check-environment.mjs'
+import { mountNativeTools } from './host-tools.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const checkout = resolve(process.env.DSH_CHECKOUT || '/opt/dsh')
@@ -94,6 +95,7 @@ const checkEnvironment = isolateCheckEnvironment()
 
 const { Context } = await import('@deepseek-ai/cordis')
 const { default: SessionStore, SessionId } = await import('@deepseek-ai/dsh-session')
+const { default: SessionProjectionRegistry } = await import('@deepseek-ai/dsh-session-projection')
 const { default: AgentRegistry } = await import('@deepseek-ai/dsh-agent')
 const { default: SubagentRuntime } = await import('@deepseek-ai/dsh-subagent')
 const { default: LocalSubprocessRuntime } = await import('@deepseek-ai/dsh-subprocess-local')
@@ -238,10 +240,11 @@ async function createWorld(options = {}) {
   }
   const ctx = new Context()
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SystemPrompt)
   // Constructed on the root (as scripts/check-workflow-host.mjs does) so scoped Agent contexts can reach it.
-  new ToolRuntime(ctx, { mode: 'native' })
+  await mountNativeTools(ctx, ToolRuntime)
   await ctx.plugin(Storage)
   await ctx.plugin(JsonStorage, { root: stateDir })
   await ctx.plugin(StorageDomain, { backend: 'json' })
@@ -426,7 +429,8 @@ async function selfCheck(h) {
     try {
       const { childId, tool, value } = await w.delegate({ role: 'fake', prompt: 'hello ✓ CWD' })
       const rendered = tool.output.render({ role: 'fake' }, value)
-      h.assert.equal(rendered[0].text, `started Codex subagent ${childId}`)
+      h.assert.equal(rendered[0].text.split('\n')[0], `started Codex subagent ${childId}`)
+      h.assert.match(rendered[0].text, /this is a start receipt, not a completion result/)
       const notice = await w.notice(childId)
       h.assert.match(notice, new RegExp(`Background subagent ${childId} finished`))
       h.assert.ok(notice.includes(ws), `notice carries the answer (cwd): ${notice}`)

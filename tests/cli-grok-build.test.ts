@@ -113,6 +113,27 @@ describe('Grok native adapter', () => {
     expect(run).toHaveBeenCalledOnce()
     expect(run.mock.calls[0]?.[0]).toEqual(['--version'])
   })
+  it('preserves prerelease and build metadata instead of detecting a shorter version', async () => {
+    const version = '1.0.62-beta.1+build.7'
+    const run: ProbeRunner = async () => ({
+      code: 0,
+      stdout: `grok ${version} (abc) [stable]\n`,
+      stderr: '',
+      timedOut: false,
+    })
+    expect((await grokBuildAdapter.probe?.('/bin/grok', run, new AbortController().signal, {}))?.version).toBe(version)
+  })
+  it('does not report a stable version from an unrecognized version token', async () => {
+    const run: ProbeRunner = async () => ({
+      code: 0,
+      stdout: 'grok 1.0.62unknown (abc) [stable]\n',
+      stderr: '',
+      timedOut: false,
+    })
+    expect(
+      (await grokBuildAdapter.probe?.('/bin/grok', run, new AbortController().signal, {}))?.version,
+    ).toBeUndefined()
+  })
 })
 
 describe('Grok stream lifecycle', () => {

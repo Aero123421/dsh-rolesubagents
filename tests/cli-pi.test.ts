@@ -86,6 +86,11 @@ describe('Pi native plan and safe probe', () => {
     expect(run).toHaveBeenCalledOnce()
     expect(run.mock.calls[0]?.[0]).toEqual(['--version'])
   })
+  it('preserves combined prerelease and build metadata', async () => {
+    const version = '1.3.0-beta.1+build.7'
+    const run: ProbeRunner = async () => ({ code: 0, stdout: `${version}\n`, stderr: '', timedOut: false })
+    expect((await piAdapter.probe?.('/bin/pi', run, new AbortController().signal, {}))?.version).toBe(version)
+  })
 })
 
 describe('Pi RPC lifecycle', () => {

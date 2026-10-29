@@ -257,7 +257,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     try {
       prepared.workflow?.()
       prepared.workflow = undefined
-      const original = agent.ctx.tools.get?.('workflow', agent)
+      // Newer hosts keep activation conditions on registrations, not definitions.
+      // Leave conditional workflows native rather than replacing them with an unconditional wrapper.
+      const original =
+        typeof agent.ctx.tools.executable === 'function'
+          ? agent.ctx.tools.executable('workflow', agent)
+          : agent.ctx.tools.get?.('workflow', agent)
       if (original !== undefined) {
         const wrapped = workflowTool(original, snapshot.workflowModel, () => {
           if (installed.get(agent) !== prepared) return undefined

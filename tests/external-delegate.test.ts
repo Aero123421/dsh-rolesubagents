@@ -629,6 +629,24 @@ describe('probe', () => {
     expect((await probeCli({ cli: 'codex' }, deps({ CODEX_API_KEY: 'sk-x' }), signal)).auth).toBe('ok')
   })
 
+  it('does not start the adapter after cancellation during executable resolution', async () => {
+    const controller = new AbortController()
+    const subprocess = fakeSubprocess()
+    subprocess.resolveExecutable = async () => {
+      controller.abort()
+      return '/bin/codex'
+    }
+    const probe = vi.fn<NonNullable<CliAdapter['probe']>>(async () => ({ cli: 'codex', found: true }))
+    await expect(
+      probeCli(
+        { cli: 'codex' },
+        { subprocess, adapters: () => ({ ...testAdapter(), probe }), settings: undefined },
+        controller.signal,
+      ),
+    ).rejects.toThrow()
+    expect(probe).not.toHaveBeenCalled()
+  })
+
   function fakeTypert() {
     const constructed: unknown[][] = []
     const marked: { method: unknown; name: string; instance: unknown }[] = []
@@ -644,6 +662,26 @@ describe('probe', () => {
     }
     return { module: { TypertRemoteService, Remote } as unknown as TypertModule, constructed, marked }
   }
+
+  it('rejects and does not cache a successful adapter result received after cancellation', async () => {
+    const controller = new AbortController()
+    const onResult = vi.fn()
+    const Service = createProbeServiceClass(fakeTypert().module, {
+      subprocess: () => fakeSubprocess(),
+      adapters: () => ({
+        ...testAdapter(),
+        probe: async () => {
+          controller.abort()
+          return { cli: 'codex', found: true, version: '1.2.3' }
+        },
+      }),
+      cliSettings: () => undefined,
+      isDisposed: () => false,
+      onResult,
+    })
+    await expect(new Service({}).probe({ cli: 'codex' }, controller.signal)).rejects.toThrow()
+    expect(onResult).not.toHaveBeenCalled()
+  })
 
   it('builds a Remote service class whose probe method is marked at construction', async () => {
     const typert = fakeTypert()

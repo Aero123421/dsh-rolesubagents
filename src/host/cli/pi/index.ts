@@ -46,7 +46,9 @@ export const piAdapter: CliAdapter = {
     // --help and --list-models initialize the full extension runtime in Pi 1.3.0. --version exits early.
     const result = await run(['--version'], { timeoutMs: 10000, env: { PI_SKIP_VERSION_CHECK: '1' } }, signal)
     const version =
-      result.code === 0 ? /^(?:pi\s+)?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\s*$/m.exec(result.stdout)?.[1] : undefined
+      result.code === 0
+        ? /^(?:pi\s+)?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\s*$/m.exec(result.stdout)?.[1]
+        : undefined
     return { cli: 'pi', found: true, auth: 'unknown', ...(version ? { version } : {}) }
   },
 }
