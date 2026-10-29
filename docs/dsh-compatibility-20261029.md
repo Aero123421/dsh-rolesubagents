@@ -4,19 +4,20 @@ Baseline: `Aero123421/dsh-rolesubagents` main **9db2d2df542d27403fdeb30fd3471558
 
 ## Official versions and provenance
 
-The [official npm package](https://registry.npmjs.org/@deepseek-ai%2Fdsh) identifies [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (`apps/cli`) as its repository. At verification time, **no stable SemVer version was published**. npm's `latest` tag points to an RC and must not be called a stable release.
+The [official npm package](https://registry.npmjs.org/@deepseek-ai%2Fdsh) identifies [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (`apps/cli`) as its repository. At the fixed acceptance cutoff **2026-10-29 15:00 UTC**, **no stable SemVer version was published**. npm's `latest` tag remains `0.2.1-rc.2` and must not be called a stable release. `next` advanced from the initially tested `0.2.1-rc.4` to `0.2.1-rc.5`, published **2026-10-29T14:15:23.355Z**, before the cutoff. The rc.4 results remain valid historical baseline evidence; later releases are outside this acceptance window.
 
 | Channel | Exact DSH version | Official source tag commit |
 | --- | --- | --- |
 | npm `latest` | `0.2.1-rc.2` | `687f282e8625c6b8d11ff58211a90524be2e4317` |
-| npm `next` | `0.2.1-rc.4` | `504a01a9578abc2c6f1fb896b1dc322c9fe24f66` |
+| Prior npm `next` baseline | `0.2.1-rc.4` | `504a01a9578abc2c6f1fb896b1dc322c9fe24f66` |
+| npm `next` at cutoff | `0.2.1-rc.5` | No corresponding official source tag observed; npm artifact identified below |
 | npm `alpha`; current source `master` | `0.2.2-alpha.2` | `f3803c96974ad4a94195fb97e5c637e9c2a3afe3` |
 
 Sources: official release tags [rc.2](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.2), [rc.4](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.4), [alpha.2](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-alpha.2). npm records have no `gitHead`; the tag SHAs identify reviewed source, not a proven reproducible mapping from source to npm artifacts. Exact official npm tarball URLs and SHA-512 integrity values are retained in the installation lockfiles and verification provenance.
 
-Three separate installations were created under `/workspace/dsh-runtimes/<version>`, using only the official npm package, exact versions and `npm install --ignore-scripts --no-audit --no-fund`. No login or real account was used. Runtime: Linux x64, Node **24.19.0**. Alpha requires Node `>=24.9.0`; Node 22 was not requalified in this run.
+Four separate installations were created under `/workspace/dsh-runtimes/<version>`, using only the official npm package, exact versions and `npm install --ignore-scripts --no-audit --no-fund`. No login or real account was used. Runtime: Linux x64, Node **24.19.0**. Alpha requires Node `>=24.9.0`; Node 22 was not requalified in this run.
 
-The old peer range `>=0.2.1-alpha.3 <0.3.0-0` admits rc.2/rc.4 but **excludes** `0.2.2-alpha.2` under normal SemVer prerelease rules. The three DSH peer ranges now explicitly include only that checked additional alpha. Development SDK pins are unchanged.
+The old peer range `>=0.2.1-alpha.3 <0.3.0-0` admits rc.2/rc.4/rc.5 but **excludes** `0.2.2-alpha.2` under normal SemVer prerelease rules. The three DSH peer ranges now explicitly include only that checked additional alpha. Development SDK pins are unchanged.
 
 ## Changes
 
@@ -29,6 +30,8 @@ The old peer range `>=0.2.1-alpha.3 <0.3.0-0` admits rc.2/rc.4 but **excludes** 
 
 The rc.2/rc.4 external manager implementations are identical. Alpha's external startup, cancellation, disposal and subprocess contracts remain compatible. PR26's unload disposal barrier and read-only startup fix already cover their intended cases and were not duplicated.
 
+For rc.4 → rc.5, the scoped artifact comparison covered **18 official npm packages and 326 emitted JavaScript/declaration files** across subagents, tools, scopes, storage domains, Typert protocol/registry, subprocesses, LLM, sessions/controllers, settings, Connection, workflows and sandbox policy. All 326 files were byte-identical, with no files added or removed in those compared runtime/type surfaces. No production compatibility fix or peer-range widening was needed for rc.5. The official Git repository still had no `dsh-v0.2.1-rc.5` tag/release and the npm record had no `gitHead`; an rc.5 source commit SHA is therefore **unverified**, not inferred from master. The exact official [rc.5 npm artifact metadata](https://registry.npmjs.org/@deepseek-ai%2Fdsh/0.2.1-rc.5) records tarball SHA-1 `8e1bfd31869414f7a5ec10c34403a852ac9c3dc7` and integrity `sha512-WkyJZv4zl9sCAxSzRctGm58m0rilGqwR6pniBiLOz5CPDfHfDuAUicg0AAazXI7oj/Cph6/cjNTncA/rpLTXpw==`. These are package artifact identifiers, not source commit identifiers.
+
 ## Final verification
 
 All checks below ran after the final production source and Host bundle changes.
@@ -39,11 +42,12 @@ The integration coordinator separately reported an independent npm-latest `0.2.1
 | --- | --- | --- | --- | --- | --- |
 | `0.2.1-rc.2` | 18 passed | passed | 23 passed | passed | 7 passed, 0 skipped |
 | `0.2.1-rc.4` | 18 passed | passed | 23 passed | passed | 7 passed, 0 skipped |
+| `0.2.1-rc.5` | 18 passed | passed | 23 passed | passed | 7 passed, 0 skipped |
 | `0.2.2-alpha.2` | 19 passed | passed | 23 passed | passed | 7 passed, 0 skipped |
 
 The additional alpha workflow check resolves real step admission with its condition false, true, then false again, verifying that the native conditional definition remains unchanged. Native delegation covers one-shot route/effort validation, pre-spawn refusals, read-only dispatch/re-pinning, unchanged persisted parent snapshots, compaction, warm follow-up and cold restoration of the same child. External self checks exercise completion delivery, safe failure text, interrupt, leftover-process cleanup, plugin unload, depth/workspace refusal and Remote mounting.
 
-- Unit suite: **1,598 passed, 2 skipped**, 54 files. The skips are opt-in installed-runtime controls, not failed checks relabeled as passes; the separate 15-suite runtime matrix ran successfully.
+- Unit suite: **1,598 passed, 2 skipped**, 54 files. The skips are opt-in installed-runtime controls, not failed checks relabeled as passes; the original 15-suite runtime matrix and the additional five rc.5 suites ran successfully (20 total).
 - Lint, Host/client/test TypeScript checks, frozen lockfile validation and `git diff --check`: passed using the repository's pnpm **10.28.0**.
 - Two consecutive final builds produced byte-identical SHA-256 hashes for all four `lib/` files. Host JS: `a150b2b74d4e085ba86190159d3e3959711751de89d5eb90ee8380ce6cb605d5`.
 - Regression-first evidence: nine CLI/probe cases and two workflow cases failed before their fixes and passed afterward.
@@ -62,7 +66,7 @@ DSH_CHECKOUT=/path/to/installed/dsh node scripts/check-probe-host.mjs
 DSH_CHECKOUT=/path/to/installed/dsh CHECK_CLI_REQUIRE_ALL=1 node scripts/check-cli.mjs self
 ```
 
-Run-specific evidence is retained at `/workspace/dsh-verification-evidence`: `final/status.txt` contains all 15 zero exit codes; `final/*.log` and CLI JSON reports contain detailed results; `provenance.jsonl`, `official-npm-metadata.json`, `npm-*.json` and installation lockfiles preserve official package provenance. Unit/typecheck/lint and repeated-build logs/hashes are alongside them. Initial failures remain recorded separately from the final runs.
+Run-specific evidence is retained at `/workspace/dsh-verification-evidence`: `final/status.txt` contains all 15 zero exit codes; `final/*.log` and CLI JSON reports contain detailed results; `provenance.jsonl`, `official-npm-metadata.json`, `npm-*.json` and installation lockfiles preserve official package provenance. Unit/typecheck/lint and repeated-build logs/hashes are alongside them. Initial failures remain recorded separately from the final runs. The added rc.5 exit matrix, logs and official npm provenance are retained under `rc5-cutoff/`; all five suites passed on the unchanged production source/bundle from commit `2f71caf7b892b0d3d21af9a9fa6b2501db300142`.
 
 ## Scope and remaining work
 
