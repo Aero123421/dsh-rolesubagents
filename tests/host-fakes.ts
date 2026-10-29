@@ -242,6 +242,31 @@ export function fakeAgent(id: string, session: FakeSession = fakeSession(`sessio
   return { id, session, registered, disposers, register, guards, guardDisposers, ctx: { tools: { register, guard } } }
 }
 
+/** Model installed ToolRuntime: explicit scoped lookup; restrictions validate inherited, not own, names. */
+export function validatingToolView(agent: FakeAgent, parent?: FakeAgent, globals: ToolDefinition[] = []) {
+  const denied = new Set<string>()
+  const own = (owner: FakeAgent, name: string) =>
+    owner.registered.findLast((tool, i) => tool.name === name && owner.disposers[i]?.mock.calls.length === 0)
+  const inherited = (name: string) => (parent && own(parent, name)) ?? globals.find(tool => tool.name === name)
+  const get = vi.fn<NonNullable<AgentPort['ctx']['tools']['get']>>((name, scope) => {
+    if (scope === undefined) return globals.find(tool => tool.name === name)
+    if (scope !== agent) throw new Error('unexpected tool lookup scope')
+    return own(agent, name) ?? (denied.has(name) ? undefined : inherited(name))
+  })
+  const restrict = vi.fn<NonNullable<AgentPort['ctx']['tools']['restrict']>>(patch => {
+    for (const name of patch.deny) {
+      if (!inherited(name)) throw new Error(`tools.restrict() names unknown global tool "${name}"`)
+    }
+    for (const name of patch.deny) denied.add(name)
+    return vi.fn(() => {
+      for (const name of patch.deny) denied.delete(name)
+    })
+  })
+  agent.ctx.tools.get = get
+  agent.ctx.tools.restrict = restrict
+  return { get, restrict }
+}
+
 /** The tool an Agent had registered; fails the test when it has none. */
 export function registeredTool(agent: FakeAgent): ToolDefinition {
   const [tool] = agent.registered

@@ -95,7 +95,7 @@ describe('role display saved identities', () => {
 })
 
 describe('role display Remote API', () => {
-  it('marks only query with stable parameters and allowlists response fields', async () => {
+  it('marks read-only methods with stable parameters and allowlists response fields', async () => {
     const { state, service, Service, typert, world } = setup()
     state.writeRoleById(
       'custom',
@@ -108,7 +108,10 @@ describe('role display Remote API', () => {
     )
     state.writeRoleById('builtin', builtinRole('fork'))
     expect(typert.constructed).toHaveBeenCalledWith(world.ctx, ROLE_DISPLAY_SERVICE_NAME)
-    expect(typert.marked.mock.calls).toEqual([['query', Service.prototype.query, service]])
+    expect(typert.marked.mock.calls).toEqual([
+      ['query', Service.prototype.query, service],
+      ['externalRuns', Service.prototype.externalRuns, service],
+    ])
     expect(Service.prototype.query.toString()).toMatch(/^async query\(childIds, signal\)/)
     const write = vi.spyOn(state, 'writeRoleById')
     expect(await service.query(['custom', 'builtin', 'missing', 'custom'], signal)).toEqual([

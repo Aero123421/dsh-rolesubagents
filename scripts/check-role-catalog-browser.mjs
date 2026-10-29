@@ -29,8 +29,13 @@ if (!(await stat(browser)).isFile()) throw new Error('Browser must be a regular 
 output = resolve(output)
 await mkdir(output, { recursive: true })
 output = await realpath(output)
-// Never overwrite prior evidence. Caller chooses the output directory; only three new files are written.
-for (const name of ['report.json', 'desktop.png', 'mobile-ja.png']) {
+// Never overwrite prior evidence. Caller chooses the output directory; only new evidence files are written.
+for (const name of [
+  'report.json',
+  ...['desktop', 'result-desktop', 'mobile-320', 'mobile-390', 'result-mobile-320', 'result-mobile-390'].flatMap(name =>
+    ['dark', 'light'].map(theme => `${name}-${theme}.png`),
+  ),
+]) {
   try {
     await stat(join(output, name))
     throw new Error(`Output already exists: ${join(output, name)}`)
@@ -85,8 +90,15 @@ const check = async (name, expression) => {
   console.log(`PASS ${name}`)
 }
 const key = async (value, code = value) => {
-  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: value, code })
-  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: value, code })
+  const native = value === 'Enter' ? { windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 } : {}
+  await send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    key: value,
+    code,
+    ...native,
+    ...(value === 'Enter' ? { text: '\r' } : {}),
+  })
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: value, code, ...native })
   await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
 }
 const click = async selector => {
@@ -126,7 +138,7 @@ try {
     throw new Error('Profile identity mismatch')
   await writeFile(
     html,
-    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><title>Isolated role catalog component smoke</title><style>body{margin:0;padding:20px;font:14px system-ui;color:#e5e7eb;background:#17191e;--dsw-specific-menu:#24272e;--dsw-alias-label-primary:#eee;--dsw-alias-label-tertiary:#aeb4c0;--dsw-alias-border-l1:#505661}h1{font-size:18px}h2{font-size:14px}section{margin:24px 0}#outside{margin-top:260px}button{color:inherit;background:#343944;border:1px solid #626977;border-radius:6px;padding:6px}</style><div id="fixture"></div><script>${bundle.outputFiles[0].text.replaceAll('</script', '<\\/script')}</script></html>`,
+    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><title>Isolated role catalog component smoke</title><style>body{margin:0;padding:20px;font:14px system-ui;color:#e5e7eb;background:#17191e;--dsw-specific-menu:rgb(44 44 48 / .86);--dsw-alias-label-primary:#eee;--dsw-alias-label-tertiary:#aeb4c0;--dsw-alias-border-l1:#505661}h1{font-size:18px}h2{font-size:14px}section{margin:24px 0}#outside{margin-top:260px}button{color:inherit;background:#343944;border:1px solid #626977;border-radius:6px;padding:6px}</style><div id="fixture"></div><script>${bundle.outputFiles[0].text.replaceAll('</script', '<\\/script')}</script></html>`,
     { flag: 'wx', mode: 0o600 },
   )
   const flags = [
@@ -207,13 +219,47 @@ try {
   await evaluate(
     'new Promise((resolve,reject)=>{const end=Date.now()+8000; const poll=()=>window.smoke?.ready()?resolve():Date.now()>end?reject(Error("Fixture did not mount")):setTimeout(poll,25);poll()})',
   )
-  await evaluate('document.querySelector("#root-action button").focus()')
-  await key('ArrowDown')
-  await check('root, keyboard focus, status/tokens/duration, actual SVG and escaped hostile text', 'smoke.checkRoot()')
-  await key('ArrowRight')
-  await check('nested projection and metadata', 'smoke.checkNested()')
-  await click('[role="treeitem"][aria-disabled="true"]')
-  await check('external non-navigation', 'smoke.checkExternal()')
+  const hover = await evaluate(
+    `(() => { const r=document.querySelector('#root-action button').getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2} })()`,
+  )
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...hover })
+  await evaluate('new Promise(resolve => setTimeout(resolve, 250))')
+  await check('catalog does not open on hover', 'smoke.checkClosed()')
+  await click('#root-action button')
+  await check('named dialog, collapsed history, scope controls and safe badges', 'smoke.checkRoot()')
+  await check('focused running row completion retains catalog keyboard focus', 'smoke.checkCompletionFocus()')
+  await check('desktop 384px width and 472px height cap', 'smoke.checkLayout()')
+  await check('desktop opaque RGB preservation with dark/light translucent tokens', 'smoke.checkOpaqueMenu()')
+  for (const theme of ['dark', 'light']) {
+    await evaluate(`smoke.setTheme(${theme === 'light'})`)
+    await screenshot(`desktop-${theme}.png`)
+  }
+  await evaluate('smoke.setTheme(false)')
+  await click('[aria-label="Expand Worker"]')
+  await check('nested direct-child group and unknown status', 'smoke.checkNested()')
+  await click('.dshrs-catalog-history')
+  await check('completed history expands with distinct result/chat actions', 'smoke.checkHistory()')
+  await check('failed refresh marks last known record stale, then recovers', 'smoke.checkStale()')
+  await click('[aria-label^="External ·"]')
+  await check('nonmodal result, safe output, focused close and parent focusability', 'smoke.checkExternal()')
+  await check('desktop result layout and opaque RGB preservation', 'smoke.checkExternalLayout()')
+  // Shift+Tab from the first inspector control must leave it (no focus trap).
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', modifiers: 8 })
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', modifiers: 8 })
+  await check(
+    'keyboard can leave result inspector',
+    `if(document.querySelector('.dshrs-run-dialog').contains(document.activeElement)) throw Error('Inspector trapped Shift+Tab')`,
+  )
+  await evaluate(`document.querySelector('.dshrs-run-header button').focus()`)
+  for (const theme of ['dark', 'light']) {
+    await evaluate(`smoke.setTheme(${theme === 'light'})`)
+    await screenshot(`result-desktop-${theme}.png`)
+  }
+  await key('Escape')
+  await check('result Escape returns trigger focus', 'smoke.checkClosed(true)')
+  await evaluate('smoke.setTheme(false)')
+  await click('#root-action button')
+  await click('[aria-label="Expand Worker"]')
   await click('[aria-label^="Nested reviewer ·"]')
   await check('nested direct-parent navigation', 'smoke.checkNavigation("open","worker","nested")')
   await click('#root-action button')
@@ -222,21 +268,52 @@ try {
   await evaluate('document.querySelector("#root-action button").focus()')
   await key('ArrowDown')
   await key('Escape')
-  await check('Escape dismissal and focus return', 'smoke.checkClosed(true)')
+  await check('keyboard catalog dismissal and focus return', 'smoke.checkClosed(true)')
   await click('#root-action button')
   await click('#outside')
   await check('outside pointer dismissal', 'smoke.checkClosed()')
-  await click('#lineage .dshrs-catalog button')
-  await click('[aria-label="Expand Worker"]')
-  await check('dark/light current row painted background and bold inherited label', 'smoke.checkCurrent()')
-  await screenshot('desktop.png')
-  await click('[aria-label^="Ordinary ·"]')
-  await check('child lineage sibling navigation', 'smoke.checkNavigation("open","root","ordinary")')
-  await evaluate('smoke.setLocale()')
-  await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 720, deviceScaleFactor: 1, mobile: true })
+  await evaluate('smoke.setWorkerCompleted(true)')
+  await click('#lineage .dshrs-catalog-trigger')
+  await check('completed current ahead of history; dark/light painted bold label', 'smoke.checkCurrent()')
+  await key('Escape')
+  await evaluate('smoke.setWorkerCompleted(false)')
   await click('#root-action button')
-  await check('Japanese labels and 320px viewport without overflow', 'smoke.checkMobile()')
-  await screenshot('mobile-ja.png')
+  await evaluate('smoke.checkRoleCache()')
+  await key('Escape')
+  await click('#root-action button')
+  await check('positive role cache while reopen refresh pending', 'smoke.checkCachedRole()')
+  await key('Escape')
+  await evaluate('smoke.setLocale()')
+  for (const width of [320, 390]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height: 720, deviceScaleFactor: 1, mobile: true })
+    await send('Emulation.setTouchEmulationEnabled', { enabled: true })
+    const touch = await evaluate(
+      `(() => { const e=document.querySelector('#root-action button'); e.scrollIntoView({block:'nearest'}); const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2} })()`,
+    )
+    await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touch] })
+    await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    await check(`Japanese ${width}px bottom sheet, touch controls and no overflow`, 'smoke.checkMobile()')
+    await check(`mobile ${width}px opaque dark/light RGB preservation`, 'smoke.checkOpaqueMenu()')
+    for (const theme of ['dark', 'light']) {
+      await evaluate(`smoke.setTheme(${theme === 'light'})`)
+      await screenshot(`mobile-${width}-${theme}.png`)
+    }
+    await click('.dshrs-catalog-history')
+    await click('[aria-label^="External ·"]')
+    await check(
+      `result ${width}px bottom sheet, touch controls, opacity and no overflow`,
+      'smoke.checkExternalLayout()',
+    )
+    for (const theme of ['dark', 'light']) {
+      await evaluate(`smoke.setTheme(${theme === 'light'})`)
+      await screenshot(`result-mobile-${width}-${theme}.png`)
+    }
+    await evaluate(`document.querySelector('.dshrs-run-header button').focus()`)
+    await key(width === 320 ? 'Enter' : 'Escape')
+    await check(`result ${width}px keyboard close and focus return`, 'smoke.checkClosed(true)')
+  }
+  await click('#root-action button')
   await check('reconnect aborts stale metadata; unavailable metadata is nonfatal', 'smoke.unavailable()')
   await check('metadata retries after actual five-second interval', 'smoke.recoverByRetry()')
   await click('[aria-label="展開 Worker"]')

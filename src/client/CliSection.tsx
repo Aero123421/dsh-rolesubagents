@@ -2,10 +2,9 @@
 
 import { useEffect, useRef } from 'react'
 import { CLI_IDS, type CliId, cliDescriptor } from '../shared/cli/index.ts'
-import type { CliSettings } from '../shared/roles.ts'
 import { CliCompatibility } from './CliCompatibility.tsx'
 import { useController, useT } from './context.tsx'
-import type { PageState, ProbeState } from './controller.ts'
+import { sameCliSettings, supportsCliModelRefresh, type PageState, type ProbeState } from './controller.ts'
 import { type IssueField, parseEnvNames } from './draft.ts'
 import { issueText } from './i18n.ts'
 import { shouldRevealProbe } from './scroll-clearance.ts'
@@ -27,10 +26,6 @@ export function CliSection({ state }: { state: PageState }) {
   )
 }
 
-const sameEntry = (a: CliSettings | undefined, b: CliSettings | undefined): boolean =>
-  (a?.executable ?? '') === (b?.executable ?? '') &&
-  (a?.envPassthrough ?? []).join(' ') === (b?.envPassthrough ?? []).join(' ')
-
 /** Typed names → the text of the list they parse to. */
 const namesText = (text: string): string => parseEnvNames(text).join(', ')
 
@@ -40,7 +35,7 @@ function CliCard({ cli, state }: { cli: CliId; state: PageState }) {
   const descriptor = cliDescriptor(cli)
   const name = descriptor.displayName
   const settings = state.draft?.clis?.[cli]
-  const changed = !sameEntry(settings, state.draft?.base.clis?.[cli])
+  const changed = !sameCliSettings(settings, state.draft?.base.clis?.[cli])
   const used = state.draft?.rows.filter(row => row.role.runner?.cli === cli).length ?? 0
   const probe = state.probes.clis[cli]
   const loading = probe.status === 'loading'
@@ -84,6 +79,7 @@ function CliCard({ cli, state }: { cli: CliId; state: PageState }) {
           />
         )}
       </Field>
+      <CliModelRefresh cli={cli} state={state} action={false} />
       {state.probes.available ? (
         <>
           <div className="dshrs-probe-bar">
@@ -150,6 +146,78 @@ function ProbeOutcome({ probe, cli }: { probe: ProbeState; cli: string }) {
           {line.text}
         </p>
       ))}
+    </div>
+  )
+}
+
+/** Model-list provenance is separate from executable/auth diagnostics. */
+export function CliModelRefresh({ cli, state, action = true }: { cli: CliId; state: PageState; action?: boolean }) {
+  const c = useController()
+  const t = useT()
+  const probe = state.probes.clis[cli]
+  const supported = supportsCliModelRefresh(cli)
+  const changed = !sameCliSettings(state.draft?.clis?.[cli], state.draft?.base.clis?.[cli])
+  const listed = (probe.models?.length ?? 0) > 0
+  const latestListed =
+    probe.status === 'ready' &&
+    probe.result?.found &&
+    probe.result.auth !== 'missing' &&
+    (probe.result.models?.length ?? 0) > 0
+  return (
+    <div className="dshrs-hint">
+      {action && supported ? (
+        <div className="dshrs-probe-bar">
+          <Button
+            disabled={!state.probes.available || probe.status === 'loading' || state.status !== 'ready'}
+            busy={probe.status === 'loading'}
+            onClick={() => c.refreshCliModels(cli)}
+          >
+            {t(probe.status === 'loading' ? 'models.refreshing' : 'models.refresh')}
+          </Button>
+        </div>
+      ) : null}
+      <div aria-live="polite">
+        <p>
+          {t(
+            cli === 'claude-code'
+              ? 'models.aliases'
+              : !supported
+                ? 'models.unsupported'
+                : listed
+                  ? 'models.live'
+                  : 'models.static',
+          )}
+        </p>
+        {supported ? <p>{t('models.explicit')}</p> : null}
+        {action && supported && changed ? <p>{t('clis.testSaved')}</p> : null}
+        {action && supported && !state.probes.available ? <p>{t('clis.unavailable')}</p> : null}
+        {probe.checkedAt === undefined ? (
+          supported ? (
+            <p>{t('models.unchecked')}</p>
+          ) : null
+        ) : (
+          <p>{t('models.checked', { time: new Date(probe.checkedAt).toISOString() })}</p>
+        )}
+        {listed && probe.modelsCheckedAt !== undefined ? (
+          <p>{t('models.good', { time: new Date(probe.modelsCheckedAt).toISOString() })}</p>
+        ) : null}
+        {supported && probe.status === 'loading' ? <p>{t('models.refreshing')}</p> : null}
+        {action && supported && probe.status === 'error' ? (
+          <p>{t(probe.issue === undefined ? 'probe.error' : `probe.${probe.issue}`)}</p>
+        ) : null}
+        {supported && probe.status === 'ready' && !latestListed ? (
+          <p>
+            {t(
+              probe.result?.message === 'models-timeout'
+                ? 'models.timeout'
+                : probe.result?.message === 'models-unavailable'
+                  ? 'models.unavailable'
+                  : 'models.empty',
+            )}
+          </p>
+        ) : null}
+        {listed && !latestListed ? <p>{t('models.retained')}</p> : null}
+      </div>
     </div>
   )
 }

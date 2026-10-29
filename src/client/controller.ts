@@ -143,6 +143,10 @@ export interface ProbeState {
   readonly status: 'idle' | 'loading' | 'ready' | 'error'
   readonly result?: ProbeResultLike
   readonly issue?: ProbeIssue
+  /** Last nonempty discovery, retained across unsuccessful checks. */
+  readonly models?: readonly ProbeModelLike[]
+  readonly checkedAt?: number
+  readonly modelsCheckedAt?: number
 }
 
 /** Connection tests of every CLI. `available` means a caller was supplied, not that the Host is compatible. */
@@ -211,6 +215,8 @@ export interface Controller {
   setCliSettings(cli: CliId, patch: CliSettings): void
   /** Run the connection test of one CLI against the Host's saved settings. */
   probeCli(cli: CliId): void
+  /** Explicit discovery only for adapters with a supported model-list probe. */
+  refreshCliModels(cli: CliId): void
   moveRole(uid: number, delta: -1 | 1): void
   duplicateRole(uid: number): void
   removeRole(uid: number): void
@@ -344,6 +350,14 @@ export interface CliSuggestions {
   readonly efforts: readonly string[]
 }
 
+export function supportsCliModelRefresh(cli: CliId): boolean {
+  return cli === 'codex' || cli === 'agy' || cli === 'opencode'
+}
+
+export const sameCliSettings = (a: CliSettings | undefined, b: CliSettings | undefined): boolean =>
+  (a?.executable ?? '') === (b?.executable ?? '') &&
+  (a?.envPassthrough ?? []).join(' ') === (b?.envPassthrough ?? []).join(' ')
+
 const unique = (values: readonly string[]): string[] => [...new Set(values)]
 
 /**
@@ -356,7 +370,11 @@ const unique = (values: readonly string[]): string[] => [...new Set(values)]
  */
 export function cliSuggestions(probe: ProbeState | undefined, cli: CliId, provider = '', model = ''): CliSuggestions {
   const descriptor = cliDescriptor(cli)
-  const listed = probe?.status === 'ready' ? (probe.result?.models ?? []) : []
+  const listed = supportsCliModelRefresh(cli)
+    ? (probe?.models ??
+      (probe?.result?.found && probe.result.auth !== 'missing' ? probe.result.models : undefined) ??
+      [])
+    : []
   if (!descriptor.needsProvider) {
     const models = listed.length > 0 ? unique(listed.map(entry => entry.id)) : [...descriptor.modelSuggestions]
     return { providers: [], models, efforts: listed.find(entry => entry.id === model)?.efforts ?? [] }
@@ -440,6 +458,7 @@ export function createController(options: ControllerOptions): Controller {
   const probeRuns = new Map<CliId, AbortController>()
   let state: PageState
   let observedForm = form.getSnapshot()
+  let savedCliSettings = normalizeSettings(observedForm.value).settings.clis
   let formEpoch = 0
   let roleSafetyWaitForForm = false
   let activeRoleSafety: AbortController | undefined
@@ -526,6 +545,16 @@ export function createController(options: ControllerOptions): Controller {
   function onForm(): void {
     if (disposed) return
     const snapshot = form.getSnapshot()
+    if (snapshot.status === 'ready') {
+      const nextClis = hostSettings(snapshot).settings.clis
+      for (const cli of CLI_IDS) {
+        if (sameCliSettings(savedCliSettings?.[cli], nextClis?.[cli])) continue
+        probeRuns.get(cli)?.abort()
+        probeRuns.delete(cli)
+        setProbe(cli, IDLE_PROBE)
+      }
+      savedCliSettings = nextClis
+    }
     const dataChanged = snapshot.value !== observedForm.value || snapshot.revision !== observedForm.revision
     const becameReady = snapshot.status === 'ready' && observedForm.status !== 'ready'
     if (dataChanged || snapshot.status !== observedForm.status || snapshot.writable !== observedForm.writable) {
@@ -647,7 +676,7 @@ export function createController(options: ControllerOptions): Controller {
   }
 
   async function runProbe(cli: CliId): Promise<void> {
-    if (disposed || probe === undefined || !probes.available || !isCliId(cli)) return
+    if (disposed || probe === undefined || !probes.available || !isCliId(cli) || state.status !== 'ready') return
     probeRuns.get(cli)?.abort()
     const run = new AbortController()
     probeRuns.set(cli, run)
@@ -661,7 +690,20 @@ export function createController(options: ControllerOptions): Controller {
     }
     if (disposed || probeRuns.get(cli) !== run) return
     probeRuns.delete(cli)
-    setProbe(cli, next)
+    const previous = probes.clis[cli]
+    const checkedAt = Date.now()
+    const discovered =
+      supportsCliModelRefresh(cli) && next.result?.found && next.result.auth !== 'missing'
+        ? next.result?.models
+        : undefined
+    const models = discovered?.length ? discovered : previous.models
+    setProbe(cli, {
+      ...next,
+      checkedAt,
+      ...(models === undefined
+        ? {}
+        : { models, modelsCheckedAt: discovered?.length ? checkedAt : previous.modelsCheckedAt }),
+    })
     publish()
   }
 
@@ -739,6 +781,9 @@ export function createController(options: ControllerOptions): Controller {
     setRunner: (uid, cli) => edit(current => setRunner(current, uid, cli)),
     patchRunner: (uid, patch) => edit(current => patchRunner(current, uid, patch)),
     setCliSettings: (cli, patch) => edit(current => setCliSettings(current, cli, patch)),
+    refreshCliModels(cli) {
+      if (supportsCliModelRefresh(cli) && probes.clis[cli].status !== 'loading') void runProbe(cli)
+    },
     probeCli(cli) {
       void runProbe(cli)
     },

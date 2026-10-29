@@ -78,10 +78,35 @@ function hash(value) {
 }
 
 export const name = 'rolesubagents-native-smoke'
-export const inject = ['llm', 'agents', 'subagents', 'compaction']
+export const inject = ['llm', 'agents', 'subagents', 'compaction', 'storageDomain']
 
 export function apply(ctx, config) {
   const record = entry => appendFileSync(config.recordPath, `${JSON.stringify(entry)}\n`)
+  // Observe real native routing/storage; delegate every operation to the installed services.
+  const resolveCallConfig = ctx.llm.resolveCallConfig.bind(ctx.llm)
+  ctx.llm.resolveCallConfig = async (...args) => {
+    record({ kind: 'resolve-call', config: args[0], ownsEffort: Object.hasOwn(args[0] ?? {}, 'reasoningEffort') })
+    return resolveCallConfig(...args)
+  }
+  const open = ctx.storageDomain.open.bind(ctx.storageDomain)
+  ctx.storageDomain.open = (...args) => {
+    const domain = open(...args)
+    if (args[0]?.name !== 'rolesubagents') return domain
+    const observe = opened => {
+      const table = opened.table.bind(opened)
+      opened.table = name => {
+        const original = table(name)
+        const put = original.put.bind(original)
+        original.put = (key, value) => {
+          record({ kind: 'role-storage', table: name, key, value })
+          return put(key, value)
+        }
+        return original
+      }
+      return opened
+    }
+    return domain instanceof Promise ? domain.then(observe) : observe(domain)
+  }
   const repinned = new Set()
   const overflowed = new Set()
   ctx.on('session/event', (session, event) => {
@@ -95,6 +120,7 @@ export function apply(ctx, config) {
 
   class Adapter extends LlmAdapter {
     async resolveModel(provider, model) {
+      if (!['fixture-model', 'fixture-terra-max'].includes(model)) throw new Error(`fixture unknown model: ${model}`)
       return {
         provider,
         id: model,
@@ -159,6 +185,74 @@ export function apply(ctx, config) {
           yield* textChunks('Completed parent context recorded.')
           return
         }
+        if (task.includes('ROLE_E2E_OVERRIDES')) {
+          const probes = [
+            ['override-ok', { provider: 'roles-e2e', model: 'fixture-terra-max', readOnly: true }],
+            ['override-effort', { provider: 'roles-e2e', model: 'fixture-terra-max', effort: 'high' }],
+            ['override-bad-model', { provider: 'roles-e2e', model: 'missing-model' }],
+            ['override-bad-effort', { provider: 'roles-e2e', model: 'fixture-terra-max', effort: 'impossible' }],
+            ['override-half-route', { model: 'fixture-terra-max' }],
+            ['override-downgrade', { readOnly: false }],
+            ['override-unknown', { permission: 'danger-full-access' }],
+            ['override-fork', { role: 'fork', provider: 'roles-e2e', model: 'fixture-terra-max' }],
+          ]
+          if (!hasCall(messages, 'delegate')) {
+            yield* toolChunks(
+              probes.map(([label, overrides]) => ({
+                name: 'delegate',
+                args: {
+                  role: 'general',
+                  description: label,
+                  prompt: `ROLE_E2E_OVERRIDE_CHILD:${label}`,
+                  ...overrides,
+                },
+              })),
+            )
+            return
+          }
+          for (const [label] of probes) {
+            const call = calls(messages).find(
+              entry => entry.name === 'delegate' && JSON.parse(entry.arguments).description === label,
+            )
+            const result = messages.find(message => message.role === 'tool' && message.toolCallId === call?.id)
+            assert(result, `${label}: missing tool result`)
+            const successful = label === 'override-ok' || label === 'override-effort'
+            assert.equal(result.isError === true, !successful, `${label}: incorrect native admission`)
+            if (successful) {
+              assert.match(textOf(result), /Configured request: roles-e2e\/fixture-terra-max/)
+              assert.match(textOf(result), /not confirmed by this start receipt/)
+              if (label === 'override-ok') assert.match(textOf(result), /Read-only:/)
+            } else assert.doesNotMatch(textOf(result), /started subagent/)
+            record({ kind: 'override-receipt', label, text: textOf(result), error: result.isError === true })
+          }
+          if (!allText.includes('OVERRIDE_DONE:override-ok') || !allText.includes('OVERRIDE_DONE:override-effort')) {
+            yield* textChunks('Waiting for override children.')
+            return
+          }
+          if (
+            !calls(messages).some(
+              entry => entry.name === 'delegate' && JSON.parse(entry.arguments).description === 'override-baseline',
+            )
+          ) {
+            yield* toolChunks([
+              {
+                name: 'delegate',
+                args: {
+                  role: 'general',
+                  description: 'override-baseline',
+                  prompt: 'ROLE_E2E_OVERRIDE_CHILD:override-baseline',
+                },
+              },
+            ])
+            return
+          }
+          yield* textChunks(
+            allText.includes('OVERRIDE_DONE:override-baseline')
+              ? 'ROLE_E2E_OVERRIDES_OK'
+              : 'Waiting for baseline child.',
+          )
+          return
+        }
         const reviewer = childId(messages, 'reviewer')
         if (task.includes('ROLE_E2E_COLD_FOLLOWUP')) {
           assert(reviewer, 'the resumed parent must retain its reviewer receipt')
@@ -204,6 +298,45 @@ export function apply(ctx, config) {
         return
       }
 
+      const override = /ROLE_E2E_OVERRIDE_CHILD:([a-z-]+)/.exec(userText)?.[1]
+      if (override !== undefined) {
+        assert(
+          ['override-ok', 'override-effort', 'override-baseline'].includes(override),
+          'rejected override must never spawn',
+        )
+        assert.equal(options.provider, 'roles-e2e')
+        assert.equal(options.model, override === 'override-baseline' ? 'fixture-model' : 'fixture-terra-max')
+        assert.equal(options.reasoningEffort, override === 'override-ok' ? 'low' : 'high')
+        const modes = agent.session
+          .snapshotEvents()
+          .filter(event => event.type === 'sandbox/mode')
+          .map(event => event.data.mode)
+        if (override === 'override-ok') {
+          assert.equal(modes.at(-1), 'read-only')
+          assert.match(roleContext(messages), /This role is read-only/)
+          if (!hasCall(messages, 'write')) {
+            yield* toolChunks([
+              { name: 'write', args: { file_path: config.deniedPath, content: 'Override must not write.' } },
+            ])
+            return
+          }
+          const writeCall = calls(messages).find(entry => entry.name === 'write')
+          const result = messages.find(message => message.role === 'tool' && message.toolCallId === writeCall.id)
+          assert.equal(result?.isError, true)
+          assert.match(textOf(result), /read-only role/)
+        } else assert.doesNotMatch(roleContext(messages), /This role is read-only/)
+        record({
+          kind: 'override-child',
+          label: override,
+          sessionId: agent.id,
+          parentSession: agent.session.header.parentSession,
+          effort: options.reasoningEffort,
+          model: options.model,
+          modes,
+        })
+        yield* textChunks(`OVERRIDE_DONE:${override}`)
+        return
+      }
       const expectedEffort = role === 'model-default' ? 'low' : 'high'
       assert.equal(options.reasoningEffort, expectedEffort, `${role} must use its declared reasoning selection`)
       if (role === 'reviewer' && !repinned.has(agent.id)) {

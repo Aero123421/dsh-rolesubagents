@@ -186,6 +186,27 @@ const en = {
   'access.full-access': 'no restrictions',
   'access.native': 'requires full-access parent; native CLI checks apply',
 
+  'models.refresh': 'Refresh models',
+  'models.refreshing': 'Refreshing models…',
+  'models.aliases': 'Built-in Claude aliases, not live model discovery. Availability depends on your Claude account.',
+  'models.unsupported':
+    'Live model discovery is not supported for this CLI. Enter a model ID manually; connection tests do not discover models.',
+  'models.live': 'Source: models returned by the saved CLI connection probe.',
+  'models.static':
+    'Source: built-in fallback suggestions (if available), not verified live. Model IDs remain editable.',
+  'models.explicit':
+    'Refresh runs the existing connection probe using saved settings, only when requested. No automatic discovery.',
+  'models.unchecked': 'Models have not been checked in this page session.',
+  'models.checked': 'Last check (UTC): {time}',
+  'models.good': 'Last successful model list (UTC): {time}',
+  'models.empty':
+    'The check returned no usable model list. Check CLI installation, sign-in and model-list support, then retry. You can still type a model ID.',
+  'models.timeout':
+    'The CLI model-list command timed out. Check the CLI connection and retry; any last successful list is retained.',
+  'models.unavailable':
+    'The CLI model-list command failed. Check CLI sign-in and model-list support, then retry; any last successful list is retained.',
+  'models.retained': 'Showing the last successful model list; it may be out of date.',
+
   'clis.heading': 'External CLIs',
   'clis.hint':
     'Settings shared by every role that runs on a CLI. API keys are never stored here: sign in with each CLI on the Host, or forward the name of an environment variable that holds the key.',
@@ -456,6 +477,25 @@ const ja: Record<Key, string> = {
   'access.workspace-write': 'ワークスペース内を編集',
   'access.full-access': '制限なし',
   'access.native': '親はフルアクセス必須・CLI本来の権限設定に従う',
+
+  'models.refresh': 'モデルを更新',
+  'models.refreshing': 'モデルを更新中…',
+  'models.aliases': 'Claudeの組み込みエイリアスです。ライブ取得ではなく、利用可否はClaudeアカウントによります。',
+  'models.unsupported':
+    'このCLIのライブモデル取得には未対応です。モデルIDを直接入力してください。接続テストではモデルを取得しません。',
+  'models.live': '取得元: 保存済みCLI設定による接続テスト。',
+  'models.static': '取得元: 組み込みの候補（ある場合）。ライブ確認はしていません。モデルIDは直接編集できます。',
+  'models.explicit': '更新は明示操作時だけ、保存済み設定で既存の接続テストを実行します。自動取得はしません。',
+  'models.unchecked': 'この画面ではまだモデルを確認していません。',
+  'models.checked': '最終確認（UTC）: {time}',
+  'models.good': 'モデル一覧の最終取得成功（UTC）: {time}',
+  'models.empty':
+    '利用可能なモデル一覧を取得できませんでした。CLIの導入・認証・一覧取得への対応を確認し再試行してください。IDは直接入力できます。',
+  'models.timeout':
+    'CLIのモデル一覧コマンドがタイムアウトしました。接続を確認して再試行してください。最後に取得できた一覧は保持しています。',
+  'models.unavailable':
+    'CLIのモデル一覧コマンドが失敗しました。認証と一覧取得への対応を確認して再試行してください。最後に取得できた一覧は保持しています。',
+  'models.retained': '最後に取得できたモデル一覧を表示しています。古い可能性があります。',
 
   'clis.heading': '外部 CLI',
   'clis.hint':

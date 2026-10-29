@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
-import { act } from 'react'
+import { act, useState } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CatalogAction, CatalogLineage } from '../src/client/catalog.tsx'
 import { mountCatalog } from '../src/client/catalog-mount.ts'
+import { nativeActivity, externalActivity } from '../src/client/catalog-state.ts'
 import type { CatalogProps, CatalogState } from '../src/client/catalog-types.ts'
 import type { DshClientContext } from '../src/client/dsh.ts'
+import type { ExternalRunDisplay } from '../src/shared/role-display.ts'
 import { cleanup, fireEvent, render, screen, settle, update } from './client-dom.ts'
 
 afterEach(() => {
@@ -39,127 +41,182 @@ function fixture() {
   }
   return { state, props }
 }
+const trigger = () => document.querySelector<HTMLButtonElement>('.dshrs-catalog-trigger')!
+const row = (name: string) => screen.getByRole('button', { name: new RegExp(`^${name} ·`) })
 function key(element: HTMLElement, value: string) {
   update(() => element.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true })))
 }
 async function mount() {
   const f = fixture()
   render(<CatalogAction {...f.props} />)
-  fireEvent.click(screen.getByRole('button'))
+  fireEvent.click(trigger())
   await settle()
   return f
 }
-it('renders badges only for known metadata, status, and nested trees', async () => {
+
+it('uses a nonmodal dialog, semantic lists, sibling actions and only known role badges', async () => {
   const { props } = await mount()
-  expect(screen.getByRole('treeitem', { name: /^Worker · Continuable · Running/ }).querySelector('svg')).not.toBeNull()
-  expect(screen.getByRole('treeitem', { name: 'Ordinary · One-shot · Inactive' }).querySelector('svg')).toBeNull()
+  expect(screen.getByRole('dialog').getAttribute('aria-modal')).toBeNull()
+  expect(screen.queryByRole('tree')).toBeNull()
+  expect(row('Worker').querySelector('.dshrs-catalog-role')?.textContent).toBe('worker')
+  expect(row('Ordinary').querySelector('.dshrs-catalog-role')?.textContent).toBe('')
+  expect(screen.getByRole('dialog').textContent).not.toMatch(/tokens|Continuable|DSH standard|Inactive/)
+  expect(document.querySelector('button button')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Expand Worker' }))
   expect(props.refreshProjection).toHaveBeenCalledWith('a')
-  expect(screen.getByRole('treeitem', { name: 'Nested · Continuable · Inactive' }).getAttribute('aria-level')).toBe('2')
+  expect(row('Nested')).toBeTruthy()
+  expect(document.querySelectorAll('ul.dshrs-catalog-list').length).toBeGreaterThan(1)
   await settle()
 })
-it('includes the session title and unknown mode in the accessible row name', async () => {
-  const { props, state } = fixture()
-  state.byId.a = { title: 'Restored child title' }
-  state.projectionsBySession.root!.values.subagentCatalog![0] = { id: 'a', label: 'Worker', mode: 'unknown' }
+it('never opens on hover; toggles click, focuses on open, Escape restores trigger, outside closes', async () => {
+  vi.useFakeTimers()
+  const { props } = fixture()
   render(<CatalogAction {...props} />)
-  fireEvent.click(screen.getByRole('button'))
+  update(() => trigger().dispatchEvent(new MouseEvent('mouseover', { bubbles: true })))
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250)
+  })
+  expect(screen.queryByRole('dialog')).toBeNull()
+  fireEvent.click(trigger())
+  expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true)
+  fireEvent.click(trigger())
+  expect(screen.queryByRole('dialog')).toBeNull()
+  key(trigger(), 'ArrowDown')
+  expect(screen.getByRole('dialog')).toBeTruthy()
+  key(document.activeElement as HTMLElement, 'End')
+  expect(document.activeElement).toBe(Array.from(screen.getByRole('dialog').querySelectorAll('button')).at(-1))
+  key(document.activeElement as HTMLElement, 'Home')
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close subagents' }))
+  key(document.activeElement as HTMLElement, 'Escape')
+  expect(document.activeElement).toBe(trigger())
+  fireEvent.click(trigger())
+  update(() => document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })))
+  expect(screen.queryByRole('dialog')).toBeNull()
+})
+it('recovers removed live-row focus to history without stealing focus from parent chat', async () => {
+  const { props, state } = fixture()
+  let running = true
+  let refresh = () => {}
+  props.useSessionStatus = select => select(new Map([['a', { running }]]))
+  function Harness() {
+    const [, setRevision] = useState(0)
+    refresh = () => setRevision(n => n + 1)
+    return (
+      <>
+        <input aria-label="Parent chat" />
+        <CatalogAction {...props} />
+      </>
+    )
+  }
+  render(<Harness />)
+  fireEvent.click(trigger())
   await settle()
-  expect(
-    screen.getByRole('treeitem', { name: /^Worker · Restored child title · Unknown mode · Running · worker/ }),
-  ).toBeTruthy()
+  row('Worker').focus()
+  state.byId.a = { projectionValues: { subagentTiming: { settledMs: 42, lastTurnCompleted: true } } }
+  running = false
+  update(refresh)
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: /Completed \/ history/ }))
+  running = true
+  update(refresh)
+  row('Worker').focus()
+  const chat = screen.getByLabelText('Parent chat')
+  chat.focus()
+  running = false
+  update(refresh)
+  expect(document.activeElement).toBe(chat)
+  await settle()
 })
 
-it('routes direct-parent open and sidebar actions, never external sessions', async () => {
+it('truthfully distinguishes stopped, unknown, missing, loading and stale states', () => {
+  expect(nativeActivity(undefined, undefined)).toBe('unknown')
+  expect(nativeActivity({ running: false }, false)).toBe('unknown')
+  expect(
+    nativeActivity({ projectionValues: { subagentTiming: { settledMs: 1, lastTurnCompleted: false } } }, false),
+  ).toBe('stopped')
+  expect(
+    nativeActivity({ projectionValues: { subagentTiming: { settledMs: 1, lastTurnCompleted: true } } }, false),
+  ).toBe('completed')
+  const scope = { loading: false, error: false, stale: false, fetchedAt: 42 }
+  expect(externalActivity(undefined, undefined)).toBe('loading')
+  expect(externalActivity(undefined, { ...scope, fetchedAt: null })).toBe('loading')
+  expect(externalActivity(undefined, scope)).toBe('missing')
+  expect(externalActivity(undefined, { ...scope, error: true, fetchedAt: null })).toBe('unavailable')
+  expect(externalActivity({ status: 'running' } as ExternalRunDisplay, { ...scope, stale: true, error: true })).toBe(
+    'stale',
+  )
+})
+it('puts current/attention first and keeps completed history collapsed, reverse catalog order', async () => {
+  const { props, state } = fixture()
+  props.useSessionStatus = select => select(new Map())
+  state.byId.a = { running: false, projectionValues: { subagentTiming: { settledMs: 42, lastTurnCompleted: true } } }
+  state.byId.b = { running: false, projectionValues: { subagentTiming: { settledMs: 12, lastTurnCompleted: true } } }
+  render(<CatalogAction {...props} />)
+  fireEvent.click(trigger())
+  await settle()
+  expect(screen.queryByRole('button', { name: /^Worker ·/ })).toBeNull()
+  expect(trigger().textContent).not.toContain('Completed')
+  fireEvent.click(screen.getByRole('button', { name: /Completed \/ history/ }))
+  expect(Array.from(document.querySelectorAll('[data-catalog-main]')).map(e => e.textContent)).toEqual([
+    expect.stringContaining('External'),
+    expect.stringContaining('Ordinary'),
+    expect.stringContaining('Worker'),
+  ])
+})
+it('routes direct-parent chat and aside actions, and external results never navigate as sessions', async () => {
   const { props } = await mount()
-  fireEvent.click(screen.getByRole('treeitem', { name: 'External · External · External' }))
+  fireEvent.click(row('External'))
   expect(props.openChild).not.toHaveBeenCalled()
+  expect(screen.getByRole('dialog').textContent).toContain('could not be refreshed')
+  fireEvent.click(screen.getByRole('button', { name: 'Close result details' }))
+  fireEvent.click(trigger())
   fireEvent.click(screen.getByRole('button', { name: 'Open Worker in sidebar' }))
   expect(props.openChildAside).toHaveBeenCalledWith({
     parentSessionId: 'root',
     childSessionId: 'a',
     mode: 'continuable',
   })
-  expect(screen.queryByRole('tree')).toBeNull()
-  fireEvent.click(screen.getByRole('button'))
-  fireEvent.click(screen.getByRole('treeitem', { name: 'Ordinary · One-shot · Inactive' }))
+  fireEvent.click(trigger())
+  fireEvent.click(row('Ordinary'))
   expect(props.openChild).toHaveBeenCalledWith({ parentSessionId: 'root', childSessionId: 'b', mode: 'one-shot' })
 })
-it('supports keyboard navigation, branch expansion, escape and outside dismissal', async () => {
-  await mount()
-  const row = screen.getByRole('treeitem', { name: /^Worker · Continuable · Running/ })
-  row.focus()
-  key(row, 'ArrowRight')
-  expect(row.getAttribute('aria-expanded')).toBe('true')
-  key(row, 'End')
-  expect(document.activeElement?.getAttribute('aria-label')).toBe('Ordinary · One-shot · Inactive')
-  key(document.activeElement as HTMLElement, 'Escape')
-  expect(screen.queryByRole('tree')).toBeNull()
-  expect(document.activeElement).toBe(screen.getByRole('button'))
-  fireEvent.click(screen.getByRole('button'))
-  update(() => document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })))
-  expect(screen.queryByRole('tree')).toBeNull()
-})
-it('clears descendant expansion when collapsing a parent', async () => {
-  const { state, props } = fixture()
+it('clears descendant expansion on collapse and keeps retry/navigation available', async () => {
+  const { props, state } = fixture()
   state.projectionsBySession.nested = {
     state: 'ready',
     values: { subagentCatalog: [{ id: 'leaf', label: 'Leaf', mode: 'continuable' }] },
   }
   render(<CatalogAction {...props} />)
-  fireEvent.click(screen.getByRole('button'))
+  fireEvent.click(trigger())
   fireEvent.click(screen.getByRole('button', { name: 'Expand Worker' }))
   fireEvent.click(screen.getByRole('button', { name: 'Expand Nested' }))
-  expect(screen.getByRole('treeitem', { name: 'Leaf · Continuable · Inactive' })).toBeTruthy()
+  expect(row('Leaf')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Collapse Worker' }))
   fireEvent.click(screen.getByRole('button', { name: 'Expand Worker' }))
-  expect(screen.queryByRole('treeitem', { name: 'Leaf · Continuable · Inactive' })).toBeNull()
-  expect(screen.getByRole('button', { name: 'Expand Nested' })).toBeTruthy()
+  expect(screen.queryByRole('button', { name: /^Leaf ·/ })).toBeNull()
   await settle()
-})
-
-it('keeps navigation available through loading and retry states', async () => {
-  const { state, props } = fixture()
+  cleanup()
   state.projectionsBySession.a = { state: 'error', error: { message: 'Load failed' }, values: {} }
   render(<CatalogAction {...props} />)
-  fireEvent.click(screen.getByRole('button'))
+  fireEvent.click(trigger())
   fireEvent.click(screen.getByRole('button', { name: 'Expand Worker' }))
   expect(screen.getByRole('alert').textContent).toContain('Load failed')
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
   expect(props.refreshProjection).toHaveBeenCalledWith('a')
-  fireEvent.click(screen.getByRole('treeitem', { name: 'Ordinary · One-shot · Inactive' }))
-  expect(props.openChild).toHaveBeenCalledWith({ parentSessionId: 'root', childSessionId: 'b', mode: 'one-shot' })
+  fireEvent.click(row('Ordinary'))
+  expect(props.openChild).toHaveBeenCalled()
   await settle()
 })
-
-it('does not overlap role RPCs and aborts in-flight work on unmount', async () => {
-  vi.useFakeTimers()
+it('retains role metadata over close/reopen, clears on reset and rejects stale answers', async () => {
   const { props } = fixture()
-  const getRoles = vi.fn<NonNullable<CatalogProps['getRoles']>>(() => new Promise(() => {}))
-  props.getRoles = getRoles
-  render(<CatalogAction {...props} />)
-  fireEvent.click(screen.getByRole('button'))
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(15000)
-  })
-  expect(getRoles).toHaveBeenCalledTimes(1)
-  const signal = getRoles.mock.calls[0]?.[1]
-  cleanup()
-  expect(signal?.aborted).toBe(true)
-  expect(vi.getTimerCount()).toBe(0)
-})
-
-it('aborts synchronously on reconnect, ignores old answers and clears closed-menu badges', async () => {
-  const { props } = fixture()
-  let reset = () => {}
-  const unsubscribed = vi.fn()
+  const resets = new Set<() => void>()
   props.subscribeReset = listener => {
-    reset = listener
-    return unsubscribed
+    resets.add(listener)
+    return () => resets.delete(listener)
   }
   let release: (roles: Record<string, { roleId: string; displayName: string }>) => void = () => {}
   const getRoles = vi
     .fn<NonNullable<CatalogProps['getRoles']>>()
+    .mockResolvedValueOnce({ a: { roleId: 'worker', displayName: 'worker' } })
     .mockImplementationOnce(
       () =>
         new Promise(resolve => {
@@ -169,57 +226,60 @@ it('aborts synchronously on reconnect, ignores old answers and clears closed-men
     .mockResolvedValue({ a: { roleId: 'reviewer', displayName: 'reviewer' } })
   props.getRoles = getRoles
   render(<CatalogAction {...props} />)
-  fireEvent.click(screen.getByRole('button'))
-  const old = getRoles.mock.calls[0]?.[1]
+  fireEvent.click(trigger())
+  await settle()
+  expect(row('Worker').textContent).toContain('worker')
+  fireEvent.click(trigger())
+  fireEvent.click(trigger())
+  expect(row('Worker').textContent).toContain('worker')
+  const old = getRoles.mock.calls[1]?.[1]
   update(() => {
-    reset()
+    for (const reset of resets) reset()
     expect(old?.aborted).toBe(true)
   })
+  expect(row('Worker').textContent).not.toContain('worker')
   await settle()
   release({ a: { roleId: 'worker', displayName: 'worker' } })
   await settle()
-  expect(screen.getByRole('treeitem', { name: /^Worker/ }).textContent).toContain('reviewer')
-  expect(screen.getByRole('treeitem', { name: /^Worker/ }).textContent).not.toContain('worker')
-  key(screen.getByRole('tree'), 'Escape')
-  expect(getRoles.mock.calls[1]?.[1].aborted).toBe(true)
+  expect(row('Worker').textContent).toContain('reviewer')
   cleanup()
-  expect(unsubscribed).toHaveBeenCalled()
-  expect(screen.queryByRole('tree')).toBeNull()
+  expect(resets.size).toBe(0)
 })
-
-it('cleans up queued keyboard focus and hover callbacks on unload', () => {
+it('does not overlap role RPCs and aborts timers on unmount', async () => {
   vi.useFakeTimers()
   const { props } = fixture()
-  props.getRoles = undefined
+  const getRoles = vi.fn<NonNullable<CatalogProps['getRoles']>>(() => new Promise(() => {}))
+  props.getRoles = getRoles
   render(<CatalogAction {...props} />)
-  key(screen.getByRole('button'), 'ArrowDown')
+  fireEvent.click(trigger())
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(15000)
+  })
+  expect(getRoles).toHaveBeenCalledTimes(1)
+  const signal = getRoles.mock.calls[0]?.[1]
   cleanup()
+  expect(signal?.aborted).toBe(true)
   expect(vi.getTimerCount()).toBe(0)
 })
-
-it('normalizes idle and retained migration projections and shows true migration rows', async () => {
+it('normalizes retained projections while showing migration and loading explicitly', async () => {
   const { props, state } = fixture()
   state.projectionsBySession.a = { state: 'idle', values: {} }
   state.byId.b = { formatStatus: 'migration-required' }
   render(<CatalogAction {...props} />)
-  fireEvent.click(screen.getByRole('button'))
+  fireEvent.click(trigger())
   fireEvent.click(screen.getByRole('button', { name: 'Expand Worker' }))
   expect(screen.getByRole('status').textContent).toContain('Loading')
-  expect(screen.getByRole('group').getAttribute('aria-busy')).toBe('true')
-  expect(screen.getByRole('treeitem', { name: 'Ordinary · Migration required · Inactive' }).textContent).toContain(
-    'Migration required',
-  )
+  expect(row('Ordinary').textContent).toContain('Migration required')
   expect(screen.queryByRole('button', { name: 'Expand Ordinary' })).toBeNull()
   await settle()
   cleanup()
   state.projectionsBySession.a = { state: 'migration-required', values: { subagentCatalog: [] } }
   render(<CatalogAction {...props} />)
-  fireEvent.click(screen.getByRole('button'))
+  fireEvent.click(trigger())
   expect(screen.queryByRole('button', { name: 'Expand Worker' })).toBeNull()
   await settle()
 })
-
-it('opens ancestor titles on click and sibling catalogs by keyboard without a descendant count', async () => {
+it('splits lineage title navigation from touch-accessible sibling list toggle', async () => {
   const { props } = fixture()
   const openTitle = vi.fn()
   render(
@@ -231,34 +291,91 @@ it('opens ancestor titles on click and sibling catalogs by keyboard without a de
       useSession={select => select({})}
     />,
   )
-  expect(screen.getAllByRole('button')).toHaveLength(1)
-  expect(screen.getByRole('button').textContent).toContain('Worker')
-  fireEvent.click(screen.getByRole('button'))
-  expect(openTitle).toHaveBeenCalledTimes(1)
-  key(screen.getByRole('button'), 'ArrowDown')
+  expect(screen.getAllByRole('button')).toHaveLength(2)
+  fireEvent.click(screen.getByRole('button', { name: 'Worker' }))
+  expect(openTitle).toHaveBeenCalledOnce()
+  expect(screen.queryByRole('dialog')).toBeNull()
+  fireEvent.click(trigger())
   await settle()
-  expect(screen.getByRole('treeitem', { name: /^Worker/ }).getAttribute('aria-current')).toBe('true')
+  expect(row('Worker').getAttribute('aria-current')).toBe('true')
+  expect(screen.getByRole('dialog', { name: 'Sibling subagents' })).toBeTruthy()
   expect(screen.queryByRole('button', { name: 'Open Worker in sidebar' })).toBeNull()
 })
-
-it('uses lineage address and omits the root action on children', () => {
+it('shows incomplete external counts rather than reporting a complete zero', async () => {
+  const { props } = fixture()
+  props.getExternalRuns = vi.fn<NonNullable<CatalogProps['getExternalRuns']>>(() => new Promise(() => {}))
+  render(<CatalogAction {...props} />)
+  expect(trigger().getAttribute('aria-label')).toContain('Status incomplete')
+  fireEvent.click(trigger())
+  expect(row('External').textContent).toContain('Loading status')
+  await settle()
+})
+it('keeps healthy external scopes live when another parent is stale and marks missing records', async () => {
+  vi.useFakeTimers()
   const { props, state } = fixture()
-  state.byId.a = { origin: 'subagent', parentId: 'root' }
-  render(
-    <>
-      <CatalogAction {...props} sessionId="a" />
-      <CatalogLineage
-        {...props}
-        sessionId="a"
-        lineageSessionId="a"
-        displayTitle="Worker"
-        useSession={select =>
-          select({ subagent: { address: { childSessionId: 'a', parentSessionId: 'root', mode: 'continuable' } } })
-        }
-      />
-    </>,
-  )
-  expect(screen.getAllByRole('button')).toHaveLength(2)
+  state.projectionsBySession.a = {
+    state: 'ready',
+    values: { subagentCatalog: [{ id: 'y', label: 'Nested external', mode: 'external' }] },
+  }
+  const run = (id: string, parentSessionId: string): ExternalRunDisplay => ({
+    id,
+    parentSessionId,
+    roleId: 'worker',
+    cli: 'codex',
+    label: id,
+    status: 'running',
+    startedAt: '2026-10-29T00:00:00Z',
+    resultTruncated: false,
+  })
+  let stale = false
+  props.getExternalRuns = vi.fn(async parent => {
+    if (parent === 'root' && stale) throw new Error('offline')
+    return { runs: [run(parent === 'root' ? 'x' : 'y', parent)], durable: true }
+  })
+  render(<CatalogAction {...props} />)
+  fireEvent.click(trigger())
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0)
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Expand Worker' }))
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0)
+  })
+  stale = true
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000)
+  })
+  expect(row('External').textContent).toContain('Stale · last known')
+  expect(row('Nested external').textContent).toContain('Codex · Running')
+  expect(trigger().getAttribute('aria-label')).toContain('Running 1')
+  expect(trigger().getAttribute('aria-label')).toContain('Stale information')
+  expect(trigger().textContent).toContain('↻')
+  cleanup()
+  props.getExternalRuns = vi.fn(async () => ({ runs: [], durable: true }))
+  render(<CatalogAction {...props} />)
+  fireEvent.click(trigger())
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0)
+  })
+  expect(row('External').textContent).toContain('Record unavailable')
+  expect(trigger().getAttribute('aria-label')).toContain('Status incomplete')
+})
+
+it('localizes status, exposes explicit action labels and excludes token metrics', async () => {
+  const { props, state } = fixture()
+  props.getLocale = () => 'ja'
+  state.byId.a = {
+    projectionValues: {
+      tokenUsage: { uncachedInputTokens: 1000, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 0 },
+    },
+  }
+  render(<CatalogAction {...props} />)
+  expect(trigger().getAttribute('aria-label')).toContain('直下の子')
+  fireEvent.click(trigger())
+  await settle()
+  expect(row('Worker').getAttribute('aria-label')).toContain('worker · DSH · 実行中 · チャットを開く')
+  expect(screen.getByRole('dialog').textContent).not.toContain('トークン')
+  expect(screen.getByRole('button', { name: 'Workerをサイドバーで開く' })).toBeTruthy()
 })
 it('does not claim slots without optional navigation services', () => {
   const inject = vi.fn()
@@ -324,78 +441,4 @@ it('registers both overrides at priority -10 with lifecycle-owned styles', () =>
     CatalogAction,
   )
   for (const fn of dispose) fn()
-})
-
-it('localizes Japanese labels and exposes role, usage and duration to assistive technology', async () => {
-  const { props, state } = fixture()
-  props.getLocale = () => 'ja'
-  state.byId.a = {
-    projectionValues: {
-      tokenUsage: { uncachedInputTokens: 1000, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 0 },
-      subagentTiming: { settledMs: 42000 },
-    },
-  }
-  render(<CatalogAction {...props} />)
-  expect(screen.getByRole('button').textContent).toContain('サブエージェント 3件')
-  fireEvent.click(screen.getByRole('button'))
-  await settle()
-  expect(
-    screen.getByRole('treeitem', { name: 'Worker · 継続可能 · 実行中 · worker · 1050 トークン · 42 秒稼働' }),
-  ).toBeTruthy()
-  expect(screen.getByRole('button', { name: 'Workerをサイドバーで開く' })).toBeTruthy()
-})
-it('aborts stale metadata on reset and allows metadata absent at first to appear later', async () => {
-  vi.useFakeTimers()
-  const { props } = fixture()
-  let reset = () => {}
-  props.subscribeReset = listener => {
-    reset = listener
-    return () => {}
-  }
-  const getRoles = vi
-    .fn<NonNullable<CatalogProps['getRoles']>>()
-    .mockResolvedValueOnce({})
-    .mockResolvedValue({ a: { roleId: 'worker', displayName: 'worker' } })
-  props.getRoles = getRoles
-  render(<CatalogAction {...props} />)
-  fireEvent.click(screen.getByRole('button'))
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0)
-  })
-  expect(screen.getByRole('treeitem', { name: /^Worker/ }).querySelector('svg')).toBeNull()
-  update(() => vi.advanceTimersByTime(5000))
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0)
-  })
-  expect(screen.getByRole('treeitem', { name: /^Worker/ }).querySelector('svg')).not.toBeNull()
-  const signal = getRoles.mock.calls[0]?.[1]
-  update(reset)
-  expect(signal?.aborted).toBe(true)
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0)
-  })
-  expect(getRoles).toHaveBeenCalledTimes(3)
-})
-it('opens by hover, closes unpinned on leave, and click pins an already open menu', async () => {
-  vi.useFakeTimers()
-  const { props } = fixture()
-  render(<CatalogAction {...props} />)
-  const trigger = screen.getByRole('button')
-  update(() => trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })))
-  update(() => vi.advanceTimersByTime(150))
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(0)
-  })
-  expect(screen.getByRole('tree')).toBeTruthy()
-  update(() => trigger.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })))
-  update(() => vi.advanceTimersByTime(150))
-  expect(screen.queryByRole('tree')).toBeNull()
-  update(() => trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })))
-  update(() => vi.advanceTimersByTime(150))
-  fireEvent.click(trigger)
-  update(() => trigger.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })))
-  await act(async () => {
-    await vi.advanceTimersByTimeAsync(150)
-  })
-  expect(screen.getByRole('tree')).toBeTruthy()
 })

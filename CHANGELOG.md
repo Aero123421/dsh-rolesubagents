@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.6.0
+
+- Redesign the scoped Web subagent catalog: compact click/keyboard-only trigger, current/attention entries first, collapsed completed/cancelled history, native list/button semantics, opaque theme surfaces and mobile sizing. Keep positive role metadata across reopen and external refresh state independent per parent; unknown/stopped/stale is not idle or success.
+- Add bounded external-run visibility and a nonmodal text result inspector with copy, raw/readable views and parent navigation. Start receipts are not final results; requested model is not confirmed actual model/effort. Retain at most 100 records for 7 days and 16,384 UTF-16 code units per preview, with explicit stale/truncated/non-durable states. No live stdout or historical transcript recovery.
+- Add one-shot DSH spawn `provider` + `model` and optional `effort` overrides without persistent settings/catalog mutation. Require the pair, validate the route, and clear prior effort on route replacement. Reject CLI/fork route overrides. Accept only `readOnly: true` strengthening, with existing parent constraints and supported CLI read-only presets.
+- Fix child management restriction setup when the inherited `manage_roles` tool is absent, preserving strong read-only startup and live denial of child administration.
+- Add explicit Web model refresh for Codex, Antigravity and OpenCode, with validated candidates, source/timestamps and last-good caching. Claude suggestions remain static; Grok/Pi discovery remains unavailable. No automatic CLI upgrading.
+- See [release notes and validation](<docs/releases/v0.6.0.md>); historical checks do not certify this release.
 - Await external CLI run disposal during plugin unload, including process exit, temporary-file cleanup and managed-range exit. Keep settled results tracked until disposal finishes, so an already-pending range drain is included. A failed disposer is logged without interrupting other run or storage cleanup.
 
 ## 0.5.0
