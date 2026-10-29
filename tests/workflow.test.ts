@@ -233,6 +233,31 @@ describe('official workflow tool decoration', () => {
     await world.teardown()
   })
 
+  it.each([true, false])(
+    'honors host executable eligibility %j without falling back to visible definitions',
+    async eligible => {
+      const world = fakeWorld()
+      apply(world.ctx, { workflowModel: route })
+      const { agent, original } = enableWorkflow(world, 'conditional')
+      const executable = vi.fn(() => (eligible ? original : undefined))
+      Object.assign(agent.ctx.tools, { executable })
+      await world.emitCreated(agent)
+      expect(executable).toHaveBeenCalledWith('workflow', agent)
+      expect(agent.ctx.tools.get).not.toHaveBeenCalled()
+      const wrapped = agent.registered.find(tool => tool.name === 'workflow')
+      if (eligible) {
+        expect(wrapped).toBeDefined()
+        const args = { script: 'return agent("task")' }
+        await wrapped?.execute(args, execContext(agent))
+        expect(original.execute).toHaveBeenCalledWith({ script: workflowScript(args.script, route) }, expect.anything())
+      } else {
+        expect(wrapped).toBeUndefined()
+        expect(original.execute).not.toHaveBeenCalled()
+      }
+      await world.teardown()
+    },
+  )
+
   it.each([undefined, null])('does not decorate with an unset setting %j', async workflowModel => {
     const world = fakeWorld()
     apply(world.ctx, { workflowModel })

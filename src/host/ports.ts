@@ -34,6 +34,8 @@ export interface AgentPort {
     readonly tools: {
       /** Resolve only tools already visible to this Agent; never add workflow to a preset without it. */
       get?(name: string, scope?: AgentPort): ToolDefinition | undefined
+      /** Without step admission, conditional registrations are unavailable and must remain unwrapped. */
+      executable?(name: string, scope?: AgentPort): ToolDefinition | undefined
       register(definition: ToolDefinition): () => void
       /** Hide inherited management tools from delegated children; execution authorization is still mandatory. */
       restrict?(patch: { readonly deny: readonly string[] }): () => void

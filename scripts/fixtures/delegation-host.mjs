@@ -88,25 +88,13 @@ export function apply(ctx, config) {
     record({ kind: 'resolve-call', config: args[0], ownsEffort: Object.hasOwn(args[0] ?? {}, 'reasoningEffort') })
     return resolveCallConfig(...args)
   }
-  const open = ctx.storageDomain.open.bind(ctx.storageDomain)
-  ctx.storageDomain.open = (...args) => {
-    const domain = open(...args)
-    if (args[0]?.name !== 'rolesubagents') return domain
-    const observe = opened => {
-      const table = opened.table.bind(opened)
-      opened.table = name => {
-        const original = table(name)
-        const put = original.put.bind(original)
-        original.put = (key, value) => {
-          record({ kind: 'role-storage', table: name, key, value })
-          return put(key, value)
-        }
-        return original
-      }
-      return opened
-    }
-    return domain instanceof Promise ? domain.then(observe) : observe(domain)
-  }
+  // The public notification is emitted after the backend acknowledges durability.
+  // Replacing a method on this fixture's scoped service proxy does not instrument
+  // the separate plugin scope, and observing put admission would not prove storage.
+  ctx.on('domain/changed', change => {
+    if (change.domain !== 'rolesubagents' || change.operation !== 'put') return
+    record({ kind: 'role-storage', table: change.table, key: change.key, value: change.value })
+  })
   const repinned = new Set()
   const overflowed = new Set()
   ctx.on('session/event', (session, event) => {
@@ -416,8 +404,15 @@ export function apply(ctx, config) {
   }
 
   ctx.llm.registerAdapter(['roles-e2e'], new Adapter())
+  ctx.on('agent/created', ({ agent }) => {
+    if (agent.session.header.parentSession === undefined && typeof agent.model?.select === 'function') {
+      agent.model.select({ provider: 'roles-e2e', model: 'fixture-model', reasoningEffort: HIGH })
+    }
+  })
   ctx.on('agent/request', async ({ agent }, next) => {
     const proposal = await next()
-    return agent.session.header.parentSession === undefined ? { ...proposal, reasoningEffort: HIGH } : proposal
+    return agent.session.header.parentSession === undefined && typeof agent.model?.select !== 'function'
+      ? { ...proposal, reasoningEffort: HIGH }
+      : proposal
   })
 }

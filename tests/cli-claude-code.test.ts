@@ -392,4 +392,28 @@ describe('claude-code probe', () => {
       message: 'version-timeout',
     })
   })
+
+  it.each(['2.1.303-beta.1', '2.1.303+build.7', '2.1.303-beta.1+build.7'])(
+    'preserves the exact prerelease/build version %s',
+    async version => {
+      const result = await claudeCodeAdapter.probe?.(
+        '/c',
+        runner({ code: 0, stdout: `${version} (Claude Code)\n` }),
+        signal,
+        {},
+      )
+      expect(result?.version).toBe(version)
+    },
+  )
+
+  it('does not turn an unrecognized version token into a stable version', async () => {
+    const result = await claudeCodeAdapter.probe?.(
+      '/c',
+      runner({ code: 0, stdout: '2.1.303unknown (Claude Code)\n' }),
+      signal,
+      {},
+    )
+    expect(result?.version).toBeUndefined()
+    expect(result?.message).toBe('version-unreadable')
+  })
 })

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve inherited conditional workflow activation on DSH `0.2.2-alpha.2` by leaving that workflow native instead of registering an unconditional model-default wrapper. Add the exact checked alpha to DSH peer ranges; retain existing RC support.
+- Preserve complete CLI prerelease/build versions for Claude Code, Grok Build and Pi. Abort connection probes after asynchronous resolution/completion so cancelled probes cannot continue or publish stale success.
+- Update isolated installed-Host checks for explicit native executors, batch dispatch, projection registration and pre-step model selection. Observe acknowledged storage changes through the public domain event; align CLI start-receipt checks with v0.6.0. See [DSH compatibility validation](docs/dsh-compatibility-20261029.md).
+
 ## 0.6.0
 
 - Redesign the scoped Web subagent catalog: compact click/keyboard-only trigger, current/attention entries first, collapsed completed/cancelled history, native list/button semantics, opaque theme surfaces and mobile sizing. Keep positive role metadata across reopen and external refresh state independent per parent; unknown/stopped/stale is not idle or success.
