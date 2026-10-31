@@ -20,9 +20,9 @@ A role can also run its child on a coding-agent CLI installed on the DSH host in
 
 ## Requirements
 
-- DSH `>=0.2.1-alpha.3 <0.3.0-0` (child Agent Preset selection and the storage-domain service)
+- DSH `>=0.2.1-alpha.3 <0.3.0-0` or the explicitly checked `0.2.2-alpha.2` (the alpha requires Node `>=24.9.0`). See [the version matrix and verification limits](docs/dsh-compatibility-20261029.md).
 - The settings page appears on the DSH Web (`dsh web`) Plugins page.
-- 日本語の表示には dsh-japanese が必要です（[dsh-japanese](https://github.com/Aero123421/dsh-japanese)）。This plugin does not register the `ja` language. With that pack installed and Japanese selected, the page uses its own Japanese dictionary. Without the pack, and when DSH is set to 中文 (`zh-CN`), the page stays in English and does not show raw message keys.
+- DSH 0.2.1 requires [dsh-japanese](https://github.com/Aero123421/dsh-japanese) to select Japanese; DSH `0.2.2-alpha.2` registers Japanese itself. This plugin does not register `ja`. When Japanese is selected, the page uses its own Japanese dictionary. With DSH set to 中文 (`zh-CN`), the page stays in English and does not show raw message keys.
 - CLI roles also need the CLI installed on the DSH host (see [External CLI runners](#external-cli-runners)) and a Host that offers plugins its subprocess service and subagent provider registration. Without them, CLI roles are refused with a message and DSH roles keep working.
 - Optional AI role management additionally needs the Host's canonical `settings.describe` / revision-fenced `settings.mutate` service and the standard unique `rolesubagents` settings entry. Missing/ambiguous/rebound service ownership refuses management without breaking ordinary delegation; this is not a promise that every version in the base DSH range offers the optional feature.
 
@@ -95,6 +95,8 @@ The Plugins page has a separate **Workflow model** provider/model setting. It ch
 For example, `await agent("Investigate the tests")` uses the configured workflow model, while `await agent("Review", { provider: "other", model: "other-model" })` overrides it. Specifying only one route field also bypasses the configured pair, retaining DSH's normal inheritance for the other field. Clear the provider selection to remove the default. The master Subagents switch disables this default as well. Changes apply to new root conversations; existing sessions and their inherited children/forks retain their recorded setting, including after resume. `apply_current` refreshes roles only and does not change this workflow model.
 
 The original workflow tool still owns execution, schemas, limits, cancellation, foreground results, and background jobs. A preset without `workflow` does not gain the tool. This integration adapts the script's lexical `agent()` helper; direct calls to the workflow engine or access through `globalThis.agent` are not adapted. It is a convenience default, not a model-enforcement policy. Script wrapping can shift diagnostic line numbers. Standard preset and global/headless workflow tools are supported. If another plugin registers `workflow` directly in the same agent-local layer, DSH forbids replacing that registration: the plugin logs a warning and leaves that tool unchanged. External tool changes invalidate adapters lazily; each agent refreshes before its next prompt or workflow execution, and captured adapters refuse to execute a removed/restricted workflow.
+
+On Hosts with step-conditional tool registrations, a conditional `workflow` remains native and does not receive this model default. Its activation condition is preserved.
 
 ### Prompt caching
 

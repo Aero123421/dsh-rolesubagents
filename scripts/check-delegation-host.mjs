@@ -33,7 +33,6 @@ try {
   // Persist only fixture-owned DSH data across these otherwise separate process identities.
   process.env.DSH_HOME = ${JSON.stringify(home)};
   process.env.DSH_TELEMETRY_DISABLED = '1';
-  process.env.DSH_TOOLS_MODE = 'native';
 `,
   )
 
@@ -99,7 +98,6 @@ try {
       'web-deepseek-api',
     ].map(id => ({ id, disabled: true })),
     { id: 'agent-default-model', config: { provider: 'roles-e2e', model: 'fixture-model' } },
-    { id: 'tools', config: { mode: 'native' } },
     { id: 'session-persistence-jsonl', config: { root: join(home, 'sessions'), compression: 'none' } },
     { id: 'subagent', config: { maxDepth: 2 } },
     {
@@ -115,7 +113,6 @@ try {
     ...process.env,
     DSH_HOME: home,
     DSH_TELEMETRY_DISABLED: '1',
-    DSH_TOOLS_MODE: 'native',
     LANG: 'C.UTF-8',
     TMPDIR: root,
   }

@@ -64,11 +64,13 @@ export async function probeCli(request: unknown, deps: ProbeDeps, signal: AbortS
     signal.throwIfAborted()
     return { cli, found: false, message: 'not-found' }
   }
+  signal.throwIfAborted()
   const adapter = deps.adapters(cli)
   if (adapter.probe === undefined) return { cli, found: true, path }
   const run = createProbeRunner(deps.subprocess, path, env, deps.cwd ?? hostEnv.HOME ?? homedir())
   try {
     const result = await adapter.probe(path, run, signal, probeSettings(settings, hostEnv))
+    signal.throwIfAborted()
     return { ...result, cli, found: true, path }
   } catch {
     signal.throwIfAborted()

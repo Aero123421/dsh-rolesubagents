@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isolateCheckEnvironment } from './check-environment.mjs'
 import { hostResolveHook } from './host-resolve-hook.mjs'
+import { mountNativeTools, executeHostTool } from './host-tools.mjs'
 
 // Isolation MUST precede any installed runtime or source-plugin import.
 const isolated = isolateCheckEnvironment()
@@ -188,7 +189,7 @@ try {
         return run()
       },
     })
-    new ToolRuntime(root, { mode: 'native' })
+    await mountNativeTools(root, ToolRuntime)
     let inheritChildScope = true
     const makeAgent = (id, header = {}, inheritScope = true) => {
       const events = []
@@ -272,7 +273,7 @@ try {
     const definition = (agent, name) => agent.ctx.tools.get(name, agent)
     let callId = 0
     const call = async (agent, args) => {
-      const result = await root.tools.execute({
+      const result = await executeHostTool(root.tools, {
         callId: `manage-check-${++callId}`,
         name: 'manage_roles',
         arguments: args,
@@ -583,7 +584,7 @@ try {
     )
   assert.match(live.runtimeContext(live.agents.at(-1)), /UPDATED_WORKER_INSTRUCTIONS/)
   assert(live.catalog(live.agents.at(-1)).includes('catalog_worker'))
-  const newRoleExecution = await live.root.tools.execute({
+  const newRoleExecution = await executeHostTool(live.root.tools, {
     callId: 'delegate-new-role',
     name: 'delegate',
     arguments: { role: 'catalog_worker', description: 'new role task', prompt: 'No inference' },

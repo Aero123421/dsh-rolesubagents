@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: run-plan placeholders are literal ${...} strings.
 import { mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, parse } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { type EngineDeps, startExternalRun } from '../src/host/external/engine.ts'
 import type { PlanInput } from '../src/host/external/types.ts'
@@ -38,7 +38,9 @@ describe('gitTopLevelAbove', () => {
     const worktree = tree({ 'sub/': '' })
     writeFileSync(join(worktree, '.git'), 'gitdir: /elsewhere\n')
     expect(await gitTopLevelAbove(join(worktree, 'sub'))).toBe(worktree)
-    expect(await gitTopLevelAbove(tree({ 'sub/': '' }))).toBeUndefined()
+    // The executor may itself place a .git marker above the temporary directory.
+    // At the filesystem root there can be no containing ancestor worktree.
+    expect(await gitTopLevelAbove(parse(worktree).root)).toBeUndefined()
   })
 })
 

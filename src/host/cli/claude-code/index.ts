@@ -80,7 +80,7 @@ export const CLAUDE_CODE_MODELS: readonly ProbeModel[] = Object.freeze(
   ).map(([id, name]) => Object.freeze({ id, name, efforts: CLAUDE_CODE.efforts })),
 )
 
-const VERSION = /^(\d+\.\d+\.\d+)/
+const VERSION = /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/
 const PROBE_TIMEOUT_MS = 10_000
 
 /**

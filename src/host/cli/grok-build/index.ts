@@ -45,7 +45,10 @@ export const grokBuildAdapter: CliAdapter = {
   },
   async probe(_exe, run, signal) {
     const result = await run(['--version'], { timeoutMs: 10000, env: { GROK_DISABLE_AUTOUPDATER: '1' } }, signal)
-    const version = result.code === 0 ? /^grok\s+(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/m.exec(result.stdout)?.[1] : undefined
+    const version =
+      result.code === 0
+        ? /^grok\s+(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/m.exec(result.stdout)?.[1]
+        : undefined
     return { cli: 'grok-build', found: true, auth: 'unknown', ...(version ? { version } : {}) }
   },
 }
