@@ -43,6 +43,8 @@ import type {
   SubprocessPort,
 } from '../ports.ts'
 import { formatDiagnostic } from './diagnostic.ts'
+import type { ExternalRunStore } from './observability.ts'
+import type { ExternalRunStatus } from '../../shared/role-display.ts'
 import { composeEnv, definedEntries } from './env.ts'
 import { privateStateLaunch } from './private-state.ts'
 import { ByteTail, LineSplitter } from './lines.ts'
@@ -90,6 +92,7 @@ const defaultRandom: EngineRandom = {
 
 /** Services and environment the engine uses. */
 export interface EngineDeps {
+  readonly observability?: ExternalRunStore
   /** Lazily resolves `ctx.subprocess`; undefined refuses external runs. */
   readonly subprocess: () => SubprocessPort | undefined
   /** DSH's optional existing file-effect sandbox; selected host-sandbox presets never run without it. */
@@ -108,6 +111,8 @@ export interface EngineDeps {
 
 /** One run to start. */
 export interface ExternalRunSpec {
+  /** Internal metadata only; exceptions never affect the delivered result. */
+  readonly onTerminalStatus?: (status: Exclude<ExternalRunStatus, 'running'>) => void
   readonly adapter: CliAdapter
   /** Plan input; its `cwd` is validated here. */
   readonly input: PlanInput
@@ -877,9 +882,20 @@ function superviseRun(parts: Supervised): SubagentRunPort {
             (tail === '' ? '' : `\nstderr tail:\n${tail}`),
         )
       }
+      contained(
+        () =>
+          spec.onTerminalStatus?.(
+            cancelled ? 'cancelled' : timedOut ? 'timeout' : mapped.stopReason === 'completed' ? 'succeeded' : 'failed',
+          ),
+        () => {},
+      )
       return addSandboxWarning(mapped, parts.partialSandbox, parts.confinement !== undefined)
     } catch (error) {
       // Defensive: nothing above should throw, but `result` must never reject.
+      contained(
+        () => spec.onTerminalStatus?.(cancelled ? 'cancelled' : timedOut ? 'timeout' : 'failed'),
+        () => {},
+      )
       deps.logger.warn(`rolesubagents: ${name} run ${id} could not be settled: ${message(error)}`)
       return addSandboxWarning(
         cancelled

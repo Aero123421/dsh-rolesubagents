@@ -189,7 +189,8 @@ try {
       },
     })
     new ToolRuntime(root, { mode: 'native' })
-    const makeAgent = (id, header = {}) => {
+    let inheritChildScope = true
+    const makeAgent = (id, header = {}, inheritScope = true) => {
       const events = []
       const session = {
         id,
@@ -207,7 +208,7 @@ try {
       const enclosing = header.parentSession
         ? agents.find(value => value.session.id === header.parentSession)
         : undefined
-      const binding = enclosing ? bindScopeParent(agent, enclosing) : undefined
+      const binding = enclosing && inheritScope ? bindScopeParent(agent, enclosing) : undefined
       scopes.push({ scope, agent, binding })
       agents.push(agent)
       sessions.set(id, session)
@@ -221,11 +222,15 @@ try {
           : undefined,
       async startActivation(spec) {
         starts.push(spec)
-        const child = makeAgent(spec.childId, {
-          origin: 'subagent',
-          parentSession: spec.request.parent.session.id,
-          delegationDepth: (spec.request.parent.session.header.delegationDepth ?? 0) + 1,
-        })
+        const child = makeAgent(
+          spec.childId,
+          {
+            origin: 'subagent',
+            parentSession: spec.request.parent.session.id,
+            delegationDepth: (spec.request.parent.session.header.delegationDepth ?? 0) + 1,
+          },
+          inheritChildScope,
+        )
         await root.serial('agent/created', { agent: child, source: 'subagent' })
         return { childId: child.id }
       },
@@ -320,6 +325,9 @@ try {
       agents,
       makeAgent,
       starts,
+      setChildScopeInheritance(value) {
+        inheritChildScope = value
+      },
       metadata,
       warnings,
       mounts: () => mounts,
@@ -484,6 +492,45 @@ try {
     /catalog|calling agent|refreshed/,
   )
   pass('actual inherited tool scopes hide child manager and direct captured calls cannot bypass caller guard')
+  for (const inherited of [false, true]) {
+    live.setChildScopeInheritance(inherited)
+    const warningsBefore = live.warnings.length
+    await live
+      .definition(live.parent, 'delegate')
+      .execute(
+        { role: 'reviewer', description: 'strict read-only child', prompt: 'No inference' },
+        { agent: live.parent, signal: new AbortController().signal },
+      )
+    const strictChild = live.agents.at(-1)
+    assert.equal(strictChild.session.mode, 'read-only')
+    assert.equal(live.definition(strictChild, 'manage_roles'), undefined)
+    if (!inherited) {
+      assert.throws(
+        () => strictChild.ctx.tools.restrict({ deny: ['manage_roles'] }),
+        /names unknown global tool "manage_roles"/,
+      )
+    }
+    assert(live.definition(strictChild, 'delegate'))
+    assert.match(live.runtimeContext(strictChild), /read.only/i)
+    assert.equal(live.warnings.length, warningsBefore)
+    assert.equal(
+      (
+        await manager.execute(
+          { action: 'list' },
+          {
+            agent: strictChild,
+            signal: new AbortController().signal,
+          },
+        )
+      ).ok,
+      false,
+    )
+    assert.throws(() => strictChild.ctx.tools.restrict({ deny: ['missing_management_fixture'] }), /unknown global tool/)
+    pass(
+      `actual ToolRuntime strict read-only child activates with inherited scope=${inherited}; management hidden and unknown names rejected`,
+    )
+  }
+  live.setChildScopeInheritance(true)
   const otherRoot = live.makeAgent('other-existing-root', { origin: 'web', delegationDepth: 0 })
   await live.root.serial('agent/created', { agent: otherRoot, source: 'startup' })
   const otherEnum = [...live.catalog(otherRoot)]

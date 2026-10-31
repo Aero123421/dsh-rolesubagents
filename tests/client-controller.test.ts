@@ -1255,7 +1255,7 @@ describe('CLI connection test', () => {
     expect(controller.getSnapshot().probes.clis.codex.status).toBe('loading')
     await flushAll()
     expect(probe).toHaveBeenCalledWith('codex', expect.any(AbortSignal))
-    expect(controller.getSnapshot().probes.clis.codex).toEqual({
+    expect(controller.getSnapshot().probes.clis.codex).toMatchObject({
       status: 'ready',
       result: {
         cli: 'codex',
@@ -1309,7 +1309,11 @@ describe('CLI connection test', () => {
     controller.probeCli('agy')
     await flushAll()
     expect(controller.getSnapshot().probes.available).toBe(true)
-    expect(controller.getSnapshot().probes.clis.agy).toEqual({ status: 'error', issue })
+    expect(controller.getSnapshot().probes.clis.agy).toMatchObject({
+      status: 'error',
+      issue,
+      checkedAt: expect.any(Number),
+    })
     expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
     probe.mockResolvedValueOnce(probeAnswer('agy'))
     controller.probeCli('agy')
@@ -1363,6 +1367,79 @@ describe('CLI connection test', () => {
   })
 })
 
+describe('CLI model refresh', () => {
+  const flushAll = async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+  }
+  it('never discovers automatically or for unsupported adapters', async () => {
+    const probe = fakeProbe()
+    const { controller } = setup({}, 'en', probe)
+    controller.loadReference()
+    for (const cli of ['claude-code', 'pi', 'grok-build'] as const) controller.refreshCliModels(cli)
+    await flushAll()
+    expect(probe).not.toHaveBeenCalled()
+    controller.refreshCliModels('codex')
+    await flushAll()
+    expect(probe).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains models and efforts while loading, on transport errors and empty/auth-failed responses', async () => {
+    const probe = fakeProbe()
+    probe.mockResolvedValueOnce(probeAnswer('agy', { models: [{ id: 'live', efforts: ['high'] }] }))
+    const { controller } = setup({}, 'en', probe)
+    controller.refreshCliModels('agy')
+    await flushAll()
+    const first = controller.getSnapshot().probes.clis.agy
+    expect(first.modelsCheckedAt).toEqual(expect.any(Number))
+    for (const answer of [
+      () => Promise.reject(new Error('secret token')),
+      async () => probeAnswer('agy', { models: [] }),
+      async () => probeAnswer('agy', { auth: 'missing', models: [{ id: 'bad' }] }),
+    ]) {
+      probe.mockImplementationOnce(answer)
+      controller.refreshCliModels('agy')
+      expect(cliSuggestions(controller.getSnapshot().probes.clis.agy, 'agy').models).toEqual(['live'])
+      await flushAll()
+      const current = controller.getSnapshot().probes.clis.agy
+      expect(cliSuggestions(current, 'agy', '', 'live').efforts).toEqual(['high'])
+      expect(current.modelsCheckedAt).toBe(first.modelsCheckedAt)
+    }
+  })
+
+  it('invalidates only changed saved CLI settings and rejects their in-flight replies', async () => {
+    const probe = fakeProbe()
+    probe.mockResolvedValueOnce(probeAnswer('codex', { models: [{ id: 'old' }] }))
+    const { controller, fake } = setup({}, 'en', probe)
+    controller.refreshCliModels('codex')
+    await flushAll()
+    controller.setCliSettings('codex', { executable: '/new/codex' })
+    expect(controller.getSnapshot().probes.clis.codex.models).toEqual([{ id: 'old' }])
+    let resolve!: (answer: Awaited<ReturnType<ProbeCall>>) => void
+    probe.mockImplementationOnce(
+      () =>
+        new Promise(done => {
+          resolve = done
+        }),
+    )
+    controller.refreshCliModels('codex')
+    const signal = probe.mock.calls.at(-1)?.[1]
+    await controller.save()
+    expect(signal?.aborted).toBe(true)
+    resolve(probeAnswer('codex', { models: [{ id: 'stale' }] }))
+    await flushAll()
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
+    probe.mockResolvedValueOnce(probeAnswer('codex', { models: [{ id: 'new' }] }))
+    controller.refreshCliModels('codex')
+    await flushAll()
+    fake.set({ revision: 99 })
+    expect(controller.getSnapshot().probes.clis.codex.models).toEqual([{ id: 'new' }])
+    controller.resetProbes()
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
+  })
+})
+
 describe('CLI suggestions', () => {
   it('suggests the static models until a test lists the CLI models', () => {
     expect(cliSuggestions(undefined, 'claude-code').models).toEqual(['default', 'opus', 'sonnet', 'haiku', 'fable'])
@@ -1374,7 +1451,7 @@ describe('CLI suggestions', () => {
       result: { cli: 'agy' as const, found: true, models: [{ id: 'a', efforts: ['low'] }, { id: 'b' }, { id: 'a' }] },
     }
     expect(cliSuggestions(ready, 'agy', '', 'a')).toEqual({ providers: [], models: ['a', 'b'], efforts: ['low'] })
-    expect(cliSuggestions({ ...ready, status: 'error' }, 'agy').models).toContain('gemini-3.1-pro')
+    expect(cliSuggestions({ ...ready, status: 'error' }, 'agy').models).toEqual(['a', 'b'])
   })
 
   it('splits OpenCode ids into providers and models', () => {

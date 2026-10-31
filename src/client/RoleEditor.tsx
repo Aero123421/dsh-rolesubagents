@@ -10,6 +10,7 @@ import {
   type RoleModel,
   type RoleRunner,
 } from '../shared/roles.ts'
+import { CliModelRefresh } from './CliSection.tsx'
 import { useController, useT } from './context.tsx'
 import { cliSuggestions, type PageState } from './controller.ts'
 import { childText, type DraftRow, ID_MAX_LENGTH, type IssueField, parentLine, permissionAllowed } from './draft.ts'
@@ -218,7 +219,8 @@ function RunnerFields(props: {
   // Plain characters only: some DOMs resolve `list` through a CSS selector, where React's `:r1:` ids are invalid.
   const lists = `dshrs-list${useId().replace(/[^\w-]/g, '')}`
   const modelError = errorOf('runnerModel')
-  const effortList = descriptor.effortFreeText ? [...suggestions.efforts] : [...descriptor.efforts]
+  const effortList =
+    descriptor.effortFreeText || suggestions.efforts.length > 0 ? [...suggestions.efforts] : [...descriptor.efforts]
   const textInput = { className: 'dshrs-input', spellCheck: false, autoComplete: 'off', disabled } as const
   return (
     <fieldset className="dshrs-group">
@@ -272,12 +274,12 @@ function RunnerFields(props: {
                 onChange={event => c.patchRunner(uid, { effort: event.target.value })}
               >
                 <option value="">{t('ed.effortDefault')}</option>
-                {descriptor.efforts.map(id => (
+                {effortList.map(id => (
                   <option key={id} value={id}>
                     {id}
                   </option>
                 ))}
-                {effort !== '' && !descriptor.efforts.includes(effort) ? (
+                {effort !== '' && !effortList.includes(effort) ? (
                   <option value={effort}>{t('ed.unlisted', { value: effort })}</option>
                 ) : null}
               </select>
@@ -286,6 +288,7 @@ function RunnerFields(props: {
         ) : null}
       </div>
       <p className="dshrs-hint">{t(descriptor.needsProvider ? 'ed.cliModelOpenCode' : 'ed.cliModelHelp', { cli })}</p>
+      <CliModelRefresh cli={runner.cli} state={state} />
       <datalist id={`${lists}-providers`}>
         {suggestions.providers.map(id => (
           <option key={id} value={id} />

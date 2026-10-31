@@ -4,7 +4,7 @@ vi.mock('@deepseek-ai/dsh-storage-domain', () => import('./host-fakes.ts').then(
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { apply, type Config } from '../src/host/index.ts'
 import { DEFAULT_ROLES, type RoleDefinition } from '../src/shared/roles.ts'
-import { execContext, fakeWorld, type FakeAgent, type FakeStorage } from './host-fakes.ts'
+import { execContext, fakeWorld, validatingToolView, type FakeAgent, type FakeStorage } from './host-fakes.ts'
 
 function activeTool(agent: FakeAgent, name: string): ToolDefinition | undefined {
   return agent.registered.filter((tool, i) => tool.name === name && agent.disposers[i]?.mock.calls.length === 0).at(-1)
@@ -196,6 +196,65 @@ describe('manage_roles Host integration', () => {
     expect(t.settings.mutate).not.toHaveBeenCalled()
     await t.world.teardown()
   })
+  it.each([false, true])('strict read-only activation with inherited management scope=%s', async inherited => {
+    const t = await setup()
+    const manager = tool(t.root, 'manage_roles')
+    let view!: ReturnType<typeof validatingToolView>
+    t.world.subagents.startActivation.mockImplementation(async spec => {
+      const child = t.world.newAgent(spec.childId!, {
+        origin: 'subagent',
+        parentSession: t.root.session.id,
+        delegationDepth: 1,
+      })
+      view = validatingToolView(child, inherited ? t.root : undefined)
+      // The old unconditional deny throws in this isolated-native case.
+      if (!inherited) expect(() => view.restrict({ deny: ['manage_roles'] })).toThrow(/unknown global tool/)
+      view.restrict.mockClear()
+      t.world.children.push(child)
+      await t.world.emitCreated(child)
+      return { childId: child.id }
+    })
+    await expect(
+      tool(t.root, 'delegate').execute({ ...delegateArgs, role: 'reviewer' }, execContext(t.root)),
+    ).resolves.toMatchObject({ kind: 'activation' })
+    const child = t.world.children[0]!
+    expect(child.session.log[0]).toMatchObject({ type: 'sandbox/mode', data: { mode: 'read-only' } })
+    expect(view.get).toHaveBeenCalledWith('manage_roles', child)
+    expect(view.restrict).toHaveBeenCalledTimes(inherited ? 1 : 0)
+    expect(child.ctx.tools.get?.('manage_roles', child)).toBeUndefined()
+    for (const name of ['manage_roles', 'functions.manage_roles', 'write', 'edit']) {
+      expect(child.guards.some(check => check({ name, arguments: {} }) !== undefined)).toBe(true)
+    }
+    expect((await call(child, { action: 'list' }, manager)).ok).toBe(false)
+    t.world.runtimeContext(child)
+    expect(view.restrict).toHaveBeenCalledTimes(inherited ? 1 : 0)
+    expect(t.world.logger.warn).not.toHaveBeenCalled()
+    expect(t.settings.mutate).not.toHaveBeenCalled()
+    await t.world.teardown()
+  })
+  it.each(['get', 'restrict'] as const)(
+    'fails strict child activation closed when management %s fails',
+    async failure => {
+      const t = await setup()
+      t.world.subagents.startActivation.mockImplementation(async spec => {
+        const child = t.world.newAgent(spec.childId!, { origin: 'subagent', delegationDepth: 1 })
+        const view = validatingToolView(child, t.root)
+        view[failure].mockImplementation(() => {
+          throw new Error('registry unavailable')
+        })
+        t.world.children.push(child)
+        await t.world.emitCreated(child)
+        return { childId: child.id }
+      })
+      await expect(
+        tool(t.root, 'delegate').execute({ ...delegateArgs, role: 'reviewer' }, execContext(t.root)),
+      ).rejects.toThrow('registry unavailable')
+      expect(t.world.children[0]!.session.log[0]).toMatchObject({ data: { mode: 'read-only' } })
+      expect(activeTool(t.world.children[0]!, 'delegate')).toBeUndefined()
+      expect(t.settings.mutate).not.toHaveBeenCalled()
+      await t.world.teardown()
+    },
+  )
   it('allows a user fork with parentSession lineage but rejects actual delegated headers', async () => {
     const t = await setup()
     const fork = t.world.newAgent('user-fork', { origin: 'fork', parentSession: t.root.session.id, delegationDepth: 0 })

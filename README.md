@@ -50,6 +50,12 @@ Restart DSH if asked.
 
 Children run on the official subagent runtime: they start in the background, notify the parent when they finish, and accept follow-ups through `send_message`. A child of a CLI role also starts in the background and notifies the parent, but it runs once and does not accept `send_message`.
 
+### One-shot delegation settings
+
+For a DSH **fresh/spawn** role, `delegate` accepts `provider` and `model` **together**, plus optional `effort`. A replacement pair clears the role's effort unless supplied again. Effort alone requires a configured role model; it does not guess the parent's route. Native DSH route validation still applies. Fork roles (including task-only) and external CLI roles reject these route/effort overrides; choose a configured CLI role instead.
+
+`readOnly: true` strengthens just this child; `false` is rejected. Supported CLI roles select their verified read-only preset; Grok/Pi refuse it. Parent restrictions and the ban on history-copying delegation from read-only roles still apply. These options never change saved settings or the session's role catalog. A start receipt is not a final result or confirmation of the model/effort actually used.
+
 ### AI role management
 
 The separate **Allow AI role management** switch is **OFF by default** and saves immediately, independently of the role Save button and master Subagents switch. It grants eligible parent sessions administration of this Host/profile's role definitions; ordinary workspace-write parents can manage workspace-limited roles. Children do not inherit this tool, and an existing captured tool must still pass live caller/permission checks. A human-created fork is not classified as a child merely because it has a parent-session link.
@@ -115,7 +121,7 @@ A role whose **Runs on** is a CLI runs its child once as a separate program on t
    | Field | Meaning |
    |---|---|
    | Provider | OpenCode only. Required together with Model |
-   | Model | The CLI's own model ID. Empty uses the CLI's configured default (not allowed for OpenCode). Suggestions come from **Test connection** or a built-in list; any ID the CLI accepts works if it uses only letters, digits, and `. _ : @ / + - [ ]` (not starting with `-`; the same applies to Provider and Reasoning effort) |
+   | Model | The CLI's own model ID. Empty uses the CLI's configured default (not allowed for OpenCode). Suggestions come from **Refresh models**, **Test connection**, or a labeled built-in list; any ID the CLI accepts works if it uses only letters, digits, and `. _ : @ / + - [ ]` (not starting with `-`; the same applies to Provider and Reasoning effort) |
    | Reasoning effort | **Model default** or one of the CLI's effort levels. For OpenCode, a variant name of the model (free text) |
    | Permission | One of the CLI's permission presets (below). A delegated run never stops to ask for approval, so this decides what it may do |
    | Timeout (minutes) | The run is stopped after this long; 1–1440, empty for 30 |
@@ -255,7 +261,17 @@ The **External CLIs** section of the Plugins page has one card per CLI, shared b
 - **Forwarded environment variables**: variable names only (commas or spaces). Values are read from the DSH host process environment when the CLI starts and are never stored. Up to 32 names. **Test connection** counts only those that are set on the host.
 - **Test connection**: checks the saved settings: whether the executable is found, its version, sign-in state where the CLI can report it cheaply, and the models it lists (used as suggestions in the role editor). It never calls a model. Failures remain retryable and do not disable other CLI cards or ordinary role execution. Diagnostics distinguish missing client connection, structured Remote failures, ambiguous HTTP 404, Host authentication, and transport/malformed responses from CLI not-found/authentication results. HTTP 404 alone cannot tell whether the Gateway or Remote endpoint is missing. The RPC path is not a documented stable DSH API; the real HTTP bridge/Gateway integration was checked only on DSH `0.2.1-rc.2`. Grok/Pi probes read only the version: authentication and model discovery remain unknown, not falsely verified.
 
+**Refresh models** next to the runner model field explicitly runs the same saved-settings probe for Codex, Antigravity and OpenCode; opening the page never starts discovery. The editor shows the source, last check and last successful list, retaining last-good candidates during refresh or failure without changing typed values. Saved executable/forwarded-variable changes invalidate that CLI's candidates; page reloads and connection resets clear this page-session cache. Save first to test draft CLI settings. Antigravity effort choices follow the selected model's advertised efforts when available. Claude suggestions are static aliases, not live discovery; Pi/Grok have no live model discovery.
+
 These settings apply to the next delegation, also in running sessions.
+
+### External run details
+
+The supported Web catalog uses a compact, click/keyboard-only trigger with explicit direct-child/sibling scope. Current and attention-needed entries come first; completed/cancelled history starts collapsed. Unknown, stopped and stale states are not called idle or successful. Lists use native buttons and list semantics, opaque theme surfaces and mobile sizing; see [catalog behavior](<docs/role-catalog.md>).
+
+An external row opens a **nonmodal result inspector**, not a child chat. The parent stays usable. Readable and raw views show the same plain text (no Markdown/HTML renderer), with copy and an **Open parent chat** action. Execution details distinguish the requested model from unconfirmed actual model/effort. Refresh state is independent per parent; a failed refresh retains explicitly stale last-known data. There is **no live stdout/tool-output stream**, follow-up chat, or stop button; use `interrupt_agent` to stop a run. The normal final result still returns to the direct parent conversation.
+
+The Host retains a global ring of at most **100 records for 7 days**, with at most **16,384 UTF-16 code units** per result preview. Storage failures fall back to memory and the dialog labels non-durable records; older, expired or evicted runs may have no details. Check the parent conversation for the returned result, especially when a preview is truncated.
 
 ### Limits
 
@@ -308,7 +324,7 @@ Keep the official `send_message`, `list_agents`, and `interrupt_agent` tools on.
 - `bash`, `pwsh`, and `run_code` stay callable only while the latest sandbox mode is `read-only`. `terminal_read` stays callable. A sandbox backend that does not enforce `read-only` can still let an allowed shell change files; that enforcement belongs to DSH. Network access and process visibility are outside this pin. Nested tool calls from `run_code` re-enter the guard; a program that writes without calling a tool is not stopped.
 - Slash commands are not tools. A command that appends `sandbox/mode` is overwritten back to `read-only`. This plugin does not re-assert the child's approval or policy. A one-shot `sandbox_permissions` escalation still depends on DSH denying it for a delegated child.
 - A fork set to all completed turns copies that whole prefix, including tool results. The warnings on the settings page, in the tool description, in the tool result, in the host log, and in the child's runtime context do not filter or rewrite that history. Task only uses the fresh-child provider, so the parent log is never copied. An invalid fork scope is stored as task only. A fresh role and a task-only fork refuse a provider that sets `inheritsParentContext` to true. The official fork provider has no smaller slice, and events already copied cannot be removed.
-- A read-only agent cannot delegate to a role that is not read-only, or to a fork that copies the parent conversation. It can delegate to a read-only fresh role or a task-only fork.
+- A read-only agent cannot delegate to an effectively writable role, or to a fork that copies the parent conversation. It can delegate to a read-only fresh role or a task-only fork, including a supported role strengthened with `readOnly: true` for that call.
 - DSH's official out-of-process providers (codex, claude-code, acp) are not used. DSH roles use the spawn and fork providers; CLI roles run through this plugin's own runners (see [External CLI runners](#external-cli-runners), which has its own limits).
 - When a child's conversation is compacted, the role instructions are re-sent as runtime context; the initial task text is replaced by the summary.
 - Some Agent Presets suppress optional runtime context (for example `minimal`). The role instructions are still delivered, but the official "delegated subagent" statement is not.

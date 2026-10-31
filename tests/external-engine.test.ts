@@ -320,17 +320,21 @@ describe('startExternalRun: failures, timeout and cancellation', () => {
   })
 
   it('times out: asks the session to cancel, terminates after the grace and reports timeout', async () => {
-    const t = setup({ spec: { timeoutMs: 20 }, subprocess: { onRun: () => {} } })
+    const onTerminalStatus = vi.fn()
+    const t = setup({ spec: { timeoutMs: 20, onTerminalStatus }, subprocess: { onRun: () => {} } })
     const run = await t.start()
     const result = await run.result
     expect(t.adapter.sessions[0]?.cancelled).toBe(1)
     expect(t.subprocess.processes[0]?.terminated).toBe(1)
     expect(result.stopReason).toBe('error')
     expect(result.diagnostic).toMatch(/category: timeout/)
+    expect(onTerminalStatus).toHaveBeenCalledExactlyOnceWith('timeout')
   })
 
   it('aborts on the request signal with partial output', async () => {
+    const onTerminalStatus = vi.fn()
     const t = setup({
+      spec: { onTerminalStatus },
       subprocess: {
         onRun: async p => {
           await p.stdinClosed
@@ -343,6 +347,7 @@ describe('startExternalRun: failures, timeout and cancellation', () => {
     t.controller.abort()
     const result = await run.result
     expect(result).toEqual({ output: [{ type: 'text', text: 'half' }], stopReason: 'aborted' })
+    expect(onTerminalStatus).toHaveBeenCalledExactlyOnceWith('cancelled')
     expect(t.adapter.sessions[0]?.cancelled).toBe(1)
     expect(t.subprocess.processes[0]?.terminated).toBe(1)
     expect(t.runs.has(run)).toBe(true)

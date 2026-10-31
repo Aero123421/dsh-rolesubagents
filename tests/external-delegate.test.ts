@@ -112,6 +112,32 @@ async function boot(options: BootOptions = {}) {
 }
 
 describe('delegate: external roles', () => {
+  it('still closes Session role storage if external history closing fails', async () => {
+    const world = fakeWorld()
+    const facility = world.services.storageDomain!
+    const closed: string[] = []
+    world.services.storageDomain = {
+      async open(spec) {
+        const domain = await facility.open(spec)
+        const name = (spec as { name: string }).name
+        return {
+          ...domain,
+          close: async () => {
+            closed.push(name)
+            if (name === 'rolesubagents_external_runs') throw new Error('close failed')
+            await domain.close()
+          },
+        }
+      },
+    }
+    apply(world.ctx, { roles: ROLES })
+    await world.settle()
+    await world.teardown()
+    expect(closed).toContain('rolesubagents_external_runs')
+    expect(closed).toContain('rolesubagents')
+    expect(world.ctx.logger.warn).toHaveBeenCalledWith('rolesubagents: could not close external run history storage')
+    expect(world.ctx.logger.warn).not.toHaveBeenCalledWith('rolesubagents: could not close Session role storage')
+  })
   it('mentions external roles in the tool description only when one is selectable', () => {
     expect(toolDescription([GENERAL, WORKER])).not.toContain(EXTERNAL_ROLES_NOTE)
     const text = toolDescription([GENERAL, CODER])
@@ -155,6 +181,23 @@ describe('delegate: external roles', () => {
       stopReason: 'completed',
     })
     expect(subprocess.processes).toHaveLength(1)
+    await world.settle()
+    expect(world.storage.data.get('rolesubagents_external_runs')?.get('history')?.get('recent')).toMatchObject({
+      version: 1,
+      entries: [
+        {
+          id: value.subagentId,
+          parentSessionId: 'session-parent',
+          roleId: 'coder',
+          cli: 'codex',
+          model: 'gpt-6-sol',
+          status: 'succeeded',
+          resultText: 'external answer',
+          resultTruncated: false,
+        },
+      ],
+    })
+    await world.teardown()
   })
 
   it('records the selected external role under the returned activation id, never a CLI thread id', async () => {
@@ -246,7 +289,11 @@ describe('delegate: external roles', () => {
     const { parent } = await boot()
     const tool = registeredTool(parent)
     const render = tool.output?.render as (args: unknown, value: { subagentId: string }) => { text: string }[]
-    expect(render({ role: 'coder' }, { subagentId: 'id-1' })[0]?.text).toBe('started Codex subagent id-1')
+    const receipt = render({ role: 'coder' }, { subagentId: 'id-1' })[0]?.text
+    expect(receipt).toMatch(/^started Codex subagent id-1\n/)
+    expect(receipt).toContain('start receipt, not a completion result')
+    expect(receipt).toContain('final result will return to this parent conversation')
+    expect(receipt).toContain('External CLI runs do not accept follow-up messages')
     expect(render({ role: 'worker' }, { subagentId: 'id-2' })[0]?.text).toBe('started subagent id-2')
   })
 

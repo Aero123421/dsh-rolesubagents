@@ -1,6 +1,26 @@
-import { useCallback, useSyncExternalStore, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import {
+  useCallback,
+  useSyncExternalStore,
+  useEffect,
+  useLayoutEffect,
+  useId,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from 'react'
 import { createPortal } from 'react-dom'
-import { RoleBadge } from './RoleBadge.tsx'
+import { useExternalRuns } from './external-runs.ts'
+import { ExternalRunDialog } from './ExternalRunDialog.tsx'
+import { cliDescriptor } from '../shared/cli/index.ts'
+import {
+  activityLabel,
+  activitySymbol,
+  externalActivity,
+  nativeActivity,
+  isAttention,
+  isHistory,
+  isIncomplete,
+} from './catalog-state.ts'
 import type {
   CatalogActions,
   CatalogHooks,
@@ -8,6 +28,7 @@ import type {
   CatalogProps,
   CatalogRole,
   CatalogProjection,
+  CatalogEntry,
 } from './catalog-types.ts'
 
 /** The native store retains projected values during idle/migration transitions. */
@@ -16,16 +37,20 @@ function projectionState(projection: CatalogProjection | undefined) {
   if (!projection || projection.state === 'idle') return projected ? 'ready' : 'loading'
   return projection.state === 'migration-required' && projected ? 'ready' : projection.state
 }
-
 const defaultLocale = () => 'en'
 const noSubscription = () => () => {}
 
-/** No permanent negative cache: metadata can arrive after a catalog entry. */
-function useRoles(ids: string[], active: boolean, actions: CatalogActions) {
+/** Retain positive metadata over close/reopen; never permanently cache absence. */
+function useRoles(ids: string[], active: boolean, scope: string, actions: CatalogActions) {
   const [roles, setRoles] = useState<Record<string, CatalogRole>>({})
   const [epoch, setEpoch] = useState(0)
   const pending = useRef<AbortController>()
-  const key = JSON.stringify({ ids, epoch })
+  const key = JSON.stringify({ ids: [...new Set(ids)].sort(), epoch, scope })
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Scope changes deliberately invalidate positive metadata.
+  useEffect(() => {
+    setRoles({})
+    pending.current?.abort()
+  }, [scope])
   useEffect(() => {
     const dispose = actions.subscribeReset?.(() => {
       pending.current?.abort()
@@ -38,7 +63,6 @@ function useRoles(ids: string[], active: boolean, actions: CatalogActions) {
   }, [actions.subscribeReset])
   useEffect(() => {
     const requested: string[] = JSON.parse(key).ids
-    setRoles({})
     if (!active || !actions.getRoles || requested.length === 0) return
     const controller = new AbortController()
     pending.current = controller
@@ -48,9 +72,14 @@ function useRoles(ids: string[], active: boolean, actions: CatalogActions) {
       inFlight = true
       try {
         const result = await actions.getRoles?.(requested, controller.signal)
-        if (!controller.signal.aborted && result) setRoles(result)
+        if (!controller.signal.aborted && result)
+          setRoles(previous => {
+            const next = { ...previous }
+            for (const id of requested) delete next[id]
+            return { ...next, ...result }
+          })
       } catch {
-        /* Missing optional host metadata must not disable navigation. */
+        /* Optional metadata must not disable navigation. */
       } finally {
         inFlight = false
       }
@@ -84,66 +113,78 @@ export function CatalogDropdown(
   const statuses = props.useSessionStatus(value => value)
   const [open, setOpen] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [now, setNow] = useState(Date.now)
-  const [position, setPosition] = useState({ left: 8, top: 8, maxHeight: 400 })
+  const [history, setHistory] = useState<Set<string>>(new Set())
+  const [position, setPosition] = useState({ left: 8, top: 8, maxHeight: 472 })
   const trigger = useRef<HTMLButtonElement>(null)
   const menu = useRef<HTMLDivElement>(null)
+  const focused = useRef<{ element: HTMLElement; parent?: string }>()
+  // A live row can move into collapsed history. Recover only focus lost by removal,
+  // never focus that the user deliberately moved back to the surrounding chat.
+  useLayoutEffect(() => {
+    const previous = focused.current
+    if (!open || !previous || previous.element.isConnected) return
+    focused.current = undefined
+    if (document.activeElement !== document.body) return
+    const disclosure = Array.from(
+      menu.current?.querySelectorAll<HTMLButtonElement>('[data-history-parent]') ?? [],
+    ).find(button => button.dataset.historyParent === previous.parent)
+    ;(disclosure ?? menu.current?.querySelector<HTMLButtonElement>('button'))?.focus()
+  })
   const menuId = useId()
-  const hoverTimer = useRef<ReturnType<typeof setTimeout>>()
-  const focusTimer = useRef<ReturnType<typeof setTimeout>>()
-  const pinned = useRef(false)
-  const cancelHover = useCallback(() => {
-    clearTimeout(hoverTimer.current)
-  }, [])
-  useEffect(
-    () => () => {
-      cancelHover()
-      clearTimeout(focusTimer.current)
-    },
-    [cancelHover],
-  )
   const catalog = state.projectionsBySession[rootSessionId]
   const entries = catalog?.values.subagentCatalog ?? []
-  const running = (id: string) => statuses.get(id)?.running ?? state.byId[id]?.running ?? false
+  const [selectedRun, setSelectedRun] = useState<{ id: string; label: string; parent: string }>()
+  const externalParents = [rootSessionId, ...expanded].filter(id =>
+    state.projectionsBySession[id]?.values.subagentCatalog?.some(entry => entry.mode === 'external'),
+  )
+  if (selectedRun) externalParents.push(selectedRun.parent)
+  const externalRuns = useExternalRuns(externalParents, props.getExternalRuns, props.subscribeReset)
   const roles = useRoles(
-    [
-      ...new Set(
-        [rootSessionId, ...expanded].flatMap(
-          id => state.projectionsBySession[id]?.values.subagentCatalog?.map(e => e.id) ?? [],
-        ),
-      ),
-    ],
+    [rootSessionId, ...expanded].flatMap(
+      id => state.projectionsBySession[id]?.values.subagentCatalog?.map(e => e.id) ?? [],
+    ),
     open,
+    rootSessionId,
     props,
   )
-  const close = useCallback(
-    (focus = false) => {
-      cancelHover()
-      clearTimeout(focusTimer.current)
-      pinned.current = false
-      setOpen(false)
-      setExpanded(new Set())
-      if (focus) trigger.current?.focus()
-    },
-    [cancelHover],
-  )
+  const activity = (entry: CatalogEntry, parent: string) => {
+    if (entry.mode === 'external') {
+      const scope = externalRuns.byParent[parent]
+      return externalActivity(scope?.byId[entry.id], scope)
+    }
+    const summary = state.byId[entry.id]
+    if (
+      summary?.formatStatus === 'migration-required' ||
+      projectionState(state.projectionsBySession[entry.id]) === 'migration-required'
+    )
+      return 'migration'
+    return nativeActivity(summary, statuses.get(entry.id)?.running ?? summary?.running)
+  }
+  const close = useCallback((focus = false) => {
+    focused.current = undefined
+    setOpen(false)
+    setExpanded(new Set())
+    setHistory(new Set())
+    if (focus) trigger.current?.focus()
+  }, [])
+  // biome-ignore lint/correctness/useExhaustiveDependencies: A new session scope must dismiss old overlays.
+  useEffect(() => {
+    close()
+    setSelectedRun(undefined)
+  }, [rootSessionId, close])
   const visible = displayTitle !== undefined || entries.length > 0 || catalog?.state === 'error'
   useEffect(() => {
     if (!visible && open) close()
   }, [visible, open, close])
-  const leave = () => {
-    cancelHover()
-    if (!pinned.current) hoverTimer.current = setTimeout(() => close(), 150)
-  }
   useEffect(() => {
     if (!open) return
     const place = () => {
       const rect = trigger.current?.getBoundingClientRect()
       if (rect)
         setPosition({
-          left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)),
-          top: Math.min(rect.bottom + 4, window.innerHeight - 100),
-          maxHeight: Math.max(80, window.innerHeight - rect.bottom - 16),
+          left: Math.max(8, Math.min(rect.left, window.innerWidth - 392)),
+          top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 100)),
+          maxHeight: Math.min(472, Math.max(80, window.innerHeight - rect.bottom - 16)),
         })
     }
     const outside = (event: PointerEvent) => {
@@ -154,16 +195,21 @@ export function CatalogDropdown(
       )
         close()
     }
+    const trackOutsideFocus = (event: FocusEvent) => {
+      if (event.target instanceof Node && !menu.current?.contains(event.target)) focused.current = undefined
+    }
+    document.addEventListener('focusin', trackOutsideFocus)
     place()
+    // All opening methods put focus in the nonmodal dialog; no focus trap.
+    menu.current?.querySelector<HTMLElement>('[data-catalog-main],button')?.focus()
     document.addEventListener('pointerdown', outside)
     window.addEventListener('resize', place)
     document.addEventListener('scroll', place, true)
-    const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => {
+      document.removeEventListener('focusin', trackOutsideFocus)
       document.removeEventListener('pointerdown', outside)
       window.removeEventListener('resize', place)
       document.removeEventListener('scroll', place, true)
-      clearInterval(timer)
     }
   }, [open, close])
   const toggle = (id: string) => {
@@ -183,12 +229,6 @@ export function CatalogDropdown(
     })
     if (!expanded.has(id)) props.refreshProjection(id)
   }
-  const items = () =>
-    Array.from(menu.current?.querySelectorAll<HTMLElement>('[role="treeitem"]:not([aria-disabled="true"])') ?? [])
-  const focusItem = (last = false) => {
-    const list = items()
-    ;(last ? list.at(-1) : list[0])?.focus()
-  }
   const navigate = (event: KeyboardEvent) => {
     if (event.key === 'Escape') {
       event.preventDefault()
@@ -196,8 +236,9 @@ export function CatalogDropdown(
       close(true)
       return
     }
-    const list = items()
-    const index = list.indexOf(document.activeElement as HTMLElement)
+    const list = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+    if (!list.length) return
+    const index = list.indexOf(document.activeElement as HTMLButtonElement)
     const next =
       event.key === 'Home'
         ? 0
@@ -206,19 +247,129 @@ export function CatalogDropdown(
           : event.key === 'ArrowDown'
             ? (index + 1) % list.length
             : event.key === 'ArrowUp'
-              ? index < 0
-                ? list.length - 1
-                : (index + list.length - 1) % list.length
+              ? (index + list.length - 1) % list.length
               : undefined
     if (next !== undefined) {
       event.preventDefault()
       list[next]?.focus()
     }
   }
-  const rows = (parent: string, ancestors: Set<string>, level = 1): React.ReactNode => {
+  const rows = (parent: string, ancestors: Set<string>): React.ReactNode => {
     const projection = state.projectionsBySession[parent]
     const status = projectionState(projection)
     const children = projection?.values.subagentCatalog ?? []
+    const current = children
+      .filter(e => e.id === currentSessionId || !isHistory(activity(e, parent)))
+      .reverse()
+      .sort((a, b) => Number(isAttention(activity(b, parent))) - Number(isAttention(activity(a, parent))))
+    const completed = children.filter(e => e.id !== currentSessionId && isHistory(activity(e, parent))).reverse()
+    const renderList = (list: CatalogEntry[]) => (
+      <ul className="dshrs-catalog-list">
+        {list.map(entry => {
+          const summary = state.byId[entry.id]
+          const child = state.projectionsBySession[entry.id]
+          const external = entry.mode === 'external'
+          const status = activity(entry, parent)
+          const branch =
+            !external &&
+            !ancestors.has(entry.id) &&
+            status !== 'migration' &&
+            !(projectionState(child) === 'ready' && child?.values.subagentCatalog?.length === 0)
+          const isExpanded = branch && expanded.has(entry.id)
+          const label = entry.label ?? summary?.title ?? entry.id
+          const address = { parentSessionId: parent, childSessionId: entry.id, mode: entry.mode }
+          const run = externalRuns.byParent[parent]?.byId[entry.id]
+          const role = roles[entry.id] ?? (run ? { roleId: run.roleId, displayName: run.roleId } : undefined)
+          const runtime = external
+            ? run
+              ? cliDescriptor(run.cli).displayName
+              : text('External CLI', '外部CLI')
+            : 'DSH'
+          const statusText =
+            activityLabel(status, ja) +
+            (status === 'stale' && run
+              ? ` · ${activityLabel(run.status === 'succeeded' ? 'completed' : run.status, ja)}`
+              : '')
+          const openChild = () => {
+            if (external) {
+              trigger.current?.focus()
+              setSelectedRun({ id: entry.id, label, parent })
+            } else props.openChild(address)
+            close()
+          }
+          const action = external ? text('View result', '結果を表示') : text('Open chat', 'チャットを開く')
+          return (
+            <li key={entry.id} data-catalog-parent={parent}>
+              <div className="dshrs-catalog-row" data-state={status}>
+                <button
+                  type="button"
+                  className="dshrs-catalog-main"
+                  data-catalog-main=""
+                  aria-current={entry.id === currentSessionId || undefined}
+                  aria-label={[label, role?.displayName, runtime, statusText, action].filter(Boolean).join(' · ')}
+                  onClick={openChild}
+                >
+                  <span className="dshrs-catalog-status" aria-hidden="true">
+                    {activitySymbol(status)}
+                  </span>
+                  <span className="dshrs-catalog-copy">
+                    <span className="dshrs-catalog-label" title={label}>
+                      {label}
+                    </span>
+                    <span
+                      className="dshrs-catalog-meta"
+                      title={[role?.displayName, runtime, statusText, run?.error].filter(Boolean).join(' · ')}
+                    >
+                      <span className="dshrs-catalog-role" title={role?.displayName}>
+                        {role?.displayName}
+                      </span>
+                      <span>
+                        {runtime} · {statusText}
+                      </span>
+                    </span>
+                  </span>
+                  <span className="dshrs-catalog-action" aria-hidden="true">
+                    {external ? text('Result', '結果') : text('Chat', '会話')}
+                  </span>
+                </button>
+                {!external && entry.id !== currentSessionId && (
+                  <button
+                    type="button"
+                    className="dshrs-catalog-aside"
+                    aria-label={ja ? `${label}をサイドバーで開く` : `Open ${label} in sidebar`}
+                    title={text('Open in sidebar', 'サイドバーで開く')}
+                    onClick={() => {
+                      props.openChildAside(address)
+                      close()
+                    }}
+                  >
+                    ◫
+                  </button>
+                )}
+              </div>
+              {branch && (
+                <button
+                  type="button"
+                  className="dshrs-catalog-branch"
+                  aria-expanded={isExpanded}
+                  aria-label={`${isExpanded ? text('Collapse', '折りたたむ') : text('Expand', '展開')} ${label}`}
+                  onClick={() => toggle(entry.id)}
+                >
+                  {isExpanded ? '− ' : '+ '}
+                  {text('Direct children', '直下の子')}
+                  {child?.values.subagentCatalog ? ` (${child.values.subagentCatalog.length})` : ''}
+                </button>
+              )}
+              {isExpanded && (
+                <div className="dshrs-catalog-group" aria-busy={projectionState(child) === 'loading' || undefined}>
+                  {rows(entry.id, new Set([...ancestors, entry.id]))}
+                </div>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+    )
     return (
       <>
         {status === 'loading' && !children.length && (
@@ -227,7 +378,7 @@ export function CatalogDropdown(
         {projection?.state === 'error' && (
           <p role="alert">
             {projection.error?.message ?? text('Unable to load subagents.', 'サブエージェントを読み込めません。')}{' '}
-            <button type="button" onClick={() => props.refreshProjection(parent)}>
+            <button className="dshrs-catalog-retry" type="button" onClick={() => props.refreshProjection(parent)}>
               {text('Retry', '再試行')}
             </button>
           </p>
@@ -235,216 +386,128 @@ export function CatalogDropdown(
         {status === 'migration-required' && !children.length && (
           <p>{text('Open this session to update its history.', 'このセッションを開いて履歴を更新してください。')}</p>
         )}
-        {children.map(entry => {
-          const summary = state.byId[entry.id]
-          const child = state.projectionsBySession[entry.id]
-          const external = entry.mode === 'external'
-          const migration =
-            summary?.formatStatus === 'migration-required' || projectionState(child) === 'migration-required'
-          const branch =
-            !external &&
-            !ancestors.has(entry.id) &&
-            !migration &&
-            !(projectionState(child) === 'ready' && child?.values.subagentCatalog?.length === 0)
-          const isExpanded = branch && expanded.has(entry.id)
-          const label = entry.label ?? entry.id
-          const address = { parentSessionId: parent, childSessionId: entry.id, mode: entry.mode }
-          const activity = external
-            ? text('External', '外部')
-            : running(entry.id)
-              ? text('Running', '実行中')
-              : summary?.projectionValues?.subagentTiming?.lastTurnCompleted
-                ? text('Completed', '完了')
-                : text('Inactive', '待機中')
-          const secondary = [
-            summary?.title,
-            migration
-              ? text('Migration required', '履歴の更新が必要')
-              : entry.mode === 'continuable'
-                ? text('Continuable', '継続可能')
-                : entry.mode === 'one-shot'
-                  ? text('One-shot', '単発')
-                  : entry.mode === 'unknown'
-                    ? text('Unknown mode', '不明')
-                    : text('External', '外部'),
-            activity,
-          ]
-            .filter(Boolean)
-            .join(' · ')
-          const usage = summary?.projectionValues?.tokenUsage
-          const tokens =
-            usage && usage.uncachedInputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
-          const timing = summary?.projectionValues?.subagentTiming
-          const duration =
-            timing &&
-            timing.settledMs +
-              (timing.active ? Math.max(0, (running(entry.id) ? now : timing.active.through) - timing.active.since) : 0)
-          const openChild = () => {
-            if (!external) {
-              props.openChild(address)
-              close()
-            }
-          }
-          const role = roles[entry.id]
-          return (
-            <div key={entry.id}>
-              <div
-                className="dshrs-catalog-row"
-                role="treeitem"
-                tabIndex={external ? -1 : 0}
-                aria-disabled={external || undefined}
-                aria-level={level}
-                aria-current={entry.id === currentSessionId || undefined}
-                aria-expanded={branch ? isExpanded : undefined}
-                aria-label={[
-                  label,
-                  secondary,
-                  role?.displayName,
-                  tokens === undefined ? undefined : `${tokens} ${text('tokens', 'トークン')}`,
-                  duration === undefined
-                    ? undefined
-                    : `${Math.floor(duration / 1000)} ${text('seconds active', '秒稼働')}`,
-                ]
-                  .filter(Boolean)
-                  .join(' · ')}
-                onClick={openChild}
-                onKeyDown={event => {
-                  if (event.target !== event.currentTarget) return
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    openChild()
-                  }
-                  if (
-                    (event.key === 'ArrowRight' && branch && !isExpanded) ||
-                    (event.key === 'ArrowLeft' && isExpanded)
-                  ) {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    toggle(entry.id)
-                  }
-                }}
-              >
-                {branch && (
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    aria-label={`${isExpanded ? text('Collapse', '折りたたむ') : text('Expand', '展開')} ${label}`}
-                    onClick={event => {
-                      event.stopPropagation()
-                      toggle(entry.id)
-                    }}
-                  >
-                    {isExpanded ? '⌄' : '›'}
-                  </button>
-                )}
-                <span aria-hidden="true" style={{ color: running(entry.id) ? '#25a56a' : undefined }}>
-                  ●
-                </span>
-                <span className="dshrs-catalog-copy">
-                  <span className="dshrs-catalog-label">
-                    {label}
-                    {role && <RoleBadge roleId={role.roleId} />}
-                  </span>
-                  <small>{secondary}</small>
-                </span>
-                <small className="dshrs-catalog-metrics">
-                  {tokens !== undefined && (
-                    <span>
-                      {new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(tokens)}{' '}
-                      {text('tokens', 'トークン')}
-                    </span>
-                  )}
-                  {duration !== undefined && (
-                    <span title={`${Math.floor(duration / 1000)} ${text('seconds active', '秒稼働')}`}>
-                      {Math.floor(duration / 60000)}:{String(Math.floor(duration / 1000) % 60).padStart(2, '0')}
-                    </span>
-                  )}
-                </small>
-                {!external && entry.id !== currentSessionId && (
-                  <button
-                    type="button"
-                    aria-label={ja ? `${label}をサイドバーで開く` : `Open ${label} in sidebar`}
-                    onKeyDown={event => {
-                      if (event.key !== 'Escape') event.stopPropagation()
-                    }}
-                    onClick={event => {
-                      event.stopPropagation()
-                      props.openChildAside(address)
-                      close()
-                    }}
-                  >
-                    ↗
-                  </button>
-                )}
-              </div>
-              {isExpanded && (
-                // biome-ignore lint/a11y/useSemanticElements: ARIA tree branch, not a group of form controls.
-                <div
-                  role="group"
-                  className="dshrs-catalog-group"
-                  aria-busy={projectionState(child) === 'loading' || undefined}
-                >
-                  {rows(entry.id, new Set([...ancestors, entry.id]), level + 1)}
-                </div>
-              )}
-            </div>
-          )
-        })}
+        {status === 'ready' && !children.length && <p>{text('No direct children.', '直下の子はありません。')}</p>}
+        {!!current.length && (
+          <>
+            <h3>
+              {text('Current & attention', '稼働中・要確認')} ({current.length})
+            </h3>
+            {renderList(current)}
+          </>
+        )}
+        {!!completed.length && (
+          <>
+            <button
+              type="button"
+              className="dshrs-catalog-history"
+              data-history-parent={parent}
+              aria-expanded={history.has(parent)}
+              onClick={() =>
+                setHistory(previous => {
+                  const next = new Set(previous)
+                  if (next.has(parent)) next.delete(parent)
+                  else next.add(parent)
+                  return next
+                })
+              }
+            >
+              {history.has(parent) ? '− ' : '+ '}
+              {text('Completed / history', '完了・履歴')} ({completed.length}) · {text('Newest first', '新しい順')}
+            </button>
+            {history.has(parent) && renderList(completed)}
+          </>
+        )}
       </>
     )
   }
   if (!visible) return null
+  const activeCount = entries.filter(e => activity(e, rootSessionId) === 'running').length
+  const attentionCount = entries.filter(e => isAttention(activity(e, rootSessionId))).length
+  const stale = entries.some(e => activity(e, rootSessionId) === 'stale')
+  const incomplete =
+    catalog?.state === 'error' ||
+    projectionState(catalog) !== 'ready' ||
+    entries.some(e => isIncomplete(activity(e, rootSessionId)))
   const title = entries.find(e => e.id === currentSessionId)?.label ?? displayTitle
+  const scopeLabel = currentSessionId
+    ? text('Sibling subagents', '兄弟サブエージェント')
+    : text('Subagents', 'サブエージェント')
+  const triggerLabel = `${scopeLabel}: ${entries.length} ${text('direct children', '直下の子')} · ${text('Running', '実行中')} ${activeCount} · ${text('Attention', '要確認')} ${attentionCount}${incomplete ? ` · ${text('Status incomplete', '状態未取得・更新停止あり')}` : ''}${stale ? ` · ${text('Stale information', '最終取得時の情報')}` : ''}`
+  const show = () => {
+    setSelectedRun(undefined)
+    setOpen(true)
+    props.refreshProjection(rootSessionId)
+  }
   return (
     <span className="dshrs-catalog">
+      {openTitle && (
+        <button
+          type="button"
+          className="dshrs-catalog-title"
+          title={title}
+          onClick={() => {
+            close()
+            openTitle()
+          }}
+        >
+          {title}
+        </button>
+      )}
       <button
         type="button"
+        className="dshrs-catalog-trigger"
         ref={trigger}
-        onMouseLeave={leave}
-        aria-haspopup="tree"
+        aria-label={triggerLabel}
+        title={triggerLabel}
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         onClick={() => {
-          cancelHover()
-          pinned.current = true
-          if (openTitle) {
-            close()
-            openTitle()
-          } else {
-            setOpen(true)
-            if (!open) props.refreshProjection(rootSessionId)
-          }
+          if (open) close()
+          else show()
         }}
         onKeyDown={event => {
-          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          if (event.key === 'ArrowDown') {
             event.preventDefault()
-            setOpen(true)
-            props.refreshProjection(rootSessionId)
-            clearTimeout(focusTimer.current)
-            focusTimer.current = setTimeout(() => focusItem(event.key === 'ArrowUp'), 0)
+            if (!open) show()
+            else menu.current?.querySelector('button')?.focus()
           } else if (event.key === 'Escape') close(true)
         }}
-        onMouseEnter={() => {
-          cancelHover()
-          if (!open)
-            hoverTimer.current = setTimeout(() => {
-              setOpen(true)
-              props.refreshProjection(rootSessionId)
-            }, 150)
-        }}
       >
-        {title ??
-          (ja
-            ? `サブエージェント ${entries.length}件`
-            : `${entries.length} subagent${entries.length === 1 ? '' : 's'}`)}
-        {entries.some(e => running(e.id)) && (
-          <span role="img" aria-label={text('Running', '実行中')}>
-            {' '}
-            •
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <rect x="8" y="2" width="8" height="6" rx="2" />
+          <path d="M12 8v4M5 16v-4h14v4" />
+          <rect x="2" y="16" width="6" height="6" rx="2" />
+          <rect x="16" y="16" width="6" height="6" rx="2" />
+        </svg>
+        <span aria-hidden="true">{entries.length}</span>
+        {activeCount > 0 && (
+          <span className="dshrs-catalog-signal" data-state="running" aria-hidden="true">
+            ◌ <span className="dshrs-catalog-signal-label">{text('Running', '実行中')} </span>
+            {activeCount}
           </span>
-        )}{' '}
-        ⌄
+        )}
+        {attentionCount > 0 && (
+          <span className="dshrs-catalog-signal" data-state="attention" aria-hidden="true">
+            ! <span className="dshrs-catalog-signal-label">{text('Attention', '要確認')} </span>
+            {attentionCount}
+          </span>
+        )}
+        {incomplete && (
+          <span className="dshrs-catalog-signal" aria-hidden="true">
+            {stale ? '↻' : '?'}
+          </span>
+        )}
+        <span aria-hidden="true">⌄</span>
       </button>
       {open &&
         createPortal(
@@ -452,17 +515,56 @@ export function CatalogDropdown(
             id={menuId}
             ref={menu}
             className="dshrs-catalog-menu"
-            style={position}
-            role="tree"
-            aria-label={text('Subagents', 'サブエージェント')}
+            style={
+              {
+                '--catalog-left': `${position.left}px`,
+                '--catalog-top': `${position.top}px`,
+                '--catalog-max-height': `${position.maxHeight}px`,
+              } as React.CSSProperties
+            }
+            role="dialog"
+            aria-label={scopeLabel}
             onKeyDown={navigate}
-            onMouseEnter={cancelHover}
-            onMouseLeave={leave}
+            onFocusCapture={event => {
+              focused.current = {
+                element: event.target,
+                parent: event.target.closest<HTMLElement>('[data-catalog-parent]')?.dataset.catalogParent,
+              }
+            }}
           >
-            {rows(rootSessionId, new Set([rootSessionId]))}
+            <div className="dshrs-catalog-heading">
+              <div>
+                <strong>{scopeLabel}</strong>
+                <small>
+                  {text('Direct children only', '直下の子のみ')} · {entries.length}
+                </small>
+              </div>
+              <button
+                type="button"
+                aria-label={text('Close subagents', 'サブエージェントを閉じる')}
+                onClick={() => close(true)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="dshrs-catalog-scroll">{rows(rootSessionId, new Set([rootSessionId]))}</div>
           </div>,
           document.body,
         )}
+      {selectedRun && (
+        <ExternalRunDialog
+          id={selectedRun.id}
+          label={selectedRun.label}
+          parentSessionId={selectedRun.parent}
+          onOpenParent={props.openParent ? () => props.openParent?.(selectedRun.parent) : undefined}
+          state={externalRuns}
+          locale={locale}
+          onClose={() => {
+            setSelectedRun(undefined)
+            trigger.current?.focus()
+          }}
+        />
+      )}
     </span>
   )
 }

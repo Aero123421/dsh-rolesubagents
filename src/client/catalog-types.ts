@@ -1,4 +1,5 @@
 import type { DshClientContext } from './dsh.ts'
+import type { GetExternalRuns } from './external-runs.ts'
 
 /** Structural slot props verified against installed ui-subagent's runtime/types. */
 export interface CatalogEntry {
@@ -49,10 +50,12 @@ export type GetCatalogRoles = (ids: string[], signal: AbortSignal) => Promise<Re
 export interface CatalogActions {
   getLocale?: () => string
   subscribeLocale?: (listener: () => void) => () => void
+  openParent?(sessionId: string): void
   openChild(address: CatalogAddress): void
   openChildAside(address: CatalogAddress): void
   refreshProjection(id: string): void
   getRoles?: GetCatalogRoles
+  getExternalRuns?: GetExternalRuns
   subscribeReset?: (listener: () => void) => () => unknown
 }
 export interface CatalogProps extends CatalogHooks, CatalogActions {

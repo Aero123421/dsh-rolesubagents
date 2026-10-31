@@ -14,10 +14,13 @@ it('keeps optional wire endpoints behind disposable identity and loopback-only H
     '@deepseek-ai/cordis',
     '../src/host/management/remote.ts',
     '../src/host/management/settings.ts',
-    '../src/host/role-display-service.ts',
     '../src/client/role-display.ts',
+    '../src/client/external-runs.ts',
+    '../src/host/external/observability.ts',
   ])
     expect(source.indexOf(`await import('${specifier}')`)).toBeGreaterThan(isolation)
+  expect(source).toContain("readFile(new URL('../lib/index.js', import.meta.url), 'utf8')")
+  expect(source).toContain('await import(pathToFileURL(fixtureBundle).href)')
   expect(source).toContain("server.listen(0, '127.0.0.1', resolve)")
   expect(source).toContain("'rolesubagentsManagement/writeSafety'")
   expect(source).toMatch(/safetyEndpoint,\s*\{\s*args:\s*\{\s*request\s*\}/)
@@ -53,6 +56,10 @@ it.skipIf(!available)(
     expect(result.stdout).not.toContain('SYNTHETIC_PRIVATE')
     expect(result.stdout).toContain('role-display actual client caller → HTTP → Gateway → Remote')
     expect(result.stdout).toContain('role-display disposal refuses captured calls')
+    expect(result.stdout).toContain('external-runs actual client caller → HTTP → Gateway owner invocation')
+    expect(result.stdout).toContain(
+      'shipping lib/index.js bundled query/externalRuns preserve literal signal and execute via actual Gateway',
+    )
     expect(result.stdout).toContain('PASS missing Gateway and missing Remote both produce ambiguous HTTP 404')
     expect(result.stdout).toContain('isolated HOME/profile, no real CLI/model calls')
   },

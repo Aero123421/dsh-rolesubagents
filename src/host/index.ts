@@ -31,6 +31,7 @@ import {
   selectableRoles,
 } from '../shared/roles.ts'
 import type { RunTracker } from './external/engine.ts'
+import { createExternalRunStore } from './external/observability.ts'
 import { mountProbeService } from './external/probe-service.ts'
 import { type AdapterLookup, CLI_ADAPTERS, defaultAdapterLookup } from './external/registry.ts'
 import type { AgentPort, HostContext, SessionPort } from './ports.ts'
@@ -168,6 +169,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   })
   /** Undisposed external runs; drained on unload, even when their results already settled. */
   const runs: RunTracker = new Set()
+  const externalRunStore = createExternalRunStore(() => ctx.get('storageDomain'))
   /** Aborted on unload: a delegation still starting (executable lookup, files, pre-flight) then never spawns. */
   const lifetime = new AbortController()
   const pending = new Map<string, PendingChild>()
@@ -277,6 +279,7 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
 
   const external = {
     engine: {
+      observability: externalRunStore,
       subprocess: () => ctx.get('subprocess'),
       sandbox: () => ctx.get('sandbox'),
       logger: ctx.logger,
@@ -476,7 +479,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
             ? 'Child agents cannot administer role configuration.'
             : undefined,
         )
-        prepared.managementDeny ??= agent.ctx.tools.restrict?.({ deny: [MANAGEMENT_TOOL_NAME] })
+        // Native children may not inherit the parent's agent-local registration.
+        // After removing our own registration, only deny a visible inherited tool;
+        // restrict validates names against the inherited surface, not just globals.
+        if (agent.ctx.tools.get?.(MANAGEMENT_TOOL_NAME, agent) !== undefined) {
+          prepared.managementDeny ??= agent.ctx.tools.restrict?.({ deny: [MANAGEMENT_TOOL_NAME] })
+        }
       }
       return
     }
@@ -663,7 +671,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       })
   }
 
-  void mountRoleDisplayService(ctx, { state, isDisposed: () => disposed, lifetime: lifetime.signal })
+  void mountRoleDisplayService(ctx, {
+    state,
+    externalRuns: externalRunStore,
+    isDisposed: () => disposed,
+    lifetime: lifetime.signal,
+  })
 
   void mountManagementRemote(ctx, {
     isDisposed: () => disposed,
@@ -697,6 +710,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       const runClosings = [...runs].map(async run => {
         try {
           await run.dispose()
+          // Successful disposal settles the run; also drain its history observer.
+          // A broken disposer must not block all remaining storage cleanup.
+          await run.result
         } catch (error) {
           ctx.logger.warn(
             `rolesubagents: could not stop external run ${run.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -721,6 +737,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       return Promise.allSettled([...runClosings, ...currentRefreshes])
         .then(async () => {
           await auditClosing
+          await externalRunStore
+            .close()
+            .catch(() => ctx.logger.warn('rolesubagents: could not close external run history storage'))
           await state.close()
         })
         .catch(() => ctx.logger.warn('rolesubagents: could not close Session role storage'))

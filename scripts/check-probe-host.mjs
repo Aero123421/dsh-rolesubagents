@@ -6,6 +6,8 @@
  */
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { readFile, writeFile } from 'node:fs/promises'
+import { pathToFileURL } from 'node:url'
 import { createRequire, registerHooks } from 'node:module'
 import { resolve } from 'node:path'
 import { isolateCheckEnvironment } from './check-environment.mjs'
@@ -26,8 +28,22 @@ try {
   const { default: Registry } = await import('@deepseek-ai/dsh-typert-registry')
   const { mountProbeService } = await import('../src/host/external/probe-service.ts')
   const { mountManagementRemote } = await import('../src/host/management/remote.ts')
-  const { mountRoleDisplayService } = await import('../src/host/role-display-service.ts')
+  // Exercise the actual shipping artifact, not source TS: esbuild can rename wire-visible
+  // parameters through lexical shadowing even when minification is disabled.
+  const hostBundle = await readFile(new URL('../lib/index.js', import.meta.url), 'utf8')
+  assert.match(hostBundle, /async externalRuns\(parentSessionId, signal\)/)
+  assert.match(hostBundle, /async query\(childIds, signal\)/)
+  const fixtureBundle = resolve(isolated.home, 'rolesubagents-bundled-wire.mjs')
+  // Append only a fixture export. The production service code is not rebuilt or rewritten.
+  await writeFile(
+    fixtureBundle,
+    `${hostBundle}\nexport { mountRoleDisplayService as fixtureMountRoleDisplayService };\n`,
+    { flag: 'wx', mode: 0o600 },
+  )
+  const { fixtureMountRoleDisplayService: mountRoleDisplayService } = await import(pathToFileURL(fixtureBundle).href)
   const { roleDisplayCaller } = await import('../src/client/role-display.ts')
+  const { externalRunsCaller } = await import('../src/client/external-runs.ts')
+  const { createExternalRunStore } = await import('../src/host/external/observability.ts')
   const { managementSettings } = await import('../src/host/management/settings.ts')
   const { probeFailureOf } = await import('../src/client/controller.ts')
   const routes = new Map()
@@ -303,7 +319,25 @@ try {
       signal: AbortSignal.timeout(5000),
     })
   await assert.rejects(displayCall(['saved-child']), error => probeFailureOf(error) === 'endpoint-unavailable')
+  const externalHistory = createExternalRunStore(() => undefined)
+  for (const parentSessionId of ['fixture-parent', 'other-parent']) {
+    externalHistory.start({
+      id: `run-${parentSessionId}`,
+      parentSessionId,
+      roleId: 'reviewer',
+      cli: 'codex',
+      model: 'fixture-model',
+      label: 'fixture work',
+      startedAt: new Date().toISOString(),
+    })
+    externalHistory.finish(`run-${parentSessionId}`, 'succeeded', {
+      stopReason: 'completed',
+      output: [{ type: 'text', text: `Final answer for ${parentSessionId}` }],
+      diagnostic: 'SYNTHETIC_PRIVATE_LOG',
+    })
+  }
   await mountRoleDisplayService(ctx, {
+    externalRuns: externalHistory,
     state: {
       ready: Promise.resolve(),
       readRoleById: id => (id === 'saved-child' || id === 'external-activation' ? displayRole : undefined),
@@ -341,6 +375,49 @@ try {
   console.log(
     'PASS role-display actual client caller → HTTP → Gateway → Remote: positional saved identities, metadata allowlist, batch/ID bounds, authentication and Origin fence',
   )
+  const externalEndpoint = 'rolesubagentsRoleDisplay/externalRuns'
+  const externalCall = parentSessionId =>
+    client.connection.rpc.call('/api', externalEndpoint, { args: { parentSessionId } }, AbortSignal.timeout(5000))
+  const externalInvoke = (headers = {}) =>
+    fetch(`${origin}/api/${externalEndpoint}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, ...headers },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'external-runs-check',
+        method: externalEndpoint,
+        payload: { args: { parentSessionId: 'fixture-parent' } },
+      }),
+      signal: AbortSignal.timeout(5000),
+    })
+  // Direct calls have no gateway principal; authenticated HTTP injects the real owner invocation.
+  await assert.rejects(
+    ctx.get('rolesubagentsRoleDisplay').externalRuns('fixture-parent', AbortSignal.timeout(5000)),
+    /access denied/,
+  )
+  const externalAnswer = await externalRunsCaller(client)('fixture-parent', AbortSignal.timeout(5000))
+  assert.equal(externalAnswer.durable, false)
+  assert.equal(externalAnswer.runs.length, 1)
+  assert.equal(externalAnswer.runs[0].id, 'run-fixture-parent')
+  assert.equal(externalAnswer.runs[0].status, 'succeeded')
+  assert.equal(externalAnswer.runs[0].resultText, 'Final answer for fixture-parent')
+  assert(!JSON.stringify(externalAnswer).includes('other-parent'))
+  assert(!JSON.stringify(externalAnswer).includes('SYNTHETIC_PRIVATE_LOG'))
+  assert.deepEqual((await externalCall('unknown-parent')).value.runs, [])
+  assert.equal((await externalCall('../parent')).ok, false)
+  assert.equal(
+    (await client.connection.rpc.call('/api', externalEndpoint, { args: { childIds: [] } }, AbortSignal.timeout(5000)))
+      .error.code,
+    'gateway/arguments-invalid',
+  )
+  assert.equal((await externalInvoke({ cookie: '' })).status, 401)
+  assert.equal((await externalInvoke({ origin: 'https://untrusted.invalid' })).status, 403)
+  console.log(
+    'PASS external-runs actual client caller → HTTP → Gateway owner invocation: parent scope, final result, argument validation, ownerless denial and Origin fence',
+  )
+  console.log(
+    'PASS shipping lib/index.js bundled query/externalRuns preserve literal signal and execute via actual Gateway',
+  )
   const displayRuntime = [...ctx.registry.values()].find(
     runtime =>
       runtime.name === 'RolesubagentsRoleDisplayService' || runtime.callback.name === 'RolesubagentsRoleDisplayService',
@@ -349,6 +426,8 @@ try {
   assert(displayFiber, 'role-display must have a disposable native service fiber')
   displayLifetime.abort()
   assert.equal((await displayCall(['saved-child'])).ok, false)
+  await assert.rejects(externalRunsCaller(client)('fixture-parent', AbortSignal.timeout(5000)), /unavailable/)
+  await externalHistory.close()
   await displayFiber.dispose()
   assert.equal(ctx.get('rolesubagentsRoleDisplay'), undefined)
   assert.deepEqual(Object.keys(await roleDisplayCaller(client)(['saved-child'], AbortSignal.timeout(5000))), [])
