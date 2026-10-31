@@ -1,7 +1,7 @@
 {
   "name": "dsh-rolesubagents",
-  "version": "0.2.1",
-  "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, run them in DSH or on external coding-agent CLIs (Codex CLI, Claude Code, Antigravity CLI, OpenCode), and let the parent pick one per delegation.",
+  "version": "0.6.1",
+  "description": "Role-based subagents for DeepSeek Harness: define worker, reviewer and other roles with their own model, instructions, context (fresh or fork) and read-only mode, run them in DSH or on external coding-agent CLIs (Codex CLI, Claude Code, Antigravity CLI, OpenCode, Grok Build, Pi), and let the parent pick one per delegation.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -13,7 +13,9 @@
     "codex",
     "claude-code",
     "antigravity",
-    "opencode"
+    "opencode",
+    "grok-build",
+    "pi-coding-agent"
   ],
   "license": "MIT",
   "homepage": "https://github.com/Aero123421/dsh-rolesubagents#readme",
@@ -41,6 +43,24 @@
     "README.ja.md",
     "LICENSE",
     "docs/external-cli.md",
+    "docs/cli-compatibility.md",
+    "docs/dsh-compatibility-20261029.md",
+    "docs/external-cli-validation-20261022.md",
+    "docs/codex-local-regression-20261022.md",
+    "docs/grok-sandbox-upstream-review.md",
+    "docs/grok-sandbox-investigation.md",
+    "docs/host-confined-cli-validation.md",
+    "docs/lifecycle-validation-20261024.md",
+    "docs/external-unload-validation-20261026.md",
+    "docs/role-catalog.md",
+    "docs/releases/v0.6.0.md",
+    "docs/releases/v0.6.1.md",
+    "docs/role-catalog-validation-20261024.md",
+    "docs/role-catalog-evidence/",
+    "docs/role-management.md",
+    "docs/role-management-validation-20261023.md",
+    "docs/role-management-evidence/",
+    "docs/cli-evidence/",
     "CHANGELOG.md"
   ],
   "dsh": {
@@ -64,16 +84,22 @@
     "typecheck": "tsc -p tsconfig.host.json && tsc -p tsconfig.client.json && tsc -p tsconfig.test.json",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "test": "vitest run",
+    "test": "node scripts/test-isolated.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm test && node scripts/check-lib.mjs",
     "check:lib": "node scripts/check-lib.mjs",
     "check:host": "node scripts/check-workflow-host.mjs",
-    "check:cli": "node scripts/check-cli.mjs"
+    "check:delegation": "node scripts/check-delegation-host.mjs",
+    "check:catalog-browser": "node scripts/check-role-catalog-browser.mjs",
+    "check:cli": "node scripts/check-cli.mjs",
+    "check:probe": "node scripts/check-probe-host.mjs",
+    "check:sandbox": "node scripts/check-host-sandbox.mjs",
+    "check:management": "node scripts/check-role-management-host.mjs",
+    "compare:cli": "node scripts/compare-cli-evidence.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-storage-domain": ">=0.2.1-alpha.3 <0.3.0-0",
-    "@deepseek-ai/dsh-tools": ">=0.2.1-alpha.3 <0.3.0-0",
-    "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-alpha.3 <0.3.0-0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.2.1-alpha.3 <0.3.0-0 || 0.2.2-alpha.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-alpha.3 <0.3.0-0 || 0.2.2-alpha.2",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-alpha.3 <0.3.0-0 || 0.2.2-alpha.2",
     "@deepseek-ai/schemastery": ">=3.18.5-alpha.2 <4.0.0-0"
   },
   "peerDependenciesMeta": {
@@ -91,17 +117,20 @@
     "@types/react": "18.3.31",
     "@types/react-dom": "18.3.7",
     "esbuild": "0.28.2",
-    "happy-dom": "21.0.1",
+    "happy-dom": "21.0.4",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.11",
-    "zod": "4.4.3",
+    "vitest": "4.1.12",
+    "zod": "4.6.7",
     "@deepseek-ai/dsh-llm": "0.2.1-alpha.3",
     "@deepseek-ai/dsh-typert-protocol": "0.2.1-alpha.3"
   },
   "packageManager": "pnpm@10.28.0",
   "pnpm": {
+    "overrides": {
+      "zod": "4.6.7"
+    },
     "onlyBuiltDependencies": [
       "esbuild"
     ]

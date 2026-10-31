@@ -21,11 +21,23 @@ import { ID_MAX_LENGTH, type Issue } from './draft.ts'
 const en = {
   'master.label': 'Subagents',
   'master.hint':
-    'Turns role-based subagents and the workflow default model on or off for new sessions. The depth limit and parallelism are set in the official Subagent settings.',
+    'Turns role-based subagents and the workflow default model on or off for new root conversations. The depth limit and parallelism are set in the official Subagent settings.',
+
+  'management.label': 'Allow AI role management',
+  'management.hint':
+    'Grants eligible parent sessions permission to administer role configuration for this Host/profile, including ordinary workspace-write parents. Children do not inherit it. It does not allow CLI installation or updates, authentication changes, or changes to this permission itself.',
+  'management.immediate':
+    'Saved immediately, separately from role edits. The switch shows only the Host-accepted permission.',
+  'management.noRevision': 'A current Host settings revision is required to change this permission.',
+  'management.saving': 'Saving AI role-management permission…',
+  'management.saved': 'AI role-management permission saved.',
+  'management.failed': 'Could not confirm the permission change. The switch shows the Host’s current value; try again.',
+  'management.conflict':
+    'Settings changed before this permission could be saved. The switch shows the Host’s current value; try again.',
 
   'workflow.heading': 'Workflow model',
   'workflow.hint':
-    "Explicit workflow model overrides take priority over this setting, then the parent's model. Clear the provider to fall back to the parent unless the workflow specifies a model. This setting is captured per session; changes apply to new sessions only.",
+    "Explicit workflow model overrides take priority over this setting, then the parent's model. Clear the provider to fall back to the parent unless the workflow specifies a model. This setting is captured per session; changes apply to new root conversations only.",
   'issue.workflowModel': 'The workflow model needs both a provider and a model, or both empty.',
 
   'roles.heading': 'Roles',
@@ -96,8 +108,18 @@ const en = {
   'ed.modelParentNote': "Leave the provider empty to use the parent's model.",
   'ed.catalogLoading': 'Loading models…',
   'ed.catalogFailed': 'The model list is unavailable. Type the IDs instead.',
+  'ed.catalogStale': 'Could not refresh models; the previous list is shown.',
+  'ed.catalogEmpty': 'No models were listed. Type the IDs instead.',
   'ed.catalogPartial': 'Some providers could not be listed.',
   'ed.retry': 'Retry',
+  'ed.modelManual': 'Enter model IDs manually',
+  'ed.modelChoose': 'Choose from model list',
+  'ed.refreshModels': 'Refresh DSH models',
+  'ed.retryModels': 'Retry models',
+  'ed.refreshPresets': 'Refresh presets',
+  'ed.retryPresets': 'Retry presets',
+  'ed.presetChoose': 'Choose from preset list',
+  'ed.presetFailed': 'Preset list unavailable. Enter an ID or retry.',
   'ed.preset': 'Agent preset',
   'ed.presetNone': 'None',
   'ed.presetHelp':
@@ -128,6 +150,8 @@ const en = {
   'ed.permissionReadOnly': 'Read-only roles can use only a read-only preset.',
   'ed.permissionOption': '{name} — {access}',
   'confinement.os-sandbox': "Enforced by {cli}'s sandbox, which also covers its shell commands.",
+  'confinement.host-sandbox':
+    'Runs the entire {cli} CLI through the Host DSH sandbox, allowing workspace and sandbox temporary writes. Older kernels may provide partial enforcement, reported in the result. Uses private per-run settings/model state and static API-key credentials; browser sign-ins and full global resources require the native preset. This is the same path-based file policy as parent DSH tools: existing hard-link aliases can share writes across roots. Network/process access is not restricted.',
   'confinement.tool-scope': "Enforced by {cli}'s own tool permissions (no operating-system sandbox).",
   'confinement.tool-scope-write':
     "Enforced by {cli}'s own tool permissions (no operating-system sandbox), so a delegation is refused when its working directory contains a symbolic link that leads outside the workspace.",
@@ -152,8 +176,17 @@ const en = {
 
   'preset.read-only': 'Read-only',
   'preset.workspace-write': 'Workspace write',
+  'preset.host-workspace': 'DSH-confined workspace (private CLI state)',
   'preset.danger-full-access': 'Full access (no sandbox)',
   'preset.acceptEdits': 'Edit files (no shell)',
+  'preset.nativeAcceptEdits': 'Native accept-edits (keep settings and extensions)',
+  'preset.native': 'Native harness (keep settings and extensions)',
+  'confinement.native':
+    "Keeps {cli}'s native tools, settings and extensions. The adapter does not select or verify an OS sandbox, so an explicitly full-access parent is required; native CLI restrictions may still apply. It does not enable bypass-permissions. No whole-workspace scan is required.",
+  'ed.readOnlyHelp.grok-build':
+    'Grok Build provides official OS sandbox profiles, but this adapter has not verified their effective restrictions. Its native preset does not select a sandbox, so read-only roles are currently unsupported.',
+  'ed.readOnlyHelp.pi':
+    'Pi has no built-in OS permission boundary for arbitrary native extensions. Selecting read tools alone does not confine extension code, so read-only roles are unsupported.',
   'preset.auto': 'Auto (classifier)',
   'preset.bypassPermissions': 'Bypass permissions',
   'preset.edit-files': 'Edit files (no shell)',
@@ -161,6 +194,28 @@ const en = {
   'access.read-only': 'no file changes',
   'access.workspace-write': 'edits in the workspace',
   'access.full-access': 'no restrictions',
+  'access.native': 'requires full-access parent; native CLI checks apply',
+
+  'models.refresh': 'Refresh models',
+  'models.refreshing': 'Refreshing models…',
+  'models.aliases': 'Built-in Claude aliases, not live model discovery. Availability depends on your Claude account.',
+  'models.unsupported':
+    'Live model discovery is not supported for this CLI. Enter a model ID manually; connection tests do not discover models.',
+  'models.live': 'Source: models returned by the saved CLI connection probe.',
+  'models.static':
+    'Source: built-in fallback suggestions (if available), not verified live. Model IDs remain editable.',
+  'models.explicit':
+    'Refresh runs the existing connection probe using saved settings, only when requested. No automatic discovery.',
+  'models.unchecked': 'Models have not been checked in this page session.',
+  'models.checked': 'Last check (UTC): {time}',
+  'models.good': 'Last successful model list (UTC): {time}',
+  'models.empty':
+    'The check returned no usable model list. Check CLI installation, sign-in and model-list support, then retry. You can still type a model ID.',
+  'models.timeout':
+    'The CLI model-list command timed out. Check the CLI connection and retry; any last successful list is retained.',
+  'models.unavailable':
+    'The CLI model-list command failed. Check CLI sign-in and model-list support, then retry; any last successful list is retained.',
+  'models.retained': 'Showing the last successful model list; it may be out of date.',
 
   'clis.heading': 'External CLIs',
   'clis.hint':
@@ -188,14 +243,36 @@ const en = {
   'probe.noSubprocess': 'This Host cannot start programs for plugins, so CLI roles cannot run here.',
   'probe.checksFailed': 'The version and sign-in checks did not answer.',
   'probe.error': 'The test could not run. Check the connection and try again.',
+  'probe.connection-unavailable':
+    'The Web connection service is unavailable or still loading. Retry when connected; this does not mean the CLI is missing.',
+  'probe.remote-unavailable':
+    'The Host reports that the diagnostic Remote service or method is unavailable. Check plugin compatibility or retry after loading. Role settings and delegation are independent.',
+  'probe.endpoint-unavailable':
+    'The diagnostic endpoint returned HTTP 404. The Gateway or Remote endpoint may be unavailable; this response cannot distinguish them. Check compatibility and retry.',
+  'probe.host-auth':
+    'The Host denied access to diagnostics. Check your DSH sign-in or access permissions, not the CLI credentials, then retry.',
+  'probe.transport':
+    'Diagnostics could not reach the Host reliably. Check the connection and retry; the CLI installation has not been determined.',
+  'probe.malformed': 'The Host returned an invalid diagnostic response. Check Web/Host/plugin compatibility and retry.',
+  'probe.remote-error':
+    'The Host diagnostic service reported an error. Retry or check Host logs. This does not establish that the CLI is missing.',
 
   'foot.clean': 'No changes',
   'foot.unsaved': 'Unsaved changes',
   'foot.save': 'Save',
   'foot.saving': 'Saving…',
   'foot.discard': 'Discard',
-  'foot.saved': 'Saved. Changes apply to new sessions; running sessions keep their roles and workflow default model.',
+  'foot.saved':
+    'Saved. New root conversations use these settings. AI can explicitly use apply_current to update its own roles for future delegations, never existing children. Running sessions keep their workflow default model.',
   'foot.failed': 'Could not save. Check the connection and try again.',
+  'foot.role-save-unconfirmed':
+    'The Host accepted the save, but the current settings view has not confirmed it. Your draft is retained. Check the latest settings before retrying; the write may already be committed.',
+  'foot.expression-backed-role-settings':
+    'Executable expressions or other unsupported role settings cannot be safely saved from this page. Edit the native profile configuration instead. Your draft is unchanged.',
+  'foot.role-write-safety-unavailable':
+    'The Host could not confirm that these role settings are safe to write. Nothing was written by this attempt; check the connection or Host support and try again.',
+  'foot.role-write-safety-conflict':
+    'Settings changed before role-write safety could be confirmed. Nothing was written by this attempt; review the current settings and try again.',
   'foot.conflict': 'The settings changed on the Host after you started editing, so nothing was saved.',
   'foot.reload': 'Reload latest settings',
   'foot.fix': 'Fix these before saving:',
@@ -248,11 +325,22 @@ export type Key = keyof typeof en
 const ja: Record<Key, string> = {
   'master.label': 'サブエージェント',
   'master.hint':
-    '新しいセッションでロール別サブエージェントとワークフローの既定モデルを使うかどうかを切り替えます。深さの上限と並列数は、公式のサブエージェント設定で変更します。',
+    '新しい親の会話でロール別サブエージェントとワークフローの既定モデルを使うかどうかを切り替えます。深さの上限と並列数は、公式のサブエージェント設定で変更します。',
+
+  'management.label': 'AIによるロール管理を許可',
+  'management.hint':
+    'このHost／プロファイルのロール設定を管理する権限を、対象の親セッションに与えます。通常のworkspace-writeの親でも利用でき、子には継承しません。CLIの導入・更新、認証設定、この許可自体の変更はできません。',
+  'management.immediate': 'ロールの編集とは別に即時保存します。スイッチにはHostが受理した許可だけを表示します。',
+  'management.noRevision': 'この許可を変更するには、Hostの現在の設定リビジョンが必要です。',
+  'management.saving': 'AIによるロール管理の許可を保存しています…',
+  'management.saved': 'AIによるロール管理の許可を保存しました。',
+  'management.failed': '許可の変更を確認できませんでした。スイッチはHostの現在値です。再試行してください。',
+  'management.conflict':
+    '許可を保存する前に設定が変更されました。スイッチはHostの現在値です。確認して再試行してください。',
 
   'workflow.heading': 'ワークフローのモデル',
   'workflow.hint':
-    'ワークフローでの明示的なモデル指定、この設定、親のモデルの順に優先します。プロバイダーを空にすると、明示指定がない限り親のモデルを使います。この設定はセッションごとに保持され、変更は新しいセッションにのみ適用されます。',
+    'ワークフローでの明示的なモデル指定、この設定、親のモデルの順に優先します。プロバイダーを空にすると、明示指定がない限り親のモデルを使います。この設定はセッションごとに保持され、変更は新しい親の会話にのみ適用されます。',
   'issue.workflowModel': 'ワークフローのモデルは、プロバイダーとモデルの両方を指定するか、両方を空にしてください。',
 
   'roles.heading': 'ロール',
@@ -321,8 +409,18 @@ const ja: Record<Key, string> = {
   'ed.modelParentNote': 'プロバイダーを空にすると、親と同じモデルを使います。',
   'ed.catalogLoading': 'モデルを読み込み中…',
   'ed.catalogFailed': 'モデル一覧を利用できません。IDを直接入力してください。',
+  'ed.catalogStale': 'モデル一覧を更新できなかったため、前回の一覧を表示しています。',
+  'ed.catalogEmpty': 'モデル一覧は空です。IDを直接入力してください。',
   'ed.catalogPartial': '一部のプロバイダーは一覧に表示できませんでした。',
   'ed.retry': '再試行',
+  'ed.modelManual': 'モデルIDを直接入力',
+  'ed.modelChoose': 'モデル一覧から選ぶ',
+  'ed.refreshModels': 'DSHモデル一覧を更新',
+  'ed.retryModels': 'モデル一覧を再取得',
+  'ed.refreshPresets': 'プリセット一覧を更新',
+  'ed.retryPresets': 'プリセット一覧を再取得',
+  'ed.presetChoose': 'プリセット一覧から選ぶ',
+  'ed.presetFailed': 'プリセット一覧を取得できません。IDを入力するか再取得してください。',
   'ed.preset': 'エージェントプリセット',
   'ed.presetNone': '使用しない',
   'ed.presetHelp':
@@ -354,6 +452,8 @@ const ja: Record<Key, string> = {
   'ed.permissionReadOnly': '読み取り専用のロールでは、読み取り専用のプリセットだけを選べます。',
   'ed.permissionOption': '{name} — {access}',
   'confinement.os-sandbox': '{cli} のサンドボックスで制限します（シェルコマンドも対象です）。',
+  'confinement.host-sandbox':
+    '{cli} CLI全体をホストDSHのsandbox内で実行し、ワークスペースとsandboxの一時領域への書き込みを許可します。古いカーネルでは部分施行となり結果に明記します。実行専用の設定・モデル情報と静的APIキーを利用し、ブラウザ認証や完全なグローバル資源はnativeが必要です。親DSHと同じパス単位の権限であり、既存のハードリンクは境界外の同一ファイルと書き込みを共有し得ます。ネットワーク・プロセスは制限しません。',
   'confinement.tool-scope': '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。',
   'confinement.tool-scope-write':
     '{cli} 自身のツール権限で制限します（OS のサンドボックスは使いません）。そのため、作業ディレクトリにワークスペースの外を指すシンボリックリンクがあると、委譲を拒否します。',
@@ -378,8 +478,17 @@ const ja: Record<Key, string> = {
 
   'preset.read-only': '読み取り専用',
   'preset.workspace-write': 'ワークスペースへの書き込み',
+  'preset.host-workspace': 'DSH制限付きワークスペース（実行専用CLI状態）',
   'preset.danger-full-access': 'フルアクセス（サンドボックスなし）',
   'preset.acceptEdits': 'ファイル編集のみ（シェルなし）',
+  'preset.nativeAcceptEdits': 'ネイティブ編集（設定・拡張を維持）',
+  'preset.native': 'ネイティブハーネス（設定・拡張を維持）',
+  'confinement.native':
+    '{cli} 本来のツール・設定・拡張を維持します。アダプターはOSサンドボックスを指定・検証しないため、明示的にフルアクセスにした親が必要です。CLI側の制限が適用される場合もあります。権限確認の一括省略は有効にせず、ワークスペース全体の走査も行いません。',
+  'ed.readOnlyHelp.grok-build':
+    'Grok Build には公式OSサンドボックスがありますが、このアダプターでは実効制限を未検証です。native はサンドボックスを指定しないため、現在は読み取り専用ロールに未対応です。',
+  'ed.readOnlyHelp.pi':
+    'Pi は任意のネイティブ拡張を隔離する標準のOS権限境界を持ちません。読み取りツールだけを選んでも拡張コードを制限できないため、読み取り専用ロールに未対応です。',
   'preset.auto': '自動判定',
   'preset.bypassPermissions': '権限確認をすべて省略',
   'preset.edit-files': 'ファイル編集のみ（シェルなし）',
@@ -387,6 +496,26 @@ const ja: Record<Key, string> = {
   'access.read-only': 'ファイルを変更しない',
   'access.workspace-write': 'ワークスペース内を編集',
   'access.full-access': '制限なし',
+  'access.native': '親はフルアクセス必須・CLI本来の権限設定に従う',
+
+  'models.refresh': 'モデルを更新',
+  'models.refreshing': 'モデルを更新中…',
+  'models.aliases': 'Claudeの組み込みエイリアスです。ライブ取得ではなく、利用可否はClaudeアカウントによります。',
+  'models.unsupported':
+    'このCLIのライブモデル取得には未対応です。モデルIDを直接入力してください。接続テストではモデルを取得しません。',
+  'models.live': '取得元: 保存済みCLI設定による接続テスト。',
+  'models.static': '取得元: 組み込みの候補（ある場合）。ライブ確認はしていません。モデルIDは直接編集できます。',
+  'models.explicit': '更新は明示操作時だけ、保存済み設定で既存の接続テストを実行します。自動取得はしません。',
+  'models.unchecked': 'この画面ではまだモデルを確認していません。',
+  'models.checked': '最終確認（UTC）: {time}',
+  'models.good': 'モデル一覧の最終取得成功（UTC）: {time}',
+  'models.empty':
+    '利用可能なモデル一覧を取得できませんでした。CLIの導入・認証・一覧取得への対応を確認し再試行してください。IDは直接入力できます。',
+  'models.timeout':
+    'CLIのモデル一覧コマンドがタイムアウトしました。接続を確認して再試行してください。最後に取得できた一覧は保持しています。',
+  'models.unavailable':
+    'CLIのモデル一覧コマンドが失敗しました。認証と一覧取得への対応を確認して再試行してください。最後に取得できた一覧は保持しています。',
+  'models.retained': '最後に取得できたモデル一覧を表示しています。古い可能性があります。',
 
   'clis.heading': '外部 CLI',
   'clis.hint':
@@ -414,6 +543,19 @@ const ja: Record<Key, string> = {
   'probe.noSubprocess': 'このホストではプラグインからプログラムを起動できないため、CLI のロールは実行できません。',
   'probe.checksFailed': 'バージョンとサインイン状態の確認に応答がありませんでした。',
   'probe.error': 'テストを実行できませんでした。接続を確認して、もう一度お試しください。',
+  'probe.connection-unavailable':
+    'Web の接続サービスが未提供、または読み込み中です。接続後に再試行してください。CLI の未検出を意味するものではありません。',
+  'probe.remote-unavailable':
+    'ホストの診断用 Remote サービスまたはメソッドを利用できません。プラグインの互換性を確認するか、読み込み後に再試行してください。役割設定・委任とは独立した診断です。',
+  'probe.endpoint-unavailable':
+    '診断先が HTTP 404 を返しました。Gateway または Remote の経路が利用できない可能性がありますが、この応答だけでは区別できません。互換性を確認して再試行してください。',
+  'probe.host-auth':
+    'ホストへの診断アクセスが拒否されました。CLI の認証ではなく、DSH のサインイン・アクセス権限を確認して再試行してください。',
+  'probe.transport':
+    'ホストとの診断通信に失敗しました。接続を確認して再試行してください。CLI のインストール状態は未確認です。',
+  'probe.malformed': 'ホストの診断応答が不正です。Web・ホスト・プラグインの互換性を確認して再試行してください。',
+  'probe.remote-error':
+    'ホストの診断サービスがエラーを返しました。再試行するかホストのログを確認してください。CLI がないとは断定できません。',
 
   'foot.clean': '変更はありません',
   'foot.unsaved': '未保存の変更があります',
@@ -421,8 +563,16 @@ const ja: Record<Key, string> = {
   'foot.saving': '保存中…',
   'foot.discard': '破棄',
   'foot.saved':
-    '保存しました。変更は新しいセッションに適用され、実行中のセッションは今のロールとワークフローの既定モデルのままです。',
+    '保存しました。設定は新しい親の会話に適用されます。AIが明示的にapply_currentを使うと、自分の今後の委任用ロールだけを更新でき、既存の子は変更しません。実行中セッションのワークフローの既定モデルは変わりません。',
   'foot.failed': '保存できませんでした。接続を確認して、もう一度お試しください。',
+  'foot.role-save-unconfirmed':
+    'Hostは保存を受け付けましたが、現在の設定表示では反映を確認できていません。入力は保持しています。既に保存済みの可能性があるため、再試行前に最新の設定を確認してください。',
+  'foot.expression-backed-role-settings':
+    '実行可能な式や、対応外の形式・規模を含むロール設定は、この画面から安全に保存できません。ネイティブのプロファイル設定で編集してください。入力中の内容は保持しています。',
+  'foot.role-write-safety-unavailable':
+    'Hostがロール設定を書き込んでよいか確認できませんでした。この試行では何も書き込んでいません。接続やHostの対応を確認して再試行してください。',
+  'foot.role-write-safety-conflict':
+    'ロールの書き込み安全性を確認する前に設定が変更されました。この試行では何も書き込んでいません。現在の設定を確認して再試行してください。',
   'foot.conflict': '編集を始めたあとにホスト側の設定が変更されたため、保存しませんでした。',
   'foot.reload': '最新の設定を読み込む',
   'foot.fix': '保存する前に次を修正してください:',
@@ -600,6 +750,7 @@ export function confinementHelp(t: Translator, cli: CliId, preset: string): stri
   const found = descriptor.permissions.find(entry => entry.id === preset)
   if (found === undefined) return ''
   const name = descriptor.displayName
+  if (found.nativeHarness) return t('confinement.native', { cli: name })
   if (found.confinement !== 'tool-scope') return t(`confinement.${found.confinement}`, { cli: name })
   if (found.access !== 'workspace-write') return t('confinement.tool-scope', { cli: name })
   const key =

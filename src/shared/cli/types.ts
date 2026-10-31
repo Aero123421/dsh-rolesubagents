@@ -9,10 +9,17 @@
  */
 
 /** Identifier of one supported external CLI. */
-export type CliId = 'codex' | 'claude-code' | 'agy' | 'opencode'
+export type CliId = 'codex' | 'claude-code' | 'agy' | 'opencode' | 'grok-build' | 'pi'
 
 /** Every supported CLI, in the order the editor lists them. */
-export const CLI_IDS: readonly CliId[] = Object.freeze(['codex', 'claude-code', 'agy', 'opencode'] as const)
+export const CLI_IDS: readonly CliId[] = Object.freeze([
+  'codex',
+  'claude-code',
+  'agy',
+  'opencode',
+  'grok-build',
+  'pi',
+] as const)
 
 /** How much a child may change. Ordered: read-only < workspace-write < full-access. */
 export type AccessLevel = 'read-only' | 'workspace-write' | 'full-access'
@@ -28,12 +35,14 @@ export const ACCESS_ORDER: Readonly<Record<AccessLevel, number>> = Object.freeze
  * What enforces a preset's limits:
  * - `os-sandbox`: an operating-system sandbox of the CLI (Codex), which also covers its shell commands
  *   and resolves symbolic links;
+ * - `host-sandbox`: DSH's configured process sandbox wraps the entire CLI; its enforcement metadata
+ *   is reported (including partial support on older kernels), with the same file-policy vocabulary as DSH;
  * - `tool-scope`: the CLI's own tool permissions (which tools exist, which paths they may write). Before a
  *   workspace-write run of such a preset the engine checks the workspace and refuses when the CLI's scope
  *   could reach outside it (see `docs/external-cli.md`);
  * - `none`: no limit (full access).
  */
-export type Confinement = 'os-sandbox' | 'tool-scope' | 'none'
+export type Confinement = 'os-sandbox' | 'host-sandbox' | 'tool-scope' | 'none'
 
 /** One CLI-native permission preset offered in the editor. */
 export interface PermissionPreset {
@@ -43,6 +52,8 @@ export interface PermissionPreset {
   readonly access: AccessLevel
   /** What enforces it. */
   readonly confinement: Confinement
+  /** Preserves native settings/extensions; never silently substitute a restricted harness for this choice. */
+  readonly nativeHarness?: boolean
 }
 
 /** Static description of one CLI. Pure data, shared by the Host and the browser. */
@@ -64,8 +75,8 @@ export interface CliDescriptor {
   readonly permissions: readonly PermissionPreset[]
   /** Preset a role gets when it switches to this CLI. */
   readonly defaultPermission: string
-  /** Preset used when the effective access must be lowered to a level. Every level maps to a preset of that level. */
-  readonly presetForAccess: Readonly<Record<AccessLevel, string>>
+  /** Preset used to lower access. Missing levels are unsupported and must be refused, never widened. */
+  readonly presetForAccess: Readonly<Partial<Record<AccessLevel, string>>>
   /** Where the role's instructions reach the CLI (documentation for the preview and README). */
   readonly instructionsChannel: 'system' | 'prompt'
   /**

@@ -1,0 +1,24 @@
+RUNTIME DSH 0.2.1-rc.2; Node 22.23.4; linux/x64
+SCOPE: actual installed Loader/Include/settings/ConfigEditor/file lock/atomic profile write/ToolRuntime/scopes; fixture agents, child backend, KV acknowledgement and LLM metadata only.
+PASS real Loader owner entry resolves standard namespace; management starts OFF
+PASS Gate-OFF literal safety uses real raw owner + local source Remote and permits guarded UI persistence
+PASS canonical settings ON exposes management without reloading source plugin
+PASS real scoped tool uses only stub registry metadata, no inference or CLI
+PASS actual inherited tool scopes hide child manager and direct captured calls cannot bypass caller guard
+PASS CRUD uses real atomic0600 profile persistence and does not silently refresh current delegate
+PASS explicit current refresh changes new enum, revokes old capture and leaves admitted children unchanged
+PASS OFF wins actual locked CAS after writer admission; stale manager cannot commit or execute
+PASS actual profile CAS preserves concurrent UI edit rather than retrying or overwriting
+PASS two AI plans at the same real revision admit exactly one atomic profile change
+PASS real scoped runtime rejects read-only writes but permits user fork lineage at depth zero
+PASS fresh real Loader/profile open recovers saved roles and starts a new root catalog
+PASS old owner-bound reader cannot address a fresh Loader instance with the same namespace
+PASS Gate-OFF opaque raw/resolved mismatch is rejected by local Remote + actual UI controller without writes or source disclosure
+PASS Gate-ON opaque blocks AI mutation and canonical role writer without materializing evaluated values
+PASS Gate-OFF roles-root raw/resolved mismatch is rejected by local Remote + actual UI controller without writes or source disclosure
+PASS Gate-ON roles-root blocks AI mutation and canonical role writer without materializing evaluated values
+PASS Gate-OFF config-root raw/resolved mismatch is rejected by local Remote + actual UI controller without writes or source disclosure
+PASS Gate-ON config-root blocks AI mutation and canonical role writer without materializing evaluated values
+PASS real bundle-inherited opaque expression is detected despite a literal empty user patch; UI and AI leave both layers unchanged
+REPORT {"schemaVersion":1,"recordedAt":"2026-10-23T09:44:20.055Z","runtime":{"dsh":"0.2.1-rc.2","node":"22.23.4","platform":"linux","arch":"x64"},"passes":20,"metadata":{"providers":2,"models":1,"info":1,"inference":0,"fixtureChildActivations":3},"syntaxCases":["opaque","roles-root","config-root","bundle-inherited-opaque"],"scope":"real Loader/settings/configEditor/fileLock/atomicProfile/ToolRuntime/scopes; local source Remote and actual UI controller","fixtures":["agents","child-backend","in-memory-KV-ack","LLM-metadata","HMR-scheduling-barrier","UI-form-transport-adapter"],"notVerified":["network-RPC-transport","KV-disk-durability","live-model-backend","CLI-file-enforcement","production-deployment"]}
+Completed 20 installed-Host management checks; no network/server/CLI/inference/installed profile changes.

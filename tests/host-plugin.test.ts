@@ -1,7 +1,7 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { apply, Config, inject, name } from '../src/host/index.ts'
-import type { HostContext } from '../src/host/ports.ts'
+import type { DomainPort, HostContext } from '../src/host/ports.ts'
 import { createRoleState, ROLE_RECORD, ROLES_RECORD } from '../src/host/state.ts'
 import {
   buildTool,
@@ -147,13 +147,13 @@ describe('module exports', () => {
     expect(config.roles.get()).toEqual(DEFAULT_ROLES)
   })
 
-  it('runs end to end on a parsed config, whose live fields are read through get()', () => {
+  it('runs end to end on a parsed config, whose live fields are read through get()', async () => {
     const world = fakeWorld()
     // The loader hands `apply` this parsed value untyped; schemastery's `Volatile<readonly any[]>` is only
     // structurally close to the `{ get(): unknown[] }` the plugin declares, hence the cast.
     apply(world.ctx, Config({}) as unknown as Partial<Config>)
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(roleEnum(registeredTool(agent))).toEqual(['general', 'fork', 'worker', 'explorer', 'reviewer'])
   })
 })
@@ -421,12 +421,12 @@ describe('delegate: execute', () => {
       })
     })
 
-    it('leaves reasoningEffort out when the role has none', async () => {
+    it('explicitly resets reasoningEffort when the role model has none', async () => {
       const { run, world } = withModels()
       await run({ role: 'quick' })
       const options = lastSpec(world).request.agentOptions
-      expect(options).toStrictEqual({ provider: 'deepseek', model: 'deepseek-chat' })
-      expect(options).not.toHaveProperty('reasoningEffort')
+      expect(options).toStrictEqual({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: undefined })
+      expect(options).toHaveProperty('reasoningEffort', undefined)
     })
 
     it('validates the model with llm.resolveCallConfig, passing the options and the call signal', async () => {
@@ -469,11 +469,12 @@ describe('delegate: execute', () => {
       expect(deps.pending.size).toBe(0)
     })
 
-    it('still starts the child when the Host has no llm service', async () => {
-      const { run, world } = withModels()
+    it('fails closed for a model role when the Host has no llm service', async () => {
+      const { run, world, deps } = withModels()
       delete world.services.llm
-      await run({ role: 'thinker' })
-      expect(lastSpec(world).request.agentOptions).toMatchObject({ model: 'deepseek-reasoner' })
+      await expect(run({ role: 'thinker' })).rejects.toThrow(/llm.*unavailable/)
+      expect(world.subagents.startActivation).not.toHaveBeenCalled()
+      expect(deps.pending.size).toBe(0)
     })
 
     it.each([
@@ -579,7 +580,8 @@ describe('delegate: execute', () => {
       })
       await run({ role: 'reviewer' })
       expect(during).toBe(1)
-      expect(seen?.role).toBe(REVIEWER)
+      expect(seen?.role).toEqual(REVIEWER)
+      expect(seen?.role).not.toBe(REVIEWER)
       expect(seen?.snapshot).toBe(settings)
       expect(deps.pending.size).toBe(0)
     })
@@ -814,7 +816,7 @@ describe('apply: top-level agents', () => {
   it('records a roles snapshot when the Session has none and registers the tool in the agent scope', async () => {
     const world = boot()
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     await world.settle()
     expect(snapshotRecords(world, agent.session)).toEqual([{ version: 1, settings: DEFAULT_SETTINGS }])
     expect(typesOf(agent.session)).toEqual([])
@@ -830,7 +832,7 @@ describe('apply: top-level agents', () => {
       roles: [GENERAL, FORK, { ...WORKER, description: ' '.repeat(2) + 'd'.repeat(2000) }, { id: 'Bad id' }],
     })
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     await world.settle()
     const snapshot = snapshotOf(world, agent.session)
     expect(snapshot?.roles.map(entry => entry.id)).toEqual(['general', 'fork', 'worker'])
@@ -842,7 +844,7 @@ describe('apply: top-level agents', () => {
     world.providers.set('my-spawn', fakeProvider('my-spawn'))
     world.providers.set('my-fork', fakeProvider('my-fork', { inheritsParentContext: true }))
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     await registeredTool(agent).execute({ ...ARGS, role: 'fork' }, execContext(agent))
     expect(lastSpec(world).provider).toBe('my-fork')
   })
@@ -850,8 +852,8 @@ describe('apply: top-level agents', () => {
   it('registers the tool once per agent, however often agent/created repeats', async () => {
     const world = boot()
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
-    world.emitCreated(agent, 'resume')
+    await world.emitCreated(agent)
+    await world.emitCreated(agent, 'resume')
     expect(agent.register).toHaveBeenCalledTimes(1)
     await world.settle()
     expect(snapshotRecords(world, agent.session)).toHaveLength(1)
@@ -861,7 +863,7 @@ describe('apply: top-level agents', () => {
     const live = { enabled: true, roles: ROLES as unknown[] }
     const world = boot({ enabled: { get: () => live.enabled }, roles: { get: () => live.roles } })
     const first = world.newAgent('first')
-    world.emitCreated(first)
+    await world.emitCreated(first)
     expect(roleEnum(registeredTool(first))).toEqual(['general', 'fork', 'worker', 'reviewer'])
 
     live.enabled = false
@@ -869,7 +871,7 @@ describe('apply: top-level agents', () => {
 
     // The same Session meets the plugin again (a resumed Agent object): it keeps what it recorded.
     const resumed = fakeAgent('first-again', first.session)
-    world.emitCreated(resumed, 'resume')
+    await world.emitCreated(resumed, 'resume')
     expect(roleEnum(registeredTool(resumed))).toEqual(['general', 'fork', 'worker', 'reviewer'])
     expect(registeredTool(resumed).description).toBe(registeredTool(first).description)
     await world.settle()
@@ -877,21 +879,21 @@ describe('apply: top-level agents', () => {
 
     // A Session created after the change gets the new settings: the master switch is off, so no tool at all.
     const later = world.newAgent('later')
-    world.emitCreated(later)
+    await world.emitCreated(later)
     expect(later.register).not.toHaveBeenCalled()
     expect(snapshotRecords(world, later.session)).toEqual([
       { version: 1, settings: expect.objectContaining({ enabled: false }) },
     ])
   })
 
-  it('gives a later Session the new roles when the config changes', () => {
+  it('gives a later Session the new roles when the config changes', async () => {
     const live = { roles: ROLES as unknown[] }
     const world = boot({ roles: { get: () => live.roles } })
     const first = world.newAgent('first')
-    world.emitCreated(first)
+    await world.emitCreated(first)
     live.roles = [GENERAL, FORK, role('only-new')]
     const second = world.newAgent('second')
-    world.emitCreated(second)
+    await world.emitCreated(second)
     expect(roleEnum(registeredTool(first))).toEqual(['general', 'fork', 'worker', 'reviewer'])
     expect(roleEnum(registeredTool(second))).toEqual(['general', 'fork', 'only-new'])
   })
@@ -899,7 +901,7 @@ describe('apply: top-level agents', () => {
   it('registers no tool when the master switch is off, but still records the snapshot', async () => {
     const world = boot({ enabled: false })
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(agent.register).not.toHaveBeenCalled()
     await world.settle()
     expect(snapshotRecords(world, agent.session)).toEqual([
@@ -907,28 +909,28 @@ describe('apply: top-level agents', () => {
     ])
   })
 
-  it('reads the master switch from a live reference too', () => {
+  it('reads the master switch from a live reference too', async () => {
     const world = boot({ enabled: { get: () => false } })
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(agent.register).not.toHaveBeenCalled()
   })
 
-  it('registers no tool when every role is switched off', () => {
+  it('registers no tool when every role is switched off', async () => {
     const world = boot({ roles: ROLES.map(entry => ({ ...entry, enabled: false })) })
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(agent.register).not.toHaveBeenCalled()
   })
 
-  it('builds the tool from the recorded snapshot when a Session already has one, without recording another', () => {
+  it('builds the tool from the recorded snapshot when a Session already has one, without recording another', async () => {
     const world = boot({ roles: [GENERAL, FORK, role('from-config')] })
     const agent = world.newAgent('main')
     const first = fakeAgent('seed', agent.session)
-    world.emitCreated(first)
+    await world.emitCreated(first)
     const recorded = snapshotRecords(world, agent.session)
     const second = fakeAgent('second', agent.session)
-    world.emitCreated(second)
+    await world.emitCreated(second)
     expect(snapshotRecords(world, agent.session)).toEqual(recorded)
     expect(roleEnum(registeredTool(second))).toEqual(['general', 'fork', 'from-config'])
   })
@@ -956,42 +958,42 @@ describe('apply: top-level agents', () => {
 })
 
 describe('apply: settings problems', () => {
-  it('logs adjusted settings once, not again for the same problem, and again after the config was clean in between', () => {
+  it('logs adjusted settings once, not again for the same problem, and again after the config was clean in between', async () => {
     const bad = [GENERAL, FORK, WORKER, { ...WORKER, description: 'copy' }]
     const live = { roles: bad as unknown[] }
     const world = fakeWorld()
     apply(world.ctx, { roles: { get: () => live.roles } })
     const open = (id: string) => world.emitCreated(world.newAgent(id))
 
-    open('a')
+    await open('a')
     expect(world.logger.warn).toHaveBeenCalledTimes(1)
     expect(world.logger.warn).toHaveBeenCalledWith(
       'rolesubagents: settings adjusted: role id "worker" is used more than once',
     )
-    open('b')
+    await open('b')
     expect(world.logger.warn).toHaveBeenCalledTimes(1)
 
     live.roles = ROLES
-    open('c')
+    await open('c')
     expect(world.logger.warn).toHaveBeenCalledTimes(1)
 
     live.roles = bad
-    open('d')
+    await open('d')
     expect(world.logger.warn).toHaveBeenCalledTimes(2)
   })
 
-  it('does not log anything for clean settings', () => {
+  it('does not log anything for clean settings', async () => {
     const world = fakeWorld()
     apply(world.ctx)
-    world.emitCreated(world.newAgent('main'))
+    await world.emitCreated(world.newAgent('main'))
     expect(world.logger.warn).not.toHaveBeenCalled()
     expect(world.logger.info).not.toHaveBeenCalled()
   })
 
-  it('joins several problems into one message', () => {
+  it('joins several problems into one message', async () => {
     const world = fakeWorld()
     apply(world.ctx, { roles: [WORKER] })
-    world.emitCreated(world.newAgent('main'))
+    await world.emitCreated(world.newAgent('main'))
     expect(world.logger.warn).toHaveBeenCalledTimes(1)
     const message = String(world.logger.warn.mock.calls[0]?.[0])
     expect(message).toContain('built-in role "general" was missing')
@@ -1000,11 +1002,11 @@ describe('apply: settings problems', () => {
 })
 
 describe('apply: child agents started by the tool', () => {
-  function boot(config: Partial<Config> = {}) {
+  async function boot(config: Partial<Config> = {}) {
     const world = fakeWorld()
     apply(world.ctx, { roles: ROLES, ...config })
     const parent = world.newAgent('parent')
-    world.emitCreated(parent)
+    await world.emitCreated(parent)
     const delegate = async (roleId: string | undefined, extra: Record<string, unknown> = {}) => {
       const args = { ...ARGS, ...(roleId === undefined ? {} : { role: roleId }), ...extra }
       const result = await registeredTool(parent).execute(args, execContext(parent))
@@ -1026,7 +1028,7 @@ describe('apply: child agents started by the tool', () => {
   }
 
   it('pins the read-only sandbox first, then writes the role record and the roles snapshot', async () => {
-    const { world, delegate, lastChild } = boot()
+    const { world, delegate, lastChild } = await boot()
     const result = await delegate('reviewer')
     const child = lastChild()
     expect(result).toEqual({ kind: 'activation', subagentId: child.id })
@@ -1038,7 +1040,7 @@ describe('apply: child agents started by the tool', () => {
   })
 
   it('does not touch the sandbox for roles that are not read-only', async () => {
-    const { delegate, lastChild } = boot()
+    const { delegate, lastChild } = await boot()
     for (const roleId of ['worker', 'general', 'fork']) {
       await delegate(roleId)
       expect(typesOf(lastChild().session)).toEqual([])
@@ -1046,13 +1048,13 @@ describe('apply: child agents started by the tool', () => {
   })
 
   it('treats an omitted role as the built-in general role', async () => {
-    const { world, delegate, lastChild } = boot()
+    const { world, delegate, lastChild } = await boot()
     await delegate(undefined)
     expect(roleOf(world, lastChild().session)).toMatchObject({ id: 'general', builtin: 'general' })
   })
 
   it('registers the same tool in the child scope as in the parent scope', async () => {
-    const { delegate, lastChild, parent } = boot()
+    const { delegate, lastChild, parent } = await boot()
     await delegate('worker')
     const child = lastChild()
     expect(child.register).toHaveBeenCalledTimes(1)
@@ -1067,7 +1069,7 @@ describe('apply: child agents started by the tool', () => {
     const world = fakeWorld()
     apply(world.ctx, { roles: { get: () => live.roles } })
     const parent = world.newAgent('parent')
-    world.emitCreated(parent)
+    await world.emitCreated(parent)
     live.roles = [GENERAL, FORK, role('other')]
     await registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
     const child = world.children[0]
@@ -1078,7 +1080,7 @@ describe('apply: child agents started by the tool', () => {
   })
 
   it('applies a reservation when the agent is created with a source other than startup', async () => {
-    const { world, delegate } = boot()
+    const { world, delegate } = await boot()
     world.subagents.startActivation.mockImplementation(async spec => {
       const childId = spec.childId ?? ''
       const child = world.newAgent(childId, {
@@ -1087,7 +1089,7 @@ describe('apply: child agents started by the tool', () => {
         delegationDepth: 1,
       })
       world.children.push(child)
-      world.emitCreated(child, 'resume')
+      await world.emitCreated(child, 'resume')
       return { childId }
     })
     await delegate('reviewer')
@@ -1098,8 +1100,8 @@ describe('apply: child agents started by the tool', () => {
     expect(roleOf(world, child.session)).toMatchObject({ id: 'reviewer', readOnly: true })
   })
 
-  function failingChildBoot(failOn: 'sandbox' | 'record') {
-    const booted = boot()
+  async function failingChildBoot(failOn: 'sandbox' | 'record') {
+    const booted = await boot()
     booted.world.subagents.startActivation.mockImplementation(async spec => {
       const childId = spec.childId ?? ''
       const child = booted.world.newAgent(childId, {
@@ -1117,19 +1119,19 @@ describe('apply: child agents started by the tool', () => {
         }
       }
       booted.world.children.push(child)
-      booted.world.emitCreated(child, 'startup')
+      await booted.world.emitCreated(child, 'startup')
       return { childId }
     })
     return booted
   }
 
   it('aborts a read-only child whose sandbox cannot be pinned instead of letting it run writable', async () => {
-    const { delegate } = failingChildBoot('sandbox')
+    const { delegate } = await failingChildBoot('sandbox')
     await expect(delegate('reviewer')).rejects.toThrow('log closed')
   })
 
   it('keeps other preparation failures from aborting a child, and logs them', async () => {
-    const { world, delegate } = failingChildBoot('record')
+    const { world, delegate } = await failingChildBoot('record')
     await expect(delegate('worker')).resolves.toMatchObject({ kind: 'activation' })
     expect(world.logger.warn).toHaveBeenCalledTimes(1)
     expect(world.logger.warn).toHaveBeenCalledWith(
@@ -1139,12 +1141,12 @@ describe('apply: child agents started by the tool', () => {
 })
 
 describe('apply: children not started by the tool', () => {
-  it('lets a child of a recorded Session inherit the parent roles instead of the current config', () => {
+  it('lets a child of a recorded Session inherit the parent roles instead of the current config', async () => {
     const live = { roles: ROLES as unknown[] }
     const world = fakeWorld()
     apply(world.ctx, { roles: { get: () => live.roles } })
     const parent = world.newAgent('parent')
-    world.emitCreated(parent)
+    await world.emitCreated(parent)
     live.roles = [GENERAL, FORK, role('other')]
 
     const child = world.newAgent('official-child', {
@@ -1152,42 +1154,42 @@ describe('apply: children not started by the tool', () => {
       parentSession: parent.session.id,
       delegationDepth: 1,
     })
-    world.emitCreated(child, 'startup')
+    await world.emitCreated(child, 'startup')
     expect(roleEnum(registeredTool(child))).toEqual(['general', 'fork', 'worker', 'reviewer'])
     expect(snapshotRecords(world, child.session)).toEqual(snapshotRecords(world, parent.session))
     expect(roleRecords(world, child.session)).toEqual([])
   })
 
-  it('falls back to the current config when the parent Session is unknown or has no snapshot', () => {
+  it('falls back to the current config when the parent Session is unknown or has no snapshot', async () => {
     const world = fakeWorld()
     apply(world.ctx, { roles: [GENERAL, FORK, role('current')] })
     const orphan = world.newAgent('orphan', { origin: 'subagent', parentSession: 'no-such-session' })
-    world.emitCreated(orphan)
+    await world.emitCreated(orphan)
     expect(roleEnum(registeredTool(orphan))).toEqual(['general', 'fork', 'current'])
 
     const bare = world.newAgent('bare-parent')
     const child = world.newAgent('child-of-bare', { origin: 'subagent', parentSession: bare.session.id })
-    world.emitCreated(child)
+    await world.emitCreated(child)
     expect(roleEnum(registeredTool(child))).toEqual(['general', 'fork', 'current'])
   })
 
-  it('falls back to the current config when the Host has no sessions service', () => {
+  it('falls back to the current config when the Host has no sessions service', async () => {
     const world = fakeWorld()
     delete world.services.sessions
     apply(world.ctx, { roles: [GENERAL, FORK, role('current')] })
     const child = world.newAgent('child', { origin: 'subagent', parentSession: 'whatever' })
-    world.emitCreated(child)
+    await world.emitCreated(child)
     expect(roleEnum(registeredTool(child))).toEqual(['general', 'fork', 'current'])
   })
 })
 
 describe('apply: runtime context', () => {
-  function boot(maxDepth?: number) {
+  async function boot(maxDepth?: number) {
     const world = fakeWorld()
     world.subagents.resolveMaxDepth.mockReturnValue(maxDepth)
     apply(world.ctx, { roles: ROLES })
     const parent = world.newAgent('parent')
-    world.emitCreated(parent)
+    await world.emitCreated(parent)
     const child = async (roleId?: string) => {
       await registeredTool(parent).execute(
         { ...ARGS, ...(roleId === undefined ? {} : { role: roleId }) },
@@ -1204,7 +1206,7 @@ describe('apply: runtime context', () => {
     `Delegation depth for \`delegate\`: current ${current}, maximum ${maximum}, remaining levels ${remaining}.`
 
   it('returns the role text for a child and nothing for the parent', async () => {
-    const { world, parent, child } = boot()
+    const { world, parent, child } = await boot()
     const reviewer = await child('reviewer')
     expect(world.runtimeContext(reviewer)).toBe(roleContextText(REVIEWER))
     expect(world.runtimeContext(reviewer)).toContain('Your role: reviewer.')
@@ -1214,22 +1216,22 @@ describe('apply: runtime context', () => {
   })
 
   it('returns the role text for a role that is not read-only, without the read-only sentence', async () => {
-    const { world, child } = boot()
+    const { world, child } = await boot()
     expect(world.runtimeContext(await child('worker'))).toBe('Your role: worker.\nChange only what you were given.')
   })
 
   it('returns an empty text for a built-in child without instructions', async () => {
-    const { world, child } = boot()
+    const { world, child } = await boot()
     expect(world.runtimeContext(await child('general'))).toBe('')
     expect(world.runtimeContext(await child('fork'))).toBe(FORK_INHERIT_WARNING)
   })
 
-  it('returns an empty text when there is no agent', () => {
-    expect(boot().world.runtimeContext()).toBe('')
+  it('returns an empty text when there is no agent', async () => {
+    expect((await boot()).world.runtimeContext()).toBe('')
   })
 
   it('tells each child its own role', async () => {
-    const { world, child } = boot()
+    const { world, child } = await boot()
     const first = await child('worker')
     const second = await child('reviewer')
     expect(world.runtimeContext(first)).toContain('Your role: worker.')
@@ -1238,7 +1240,7 @@ describe('apply: runtime context', () => {
   })
 
   it('reads a child role back from storage when the Agent is created again (resume), without writing again', async () => {
-    const { world, child } = boot()
+    const { world, child } = await boot()
     const original = await child('reviewer')
     const length = original.session.log.length
 
@@ -1246,66 +1248,66 @@ describe('apply: runtime context', () => {
     apply(fresh.ctx, { roles: [GENERAL, FORK] })
     await fresh.settle()
     const resumed = fakeAgent('resumed-child', original.session)
-    fresh.emitCreated(resumed, 'resume')
+    await fresh.emitCreated(resumed, 'resume')
     expect(fresh.runtimeContext(resumed)).toBe(roleContextText(REVIEWER))
     expect(original.session.log).toHaveLength(length)
     expect(roleEnum(registeredTool(resumed))).toEqual(['general', 'fork', 'worker', 'reviewer'])
   })
 
   it('adds the depth line after the role text for a delegated child when the service has a maximum', async () => {
-    const { world, child } = boot(3)
+    const { world, child } = await boot(3)
     const reviewer = await child('reviewer')
     expect(reviewer.session.header.delegationDepth).toBe(1)
     expect(world.runtimeContext(reviewer)).toBe(`${roleContextText(REVIEWER)}\n\n${DEPTH_LINE(1, 3, 2)}`)
   })
 
   it('gives a child with no role text only the depth line', async () => {
-    const { world, child } = boot(3)
+    const { world, child } = await boot(3)
     expect(world.runtimeContext(await child('general'))).toBe(DEPTH_LINE(1, 3, 2))
   })
 
-  it('only tells a child not to delegate once no levels remain, not while one is left', () => {
-    const { world } = boot(3)
+  it('only tells a child not to delegate once no levels remain, not while one is left', async () => {
+    const { world } = await boot(3)
     const near = world.newAgent('near', { origin: 'subagent', delegationDepth: 2 })
-    world.emitCreated(near, 'resume')
+    await world.emitCreated(near, 'resume')
     expect(world.runtimeContext(near)).toBe(DEPTH_LINE(2, 3, 1))
   })
 
-  it('tells a child at the maximum depth not to delegate further', () => {
-    const { world } = boot(3)
+  it('tells a child at the maximum depth not to delegate further', async () => {
+    const { world } = await boot(3)
     const deep = world.newAgent('deep', { origin: 'subagent', delegationDepth: 3 })
-    world.emitCreated(deep, 'resume')
+    await world.emitCreated(deep, 'resume')
     expect(world.runtimeContext(deep)).toBe(
       `${DEPTH_LINE(3, 3, 0)} Do not call \`delegate\` at this depth; carry out the work directly.`,
     )
   })
 
-  it('reports zero remaining levels, not a negative number, below the maximum', () => {
-    const { world } = boot(2)
+  it('reports zero remaining levels, not a negative number, below the maximum', async () => {
+    const { world } = await boot(2)
     const deep = world.newAgent('deeper', { origin: 'subagent', delegationDepth: 5 })
-    world.emitCreated(deep, 'resume')
+    await world.emitCreated(deep, 'resume')
     expect(world.runtimeContext(deep)).toContain(DEPTH_LINE(5, 2, 0))
   })
 
-  it('has no depth line for the top-level agent, even with a maximum', () => {
-    const { world, parent } = boot(3)
+  it('has no depth line for the top-level agent, even with a maximum', async () => {
+    const { world, parent } = await boot(3)
     expect(parent.session.header.delegationDepth).toBeUndefined()
     expect(world.runtimeContext(parent)).toBe('')
   })
 
   it('has no depth line when the service reports no maximum', async () => {
-    const { world, child } = boot(undefined)
+    const { world, child } = await boot(undefined)
     const reviewer = await child('reviewer')
     expect(world.runtimeContext(reviewer)).toBe(roleContextText(REVIEWER))
     expect(world.subagents.resolveMaxDepth).toHaveBeenCalledWith(undefined)
   })
 
-  it('has no depth line where the tool is not installed, since the agent cannot delegate anyway', () => {
+  it('has no depth line where the tool is not installed, since the agent cannot delegate anyway', async () => {
     const world = fakeWorld()
     world.subagents.resolveMaxDepth.mockReturnValue(3)
     apply(world.ctx, { enabled: false })
     const child = world.newAgent('child', { origin: 'subagent', delegationDepth: 1 })
-    world.emitCreated(child)
+    await world.emitCreated(child)
     expect(world.runtimeContext(child)).toBe('')
   })
 })
@@ -1317,10 +1319,10 @@ describe('apply: lifecycle', () => {
     return world
   }
 
-  it('calls the registration disposer when the agent is disposed, once', () => {
+  it('calls the registration disposer when the agent is disposed, once', async () => {
     const world = boot()
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(agent.disposers[0]).not.toHaveBeenCalled()
     world.emitDisposed(agent)
     expect(agent.disposers[0]).toHaveBeenCalledTimes(1)
@@ -1328,27 +1330,27 @@ describe('apply: lifecycle', () => {
     expect(agent.disposers[0]).toHaveBeenCalledTimes(1)
   })
 
-  it('ignores the disposal of an agent that never got a tool', () => {
+  it('ignores the disposal of an agent that never got a tool', async () => {
     const world = boot({ enabled: false })
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(() => world.emitDisposed(agent)).not.toThrow()
     expect(() => world.emitDisposed(world.newAgent('stranger'))).not.toThrow()
   })
 
-  it('registers again when a disposed agent is created again', () => {
+  it('ignores late creation callbacks for a disposed Agent object', async () => {
     const world = boot()
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     world.emitDisposed(agent)
-    world.emitCreated(agent, 'resume')
-    expect(agent.register).toHaveBeenCalledTimes(2)
+    await world.emitCreated(agent, 'resume')
+    expect(agent.register).toHaveBeenCalledTimes(1)
   })
 
   it('disposes the child registration with the child', async () => {
     const world = boot()
     const parent = world.newAgent('parent')
-    world.emitCreated(parent)
+    await world.emitCreated(parent)
     await registeredTool(parent).execute({ ...ARGS }, execContext(parent))
     const child = world.children[0]
     expect(child?.disposers[0]).not.toHaveBeenCalled()
@@ -1357,54 +1359,205 @@ describe('apply: lifecycle', () => {
     expect(parent.disposers[0]).not.toHaveBeenCalled()
   })
 
-  it('removes every remaining registration when the plugin is unloaded, skipping those already disposed', () => {
+  it('removes every remaining registration when the plugin is unloaded, skipping those already disposed', async () => {
     const world = boot()
     const kept = world.newAgent('kept')
     const gone = world.newAgent('gone')
-    world.emitCreated(kept)
-    world.emitCreated(gone)
+    await world.emitCreated(kept)
+    await world.emitCreated(gone)
     world.emitDisposed(gone)
-    world.teardown()
+    await world.teardown()
     expect(kept.disposers[0]).toHaveBeenCalledTimes(1)
     expect(gone.disposers[0]).toHaveBeenCalledTimes(1)
   })
 })
 
+describe('apply: readiness and durability barriers', () => {
+  function deferred<T = void>() {
+    let resolve!: (value: T | PromiseLike<T>) => void
+    const promise = new Promise<T>(yes => {
+      resolve = yes
+    })
+    return { promise, resolve }
+  }
+
+  it('does not cache absent roles before ready and restores read-only before the first turn', async () => {
+    const world = fakeWorld()
+    const agent = world.newAgent('restored')
+    const domain = await world.storage.facility.open({ name: 'rolesubagents' })
+    await domain.table('roles').put(agent.session.id, { version: 1, role: REVIEWER })
+    const opening = deferred<DomainPort>()
+    world.services.storageDomain = { open: () => opening.promise }
+    apply(world.ctx, { roles: ROLES })
+    expect(world.runtimeContext(agent)).toBe('')
+    const firstTurn = vi.fn(() => {
+      expect(world.runtimeContext(agent)).toContain('Your role: reviewer.')
+      expect(agent.guards).toHaveLength(1)
+      expect(agent.session.log.at(-1)?.data).toEqual({ mode: 'read-only' })
+    })
+    world.ctx.on('agent/created', firstTurn)
+    const creating = world.emitCreated(agent, 'resume')
+    await Promise.resolve()
+    expect(agent.register).not.toHaveBeenCalled()
+    expect(firstTurn).not.toHaveBeenCalled()
+    opening.resolve(domain)
+    await creating
+    expect(firstTurn).toHaveBeenCalledTimes(1)
+    await world.teardown()
+  })
+
+  it('awaits both role and snapshot durability before a reserved child first turn', async () => {
+    const world = fakeWorld()
+    const roleWrite = deferred(),
+      snapshotWrite = deferred(),
+      entered = deferred()
+    let started = 0
+    world.services.storageDomain = {
+      async open(spec) {
+        const domain = await world.storage.facility.open(spec)
+        return {
+          ...domain,
+          table(name) {
+            const table = domain.table(name)
+            return {
+              ...table,
+              async put(key, value) {
+                if (key !== 'session-parent') {
+                  if (++started === 2) entered.resolve()
+                  await (name === 'roles' ? roleWrite.promise : snapshotWrite.promise)
+                }
+                await table.put(key, value)
+              },
+            }
+          },
+        }
+      },
+    }
+    apply(world.ctx, { roles: ROLES })
+    const parent = world.newAgent('parent')
+    await world.emitCreated(parent)
+    const firstTurn = vi.fn()
+    world.ctx.on('agent/created', firstTurn)
+    const running = registeredTool(parent).execute({ ...ARGS, role: 'reviewer' }, execContext(parent))
+    await entered.promise
+    const child = world.children[0]!
+    expect(child.guards).toHaveLength(1)
+    expect(firstTurn).not.toHaveBeenCalled()
+    roleWrite.resolve()
+    await Promise.resolve()
+    expect(firstTurn).not.toHaveBeenCalled()
+    snapshotWrite.resolve()
+    await running
+    expect(firstTurn).toHaveBeenCalledTimes(1)
+    expect(world.storedRole(child.session.id)).toMatchObject({ role: { id: 'reviewer' } })
+    expect(world.storedSnapshot(child.session.id)).toBeDefined()
+    await world.teardown()
+  })
+
+  it.each(['pin', 'guard', 'storage'] as const)(
+    'fails closed and removes partial registrations for a restored read-only %s failure',
+    async failure => {
+      const world = fakeWorld()
+      const agent = world.newAgent('restored')
+      const domain = await world.storage.facility.open({ name: 'rolesubagents' })
+      await domain.table('roles').put(agent.session.id, { version: 1, role: REVIEWER })
+      if (failure === 'pin')
+        agent.session.append = () => {
+          throw new Error('preparation failed')
+        }
+      if (failure === 'guard')
+        agent.ctx.tools.guard = () => {
+          throw new Error('preparation failed')
+        }
+      if (failure === 'storage') {
+        world.services.storageDomain = {
+          async open() {
+            return {
+              ...domain,
+              table(name) {
+                return {
+                  ...domain.table(name),
+                  put: async () => {
+                    throw new Error('preparation failed')
+                  },
+                }
+              },
+            }
+          },
+        }
+      }
+      apply(world.ctx, { roles: ROLES })
+      const firstTurn = vi.fn()
+      world.ctx.on('agent/created', firstTurn)
+      await expect(world.emitCreated(agent, 'resume')).rejects.toThrow('preparation failed')
+      expect(firstTurn).not.toHaveBeenCalled()
+      for (const dispose of agent.disposers) expect(dispose).toHaveBeenCalledTimes(1)
+      for (const dispose of agent.guardDisposers) expect(dispose).toHaveBeenCalledTimes(1)
+      expect(agent.guards).toHaveLength(0)
+      if (failure !== 'pin') {
+        expect(agent.disposers).toHaveLength(1)
+        await expect(registeredTool(agent).execute(ARGS, execContext(agent))).rejects.toThrow(/refreshed|changed/)
+      }
+      await world.teardown()
+    },
+  )
+
+  it.each(['plugin', 'agent'] as const)('does not prepare after %s disposal during storage opening', async owner => {
+    const world = fakeWorld()
+    const domain = await world.storage.facility.open({ name: 'rolesubagents' })
+    const opening = deferred<DomainPort>()
+    world.services.storageDomain = { open: () => opening.promise }
+    const agent = world.newAgent('late')
+    world.agents = [agent]
+    apply(world.ctx, { roles: ROLES })
+    const creating = world.emitCreated(agent)
+    const closing = owner === 'plugin' ? world.teardown() : undefined
+    if (owner === 'agent') world.emitDisposed(agent)
+    opening.resolve(domain)
+    await creating
+    await closing
+    expect(agent.register).not.toHaveBeenCalled()
+    expect(world.storedSnapshot(agent.session.id)).toBeUndefined()
+    expect(world.runtimeContext(agent)).toBe('')
+    await world.teardown()
+  })
+})
+
 describe('apply: failures while an agent is prepared', () => {
-  it('catches a throwing step in the agent/created handler and logs it with logger.warn', () => {
+  it('catches a throwing step in the agent/created handler and logs it with logger.warn', async () => {
     const world = fakeWorld()
     apply(world.ctx)
     const agent = world.newAgent('main')
     agent.register.mockImplementation(() => {
       throw new Error('registry closed')
     })
-    expect(() => world.emitCreated(agent)).not.toThrow()
+    await expect(world.emitCreated(agent)).resolves.toBeUndefined()
     expect(world.logger.warn).toHaveBeenCalledTimes(1)
     expect(world.logger.warn).toHaveBeenCalledWith('rolesubagents: could not prepare agent main: registry closed')
   })
 
-  it('logs a thrown non-Error value as text', () => {
+  it('logs a thrown non-Error value as text', async () => {
     const world = fakeWorld()
     apply(world.ctx)
     const agent = world.newAgent('main')
     agent.session.snapshotEvents = () => {
       throw 'plain failure'
     }
-    expect(() => world.emitCreated(agent)).not.toThrow()
+    await expect(world.emitCreated(agent)).resolves.toBeUndefined()
     expect(world.logger.warn).toHaveBeenCalledWith('rolesubagents: could not prepare agent main: plain failure')
   })
 
-  it('does not install a tool for the agent whose preparation failed, and later agents still work', () => {
+  it('does not install a tool for the agent whose preparation failed, and later agents still work', async () => {
     const world = fakeWorld()
     apply(world.ctx)
     const broken = world.newAgent('broken')
     broken.session.snapshotEvents = () => {
       throw new Error('unreadable log')
     }
-    world.emitCreated(broken)
+    await world.emitCreated(broken)
     expect(broken.register).not.toHaveBeenCalled()
     const healthy = world.newAgent('healthy')
-    world.emitCreated(healthy)
+    await world.emitCreated(healthy)
     expect(healthy.register).toHaveBeenCalledTimes(1)
   })
 
@@ -1426,7 +1579,7 @@ describe('apply: failures while an agent is prepared', () => {
     const world = fakeWorld()
     apply(world.ctx)
     const agent = world.newAgent('main')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     world.providers.delete('spawn')
     await expect(registeredTool(agent).execute({ ...ARGS }, execContext(agent))).rejects.toThrow(
       'subagent provider "spawn" is not available',

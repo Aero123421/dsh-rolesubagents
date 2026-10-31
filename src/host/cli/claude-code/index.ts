@@ -17,7 +17,9 @@
  *   approval, which print mode refuses.
  * - `auto` and `bypassPermissions`: full access (the `auto` classifier can approve any unsandboxed
  *   command), Claude Code's default tools and setting sources.
- * `--strict-mcp-config` keeps project `.mcp.json` servers out of every preset. With no setting sources,
+ * - `nativeAcceptEdits`: explicit native editing with settings, MCP and tools intact. Requires a full-access
+ *   parent (hooks/extensions are not confined), but uses acceptEdits, not bypassPermissions.
+ * `--strict-mcp-config` keeps project `.mcp.json` servers out of the legacy presets. With no setting sources,
  * CLAUDE.md files and a model, environment or `apiKeyHelper` from settings are not loaded either.
  *
  * Environment: nested-agent markers and inherited `CLAUDE_CODE_*` variables
@@ -56,6 +58,7 @@ const PRESET_ARGS: Readonly<Record<string, readonly string[]>> = Object.freeze({
     READ_ONLY_DISALLOWED_TOOLS,
   ]),
   acceptEdits: Object.freeze(['--permission-mode', 'acceptEdits', '--setting-sources', '', '--tools', EDIT_TOOLS]),
+  nativeAcceptEdits: Object.freeze(['--permission-mode', 'acceptEdits']),
   auto: Object.freeze(['--permission-mode', 'auto']),
   bypassPermissions: Object.freeze(['--permission-mode', 'bypassPermissions']),
 })
@@ -77,7 +80,7 @@ export const CLAUDE_CODE_MODELS: readonly ProbeModel[] = Object.freeze(
   ).map(([id, name]) => Object.freeze({ id, name, efforts: CLAUDE_CODE.efforts })),
 )
 
-const VERSION = /^(\d+\.\d+\.\d+)/
+const VERSION = /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/
 const PROBE_TIMEOUT_MS = 10_000
 
 /**
@@ -92,7 +95,9 @@ export function permissionArgs(input: Pick<PlanInput, 'preset' | 'access'>): rea
   if (own !== undefined && CLAUDE_CODE.permissions.some(p => p.id === input.preset && p.access === input.access)) {
     return own
   }
-  return PRESET_ARGS[CLAUDE_CODE.presetForAccess[input.access]] as readonly string[]
+  const fallback = CLAUDE_CODE.presetForAccess[input.access]
+  if (fallback === undefined) throw new Error(`unsupported Claude Code access: ${input.access}`)
+  return PRESET_ARGS[fallback] as readonly string[]
 }
 
 /**
@@ -108,7 +113,7 @@ export function planClaudeCode(input: PlanInput): RunPlan {
     'stream-json',
     '--verbose',
     '--no-session-persistence',
-    '--strict-mcp-config',
+    ...(input.preset === 'nativeAcceptEdits' && input.access === 'full-access' ? [] : ['--strict-mcp-config']),
     ...(runner.model === undefined || runner.model === '' ? [] : ['--model', runner.model]),
     ...(runner.effort === undefined || runner.effort === '' ? [] : ['--effort', runner.effort]),
     ...permissionArgs(input),
@@ -121,7 +126,7 @@ export function planClaudeCode(input: PlanInput): RunPlan {
       DISABLE_AUTOUPDATER: '1',
       CLAUDECODE: undefined,
     },
-    envRemovePrefixes: ['CLAUDE_CODE_'],
+    envRemovePrefixes: input.preset === 'nativeAcceptEdits' && input.access === 'full-access' ? [] : ['CLAUDE_CODE_'],
     cancelGraceMs: 0,
   }
 }

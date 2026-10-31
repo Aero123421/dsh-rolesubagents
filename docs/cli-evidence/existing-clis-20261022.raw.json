@@ -1,0 +1,342 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-22T10:51:33.596Z",
+  "dshVersion": "0.2.1-rc.2",
+  "platform": "linux",
+  "arch": "x64",
+  "variants": {
+    "codexSandboxBackend": "default"
+  },
+  "binaries": {
+    "claude-code": {
+      "path": "2.1.306",
+      "sha256": "520bc6c1f40af466bd03a278b5ae1af1a2938bc7de5b9e5cb15526da20d71cfe",
+      "version": "2.1.306",
+      "expectedVersion": "2.1.306"
+    },
+    "agy": {
+      "path": "agy",
+      "sha256": "337dcde668441a2828968644d7982829c2d2a5e0c4144f346e1f3fc6abb3cdc7",
+      "version": "1.4.4",
+      "expectedVersion": "1.4.4"
+    },
+    "opencode": {
+      "path": "opencode.exe",
+      "sha256": "179ca421d61eefeadfa0c50e084a6e79c1623734732f0f4593f81ccfd3ab7ee9",
+      "version": "1.19.3",
+      "expectedVersion": "1.19.3"
+    }
+  },
+  "cases": [
+    {
+      "cli": "self",
+      "name": "answer reaches the parent notice through the real SubagentRuntime",
+      "status": "pass",
+      "durationMs": 219
+    },
+    {
+      "cli": "self",
+      "name": "a failing CLI yields a safe diagnostic",
+      "status": "pass",
+      "durationMs": 171
+    },
+    {
+      "cli": "self",
+      "name": "interrupt_agent stops the CLI process",
+      "status": "pass",
+      "durationMs": 381
+    },
+    {
+      "cli": "self",
+      "name": "a background child the CLI leaves behind neither blocks the notice nor survives",
+      "status": "pass",
+      "durationMs": 185
+    },
+    {
+      "cli": "self",
+      "name": "plugin unload disposes a running CLI",
+      "status": "pass",
+      "durationMs": 391
+    },
+    {
+      "cli": "self",
+      "name": "depth limit and workspace containment refuse before spawning",
+      "status": "pass",
+      "durationMs": 212
+    },
+    {
+      "cli": "self",
+      "name": "the CLI connection test is mounted as a Remote service",
+      "status": "pass",
+      "durationMs": 108
+    },
+    {
+      "cli": "claude-code",
+      "name": "answer reaches the parent; instructions, model and effort reach the model",
+      "status": "pass",
+      "durationMs": 393
+    },
+    {
+      "cli": "claude-code",
+      "name": "read-only preset blocks writes (Write tool and shell redirection)",
+      "status": "pass",
+      "durationMs": 450
+    },
+    {
+      "cli": "claude-code",
+      "name": "read-only: deferred placeholder calls cannot unlock tools or smuggle writes",
+      "status": "pass",
+      "durationMs": 441
+    },
+    {
+      "cli": "claude-code",
+      "name": "acceptEdits: deferred placeholder calls cannot unlock tools or smuggle writes",
+      "status": "pass",
+      "durationMs": 454
+    },
+    {
+      "cli": "claude-code",
+      "name": "native acceptEdits edits a Python venv workspace and preserves user hooks",
+      "status": "pass",
+      "durationMs": 451
+    },
+    {
+      "cli": "claude-code",
+      "name": "native acceptEdits refuses a restricted parent without spawning or elevating access",
+      "status": "pass",
+      "durationMs": 188
+    },
+    {
+      "cli": "claude-code",
+      "name": "workspace-write default preset (acceptEdits) writes inside the workspace",
+      "status": "pass",
+      "durationMs": 418
+    },
+    {
+      "cli": "claude-code",
+      "name": "acceptEdits: no shell, no settings (user allow rules, extra directories, hooks), writes stay in cwd",
+      "status": "pass",
+      "durationMs": 749
+    },
+    {
+      "cli": "claude-code",
+      "name": "acceptEdits is refused when the directory links outside the workspace",
+      "status": "pass",
+      "durationMs": 149
+    },
+    {
+      "cli": "claude-code",
+      "name": "interrupt stops the run as aborted and leaves no process behind",
+      "status": "pass",
+      "durationMs": 454
+    },
+    {
+      "cli": "claude-code",
+      "name": "a rejected API key yields a safe auth diagnostic",
+      "status": "pass",
+      "durationMs": 437
+    },
+    {
+      "cli": "claude-code",
+      "name": "an overloaded upstream yields a service diagnostic",
+      "status": "pass",
+      "durationMs": 419
+    },
+    {
+      "cli": "claude-code",
+      "name": "connection test reports the version and the model list",
+      "status": "pass",
+      "durationMs": 175
+    },
+    {
+      "cli": "claude-code",
+      "name": "bypassPermissions as root (without IS_SANDBOX) is a config failure",
+      "status": "skip",
+      "durationMs": 0
+    },
+    {
+      "cli": "agy",
+      "name": "fake backend rejects missing and incorrect credentials and accepts only the dummy key",
+      "status": "pass",
+      "durationMs": 118
+    },
+    {
+      "cli": "agy",
+      "name": "fake command arguments follow both historical and current offered tool schemas",
+      "status": "pass",
+      "durationMs": 98
+    },
+    {
+      "cli": "agy",
+      "name": "answer reaches the parent; instructions reach the system prompt of a generated agent",
+      "status": "pass",
+      "durationMs": 665
+    },
+    {
+      "cli": "agy",
+      "name": "edit-files (default) writes and edits inside a workspace outside /tmp without a soft-deny",
+      "status": "pass",
+      "durationMs": 1114
+    },
+    {
+      "cli": "agy",
+      "name": "edit-files has no command tool and cannot write outside the workspace",
+      "status": "pass",
+      "durationMs": 1051
+    },
+    {
+      "cli": "agy",
+      "name": "edit-files from a subdirectory of a git repository cannot write a sibling directory",
+      "status": "pass",
+      "durationMs": 1118
+    },
+    {
+      "cli": "agy",
+      "name": "edit-files is refused when the directory links outside the workspace",
+      "status": "pass",
+      "durationMs": 176
+    },
+    {
+      "cli": "agy",
+      "name": "read-only preset blocks writes and commands, reads work",
+      "status": "pass",
+      "durationMs": 1495
+    },
+    {
+      "cli": "agy",
+      "name": "full-access keeps the default agent: commands run, instructions are a prompt prefix",
+      "status": "pass",
+      "durationMs": 636
+    },
+    {
+      "cli": "agy",
+      "name": "model and effort reach the model request",
+      "status": "pass",
+      "durationMs": 1128
+    },
+    {
+      "cli": "agy",
+      "name": "an unknown model or an unsupported effort fails with a safe diagnostic",
+      "status": "pass",
+      "durationMs": 775
+    },
+    {
+      "cli": "agy",
+      "name": "interrupt stops the run as aborted and leaves no process or agent file behind",
+      "status": "pass",
+      "durationMs": 594
+    },
+    {
+      "cli": "agy",
+      "name": "upstream errors map to safe categories",
+      "status": "pass",
+      "durationMs": 9286
+    },
+    {
+      "cli": "agy",
+      "name": "a missing API key is refused by the pre-flight with a safe auth diagnostic",
+      "status": "pass",
+      "durationMs": 248
+    },
+    {
+      "cli": "agy",
+      "name": "plugin start sweeps only stale generated agent files",
+      "status": "pass",
+      "durationMs": 151
+    },
+    {
+      "cli": "agy",
+      "name": "the connection test reports version, sign-in state and models",
+      "status": "pass",
+      "durationMs": 685
+    },
+    {
+      "cli": "opencode",
+      "name": "read-only: answer and role instructions arrive; writes are impossible despite a permissive user config",
+      "status": "pass",
+      "durationMs": 1791
+    },
+    {
+      "cli": "opencode",
+      "name": "edit-files (default): writes inside the workspace, no shell, nothing outside it",
+      "status": "pass",
+      "durationMs": 5199
+    },
+    {
+      "cli": "opencode",
+      "name": "edit-files below a git top-level is refused (OpenCode would reach the whole repo); read-only works",
+      "status": "pass",
+      "durationMs": 1779
+    },
+    {
+      "cli": "opencode",
+      "name": "edit-files refuses escaping links inside .git before calling the model",
+      "status": "pass",
+      "durationMs": 150
+    },
+    {
+      "cli": "opencode",
+      "name": "edit-files is refused when the directory links outside the workspace",
+      "status": "pass",
+      "durationMs": 150
+    },
+    {
+      "cli": "opencode",
+      "name": "below full access the project config does not run (MCP server, tool files); project plugins refuse the run",
+      "status": "pass",
+      "durationMs": 1771
+    },
+    {
+      "cli": "opencode",
+      "name": "full-access under a full-access parent runs shell commands",
+      "status": "pass",
+      "durationMs": 1861
+    },
+    {
+      "cli": "opencode",
+      "name": "model and effort reach the provider request",
+      "status": "pass",
+      "durationMs": 1756
+    },
+    {
+      "cli": "opencode",
+      "name": "an unknown effort fails as config before any model call",
+      "status": "pass",
+      "durationMs": 1377
+    },
+    {
+      "cli": "opencode",
+      "name": "a provider 401 yields a safe auth diagnostic",
+      "status": "pass",
+      "durationMs": 1731
+    },
+    {
+      "cli": "opencode",
+      "name": "a graceful cancel (session/cancel + stdin EOF) stops OpenCode and its tool processes",
+      "status": "pass",
+      "durationMs": 1881
+    },
+    {
+      "cli": "opencode",
+      "name": "interrupt_agent ends the run as aborted and leaves no OpenCode or tool process behind",
+      "status": "pass",
+      "durationMs": 1931
+    },
+    {
+      "cli": "opencode",
+      "name": "connection test: version and models (with effort variants) without a model call",
+      "status": "pass",
+      "durationMs": 1463
+    }
+  ],
+  "totals": {
+    "passes": 49,
+    "failures": 0,
+    "skips": 1
+  },
+  "provenance": {
+    "sourceArtifact": "artifacts/original-three-allowlist-20261022.json",
+    "pathRedaction": "Executable paths reduced to basename; version, SHA256 and outcomes unchanged.",
+    "qualification": "Raw mixed-preset outcomes, not complete CompatibilityEvidence."
+  }
+}

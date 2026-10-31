@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Optional integration check against a real installed DSH host (no network or disk writes).
+ * Optional integration check against a real installed DSH host (no network; disposable HOME).
  * Run with Node 24: node scripts/check-workflow-host.mjs
  * Node 22 also works with --experimental-strip-types.
  * Override the installation root with DSH_CHECKOUT=/path/to/dsh.
@@ -13,8 +13,11 @@ import assert from 'node:assert/strict'
 import { createRequire, registerHooks } from 'node:module'
 import { resolve } from 'node:path'
 import { hostResolveHook } from './host-resolve-hook.mjs'
+import { isolateCheckEnvironment } from './check-environment.mjs'
+import { mountNativeTools } from './host-tools.mjs'
 
 const checkout = resolve(process.env.DSH_CHECKOUT || '/usr/lib/node_modules/@deepseek-ai/dsh')
+const checkEnvironment = isolateCheckEnvironment()
 const hostRequire = createRequire(resolve(checkout, 'package.json'))
 // Resolve host peers from one installation, as DSH does when loading a plugin.
 // This also avoids accidentally testing different dev-dependency service classes.
@@ -41,7 +44,7 @@ async function checkNativeWorkflow() {
   let disposals = 0
   ctx.provide('ptcRuntime', {
     language: 'typescript',
-    programFormat: 'function',
+    programFormat: 'function-body',
     resolve: value => value,
     async run(spec) {
       try {
@@ -106,6 +109,31 @@ async function checkNativeWorkflow() {
   assert.deepEqual(test.options, [configured])
   pass('real guest receives configured workflow route')
 
+  test = await run('return await agent("JSON options", args.options);', { args: { options: { label: 'from JSON' } } })
+  assert.equal(test.result.stopReason, 'completed')
+  assert.deepEqual(test.options, [configured])
+  pass('real guest receives defaults for options arriving through host-realm args')
+
+  test = await run(`const options = {
+    get label() { if (this !== options) throw Error('changed receiver'); return 'accessor'; }
+  }; return await agent('getter options', options);`)
+  assert.equal(test.result.stopReason, 'completed')
+  assert.deepEqual(test.options, [configured])
+  pass('native option materialization reads accessors with their original receiver')
+
+  for (const options of [
+    'Object.assign(Object.create(null), {label: "null prototype"})',
+    'Object.defineProperty({}, "unexpected", {get() { throw Error("hidden getter"); }})',
+  ]) {
+    const script = `return await agent('plain options', ${options});`
+    const native = await run(script, {}, false)
+    assert.equal(native.result.stopReason, 'completed', options)
+    test = await run(script)
+    assert.equal(test.result.stopReason, 'completed', options)
+    assert.deepEqual(test.options, [configured])
+  }
+  pass('null-prototype and hidden option properties preserve native materialization')
+
   test = await run('return await agent("native fallback");', {}, false)
   assert.equal(test.result.stopReason, 'completed')
   assert.deepEqual(test.options, [undefined])
@@ -140,18 +168,33 @@ async function checkNativeWorkflow() {
   for (const options of [
     'null',
     '[]',
+    'Object.setPrototypeOf([], null)',
+    'Object.setPrototypeOf([], Object.prototype)',
     '42',
     '{unexpected: true}',
     '{provider: 42}',
     '{model: 42}',
+    '{provider: undefined}',
+    '{model: undefined}',
+    '{get label() { throw Error("invalid option"); }}',
+    'Object.defineProperty({}, Symbol("invalid"), {value: true})',
+    'new Proxy({}, {getPrototypeOf() { throw Error("invalid prototype"); }})',
+    'new Proxy({}, {ownKeys() { throw Error("invalid keys"); }})',
+    'new Proxy({label: "label"}, {get() { throw Error("invalid read"); }})',
     'new Date()',
     'new (class Options {})()',
   ]) {
-    test = await run(`return await parallel([() => agent('bad', ${options})]);`)
-    assert.equal(test.result.stopReason, 'error', options)
-    assert.equal(test.starts.length, 0, options)
+    for (const combine of [call => `parallel([() => ${call}])`, call => `pipeline([1], () => ${call})`]) {
+      const script = `return await ${combine(`agent('bad', ${options})`)};`
+      const native = await run(script, {}, false)
+      assert.equal(native.result.stopReason, 'error', options)
+      assert.equal(native.starts.length, 0, options)
+      test = await run(script)
+      assert.equal(test.result.stopReason, 'error', options)
+      assert.equal(test.starts.length, 0, options)
+    }
   }
-  pass('malformed options remain fatal through parallel, before child admission')
+  pass('malformed options retain native fatal errors through parallel and pipeline before child admission')
 
   // Native guest validates string type, not non-emptiness; backend route
   // resolution may reject these later. The adapter must not silently fix them.
@@ -184,7 +227,7 @@ async function checkScopedRefresh() {
   const refreshPrompt = agent => {
     for (const provider of contexts) provider.text({ agent })
   }
-  new ToolRuntime(root, { mode: 'native' })
+  await mountNativeTools(root, ToolRuntime)
   root.provide('subagents', { resolveMaxDepth: () => 1 })
   root.provide('agents', { list: () => [] })
   const warnings = []
@@ -316,6 +359,34 @@ async function checkScopedRefresh() {
   root.emit('agent/disposed', { agent: collision })
   pass('agent disposal revokes captured wrapper and does not reinstall shadow')
 
+  if (typeof root.tools.executable === 'function') {
+    const conditionalKey = {}
+    const conditionalScope = createScope(root, conditionalKey)
+    scopes.push(conditionalScope)
+    let enabled = false
+    const conditional = makeDefinition('conditional preset')
+    disposers.push(conditionalScope.ctx.tools.register(conditional, { when: () => enabled }))
+    const { agent: conditionalAgent } = makeAgent('conditional-workflow', conditionalKey)
+    await root.serial('agent/created', { agent: conditionalAgent, source: 'startup' })
+    refreshPrompt(conditionalAgent)
+    for (const allowed of [false, true, false]) {
+      enabled = allowed
+      const admitted = await root.tools.resolve({
+        agent: conditionalAgent,
+        modelSelection: configured,
+        signal: new AbortController().signal,
+      })
+      try {
+        assert.equal(admitted.view(conditionalAgent).get('workflow'), allowed ? conditional : undefined)
+      } finally {
+        admitted.dispose()
+      }
+    }
+    assert.equal(conditionalAgent.ctx.tools.get('workflow', conditionalAgent), conditional)
+    root.emit('agent/disposed', { agent: conditionalAgent })
+    pass('conditional workflow retains native step admission without an unconditional model-default shadow')
+  }
+
   for (const dispose of disposers.reverse()) dispose()
   for (const scope of scopes.reverse()) await scope.dispose()
 }
@@ -327,4 +398,5 @@ try {
   console.log(`Completed ${assertions} installed-host integration checks.`)
 } finally {
   resolutionHook.deregister()
+  checkEnvironment.dispose()
 }

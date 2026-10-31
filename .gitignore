@@ -3,3 +3,5 @@ coverage/
 *.tgz
 .DS_Store
 *.log
+# Local previews and raw verification runs; publish reviewed evidence under docs/.
+/artifacts/

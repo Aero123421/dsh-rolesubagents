@@ -12,7 +12,7 @@
  *                 searches /opt/cli-tools/node_modules/.bin and /opt/cli-tools/bin.
  * - CHECK_CLI_CASE  only run cases whose name contains this text (case-insensitive).
  *
- * What is real: Cordis, SessionStore, AgentRegistry, SystemPrompt, ToolRuntime, the storage stack
+ * What is real: Cordis, SessionStore, SessionProjectionRegistry, AgentRegistry, SystemPrompt, ToolRuntime, the storage stack
  * (Storage + JSON backend in a temp dir + DomainFacility), LocalSubprocessRuntime and
  * SubagentRuntime from DSH, and this plugin's own `apply` (loaded from src/ with Node's type
  * stripping). What is stubbed: the parent Agent (a real Session with a recording inbox, as DSH's
@@ -56,15 +56,27 @@
  */
 
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { randomUUID, createHash } from 'node:crypto'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  statSync,
+  realpathSync,
+  createReadStream,
+} from 'node:fs'
 import { createRequire, registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { hostResolveHook } from './host-resolve-hook.mjs'
+import { isolateCheckEnvironment } from './check-environment.mjs'
+import { mountNativeTools } from './host-tools.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const checkout = resolve(process.env.DSH_CHECKOUT || '/opt/dsh')
@@ -78,8 +90,12 @@ const extraDirs = [process.env.CLI_PATH_DIR, '/opt/cli-tools/node_modules/.bin',
 )
 process.env.PATH = [...extraDirs, process.env.PATH ?? ''].join(delimiter)
 
+// Must precede plugin.apply and all runtime startup: agy housekeeping uses process.env.HOME.
+const checkEnvironment = isolateCheckEnvironment()
+
 const { Context } = await import('@deepseek-ai/cordis')
 const { default: SessionStore, SessionId } = await import('@deepseek-ai/dsh-session')
+const { default: SessionProjectionRegistry } = await import('@deepseek-ai/dsh-session-projection')
 const { default: AgentRegistry } = await import('@deepseek-ai/dsh-agent')
 const { default: SubagentRuntime } = await import('@deepseek-ai/dsh-subagent')
 const { default: LocalSubprocessRuntime } = await import('@deepseek-ai/dsh-subprocess-local')
@@ -224,10 +240,11 @@ async function createWorld(options = {}) {
   }
   const ctx = new Context()
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SystemPrompt)
   // Constructed on the root (as scripts/check-workflow-host.mjs does) so scoped Agent contexts can reach it.
-  new ToolRuntime(ctx, { mode: 'native' })
+  await mountNativeTools(ctx, ToolRuntime)
   await ctx.plugin(Storage)
   await ctx.plugin(JsonStorage, { root: stateDir })
   await ctx.plugin(StorageDomain, { backend: 'json' })
@@ -236,6 +253,10 @@ async function createWorld(options = {}) {
     resolve: () => ({ mode: options.sandboxMode ?? 'workspace-write', workspaceRoot: options.workspaceRoot ?? cwd }),
   })
   await ctx.plugin(LocalSubprocessRuntime)
+  if (options.hostSandbox) {
+    const { default: LocalSandbox } = await import('@deepseek-ai/dsh-sandbox-local')
+    await ctx.plugin(LocalSandbox)
+  }
   await ctx.plugin(SubagentRuntime, { maxDepth: options.maxDepth ?? 1, maxActiveSubagents: 8 })
   await sleep(30)
 
@@ -324,10 +345,16 @@ function makeHelpers(cli, executable) {
       workspace,
       role,
       server,
-      world: createWorld,
+      world: options =>
+        createWorld(
+          cli && executable
+            ? { ...options, clis: { ...options.clis, [cli]: { executable, ...options.clis?.[cli] } } }
+            : options,
+        ),
       engine,
       engineDeps: world => ({
         subprocess: () => world.ctx.get('subprocess'),
+        sandbox: () => world.ctx.get('sandbox'),
         logger: { info: () => {}, warn: message => console.log(`    log: ${message.split('\n')[0]}`) },
         runs: new Set(),
       }),
@@ -402,7 +429,8 @@ async function selfCheck(h) {
     try {
       const { childId, tool, value } = await w.delegate({ role: 'fake', prompt: 'hello ✓ CWD' })
       const rendered = tool.output.render({ role: 'fake' }, value)
-      h.assert.equal(rendered[0].text, `started Codex subagent ${childId}`)
+      h.assert.equal(rendered[0].text.split('\n')[0], `started Codex subagent ${childId}`)
+      h.assert.match(rendered[0].text, /this is a start receipt, not a completion result/)
       const notice = await w.notice(childId)
       h.assert.match(notice, new RegExp(`Background subagent ${childId} finished`))
       h.assert.ok(notice.includes(ws), `notice carries the answer (cwd): ${notice}`)
@@ -510,6 +538,12 @@ async function selfCheck(h) {
 
 // ---------------------------------------------------------------------------------------------------------------
 
+async function fingerprint(path) {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(path)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
 async function findExecutable(name) {
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (dir !== '' && existsSync(join(dir, name))) return join(dir, name)
@@ -522,15 +556,42 @@ const wanted = id => requested.length === 0 || requested.includes(id)
 let failures = 0
 let passes = 0
 let skips = 0
+const report = {
+  schemaVersion: 1,
+  recordedAt: new Date().toISOString(),
+  dshVersion: JSON.parse(readFileSync(join(checkout, 'package.json'), 'utf8')).version,
+  platform: process.platform,
+  arch: process.arch,
+  variants: { codexSandboxBackend: process.env.CHECK_CODEX_SANDBOX_BACKEND ?? 'default' },
+  binaries: {},
+  cases: [],
+}
+const reportPath = process.env.CHECK_CLI_REPORT ? resolve(process.env.CHECK_CLI_REPORT) : undefined
+const required = process.env.CHECK_CLI_REQUIRE_ALL === '1'
+for (const id of requested) {
+  if (id !== 'self' && !(id in CLI_DESCRIPTORS)) {
+    failures++
+    console.log(`FAIL unknown requested CLI: ${id}`)
+  }
+}
 
 async function runSuite(label, registerCases, cli, executable) {
   const { registered, helpers } = makeHelpers(cli, executable)
   await registerCases(helpers)
   const only = (process.env.CHECK_CLI_CASE ?? '').toLowerCase()
-  for (const entry of registered) {
-    if (only !== '' && !entry.name.toLowerCase().includes(only)) continue
+  const selected = registered.filter(entry => only === '' || entry.name.toLowerCase().includes(only))
+  if (selected.length === 0) {
+    failures++
+    skips++
+    report.cases.push({ cli: label, name: 'no cases selected', status: 'skip', durationMs: 0 })
+    console.log(`FAIL ${label}: no cases selected; binary detection alone is not validation`)
+    return
+  }
+  for (const entry of selected) {
     if (entry.skip !== undefined) {
       skips++
+      if (required) failures++
+      report.cases.push({ cli: label, name: entry.name, status: 'skip', durationMs: 0 })
       console.log(`SKIP ${label}: ${entry.name} (${entry.skip})`)
       continue
     }
@@ -538,9 +599,11 @@ async function runSuite(label, registerCases, cli, executable) {
     try {
       await entry.fn()
       passes++
+      report.cases.push({ cli: label, name: entry.name, status: 'pass', durationMs: Date.now() - started })
       console.log(`PASS ${label}: ${entry.name} (${Date.now() - started} ms)`)
     } catch (error) {
       failures++
+      report.cases.push({ cli: label, name: entry.name, status: 'fail', durationMs: Date.now() - started })
       console.log(`FAIL ${label}: ${entry.name}\n     ${error?.stack ?? error}`)
     }
   }
@@ -553,13 +616,50 @@ try {
     if (!wanted(id)) continue
     const modulePath = join(repo, 'scripts/check-cli', `${id}.mjs`)
     if (!existsSync(modulePath)) {
-      if (requested.includes(id)) console.log(`SKIP ${id}: no case module at scripts/check-cli/${id}.mjs`)
+      skips++
+      if (requested.includes(id) || required) failures++
+      report.cases.push({ cli: id, name: 'suite unavailable', status: 'skip', durationMs: 0 })
+      console.log(`SKIP ${id}: no case module at scripts/check-cli/${id}.mjs`)
       continue
     }
-    const executable = await findExecutable(descriptor.executable)
-    if (executable === undefined) {
+    const suffix = id.toUpperCase().replaceAll('-', '_')
+    const override = process.env[`CHECK_CLI_EXECUTABLE_${suffix}`]
+    const executable = override ? resolve(override) : await findExecutable(descriptor.executable)
+    if (executable === undefined || !existsSync(executable)) {
       skips++
+      if (requested.includes(id) || required) failures++
+      report.cases.push({ cli: id, name: 'executable unavailable', status: 'skip', durationMs: 0 })
       console.log(`SKIP ${id}: \`${descriptor.executable}\` not found (set CLI_PATH_DIR)`)
+      continue
+    }
+    // Launchers such as snap may replace HOME and bypass fixture isolation. Require a direct binary.
+    if (
+      statSync(executable).size < 64 * 1024 &&
+      /(?:\bsnap\s+run\b|SNAP_USER_COMMON)/.test(readFileSync(executable, 'utf8'))
+    ) {
+      failures++
+      report.cases.push({ cli: id, name: 'isolated launcher check', status: 'fail', durationMs: 0 })
+      console.log(
+        `FAIL ${id}: launcher can replace isolated HOME; set CHECK_CLI_EXECUTABLE_${suffix} to a direct CLI binary`,
+      )
+      continue
+    }
+    const detected = spawnSync(executable, ['--version'], { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 })
+    const version = /\b(\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?)/.exec(detected.stdout ?? '')?.[1]
+    const expected = process.env[`CHECK_CLI_VERSION_${suffix}`]
+    report.binaries[id] = {
+      path: realpathSync(executable),
+      sha256: await fingerprint(executable),
+      version: version ?? null,
+      expectedVersion: expected ?? null,
+    }
+    console.log(`BINARY ${id}: ${realpathSync(executable)}; version ${version ?? 'unknown'}`)
+    if (detected.status !== 0 || version === undefined || (expected !== undefined && version !== expected)) {
+      failures++
+      report.cases.push({ cli: id, name: 'expected binary version', status: 'fail', durationMs: 0 })
+      console.log(
+        `FAIL ${id}: version check failed (expected ${expected ?? 'readable --version'}, observed ${version ?? 'unknown'})`,
+      )
       continue
     }
     const module = await import(pathToFileURL(modulePath).href)
@@ -572,6 +672,19 @@ try {
     } catch {}
   }
   resolutionHook.deregister()
+  checkEnvironment.dispose()
+}
+if (report.cases.length === 0) {
+  failures++
+  console.log('FAIL no cases were executed; a filter with no matches is not validation')
+}
+if (reportPath !== undefined) {
+  mkdirSync(dirname(reportPath), { recursive: true })
+  // Never overwrite an earlier validation record.
+  writeFileSync(reportPath, JSON.stringify({ ...report, totals: { passes, failures, skips } }, null, 2) + '\n', {
+    flag: 'wx',
+  })
+  console.log(`REPORT ${reportPath}`)
 }
 console.log(`\n${passes} passed, ${failures} failed, ${skips} skipped`)
 process.exit(failures > 0 ? 1 : 0)

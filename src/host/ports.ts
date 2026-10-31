@@ -34,7 +34,11 @@ export interface AgentPort {
     readonly tools: {
       /** Resolve only tools already visible to this Agent; never add workflow to a preset without it. */
       get?(name: string, scope?: AgentPort): ToolDefinition | undefined
+      /** Without step admission, conditional registrations are unavailable and must remain unwrapped. */
+      executable?(name: string, scope?: AgentPort): ToolDefinition | undefined
       register(definition: ToolDefinition): () => void
+      /** Hide inherited management tools from delegated children; execution authorization is still mandatory. */
+      restrict?(patch: { readonly deny: readonly string[] }): () => void
       guard(guard: (call: ToolGuardCall) => string | undefined): () => void
     }
   }
@@ -181,6 +185,30 @@ export interface SandboxPolicyPort {
   resolve(request?: { session?: SessionPort }): { readonly mode?: string; readonly workspaceRoot?: string }
 }
 
+/** Runner-owned failure evidence returned by DSH's process sandbox. */
+export interface SandboxRunnerFailureRulePort {
+  readonly allowedExitCodes?: readonly number[]
+  readonly fatalSignatures: readonly string[]
+  readonly informationalLines?: readonly string[]
+}
+
+/** Exact wrapped argv and enforcement scope from DSH's existing sandbox service. */
+export interface ConfinedArgvPort {
+  readonly argv: readonly string[]
+  readonly enforcement: 'full' | 'partial'
+  readonly denialSignatures: readonly string[]
+  readonly runnerFailureRules: readonly SandboxRunnerFailureRulePort[]
+}
+
+/** Optional DSH file-effect confinement; not a network/process-visibility sandbox. */
+export interface SandboxPort {
+  confine(
+    argv: readonly string[],
+    policy: { readonly mode: 'workspace-write'; readonly workspaceRoot: string },
+    signal?: AbortSignal,
+  ): Promise<ConfinedArgvPort>
+}
+
 /** Exit facts of one closed process. */
 export interface SubprocessOutcomePort {
   exitCode: number | null
@@ -248,15 +276,18 @@ export interface HostContext {
   get(name: 'storageDomain'): StorageDomainPort | undefined
   get(name: 'subprocess'): SubprocessPort | undefined
   get(name: 'sandboxPolicy'): SandboxPolicyPort | undefined
+  get(name: 'sandbox'): SandboxPort | undefined
   get(name: string): unknown
-  on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void): unknown
+  /** Native Context serially awaits creation listeners before the Agent's first turn. */
+  on(event: 'agent/created', listener: (payload: { agent: AgentPort; source: string }) => void | Promise<void>): unknown
   on(event: 'agent/disposed', listener: (payload: { agent: AgentPort }) => void): unknown
   on(event: 'tools/change', listener: () => void): unknown
   on(
     event: 'session/event',
     listener: (session: SessionPort, event: { readonly type: string; readonly data?: unknown }) => void,
   ): unknown
-  effect(execute: () => () => void, label?: string): unknown
+  /** Cordis awaits asynchronous disposers before the owning plugin can restart. */
+  effect(execute: () => () => void | Promise<void>, label?: string): unknown
   /** Cordis child-plugin loading; used only to mount the optional probe service. */
   plugin?(plugin: unknown, config?: unknown): unknown
 }

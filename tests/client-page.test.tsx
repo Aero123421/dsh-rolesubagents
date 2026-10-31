@@ -1,10 +1,17 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { type Controller, createController, type ProbeCall } from '../src/client/controller.ts'
+import {
+  type Controller,
+  createController,
+  type ProbeCall,
+  type RoleWriteSafetyCall,
+} from '../src/client/controller.ts'
 import { RolesPage } from '../src/client/RolesPage.tsx'
 import { DEFAULT_ROLES } from '../src/shared/roles.ts'
 import { cleanup, fireEvent, render, screen, settle, update, waitFor, within } from './client-dom.ts'
 import {
+  CATALOG,
+  PRESETS,
   type FakeForm,
   fail,
   fakeForm,
@@ -25,6 +32,7 @@ interface MountOptions {
   preload?: boolean
   /** The CLI connection test; omitted = not available. */
   probe?: ProbeCall
+  roleWriteSafety?: RoleWriteSafetyCall
 }
 
 async function mount(options: MountOptions = {}) {
@@ -35,6 +43,7 @@ async function mount(options: MountOptions = {}) {
     remote,
     locale: options.locale ?? 'en',
     ...(options.probe === undefined ? {} : { probe: options.probe }),
+    ...(options.roleWriteSafety === undefined ? {} : { roleWriteSafety: options.roleWriteSafety }),
   })
   render(<RolesPage controller={controller} view="page" />)
   if (options.preload !== false) update(() => controller.loadReference())
@@ -48,6 +57,7 @@ const rowOf = (id: string): HTMLElement => {
   return item
 }
 const button = (name: string | RegExp) => screen.getByRole('button', { name })
+const footerMessage = (): string | null => document.querySelector('.dshrs-footer [role="status"]')?.textContent ?? null
 const saved = async (fake: FakeForm) => {
   await settle()
   await waitFor(() => expect(fake.calls.length).toBeGreaterThan(0))
@@ -111,12 +121,12 @@ describe('role list', () => {
     await mount()
     const master = screen.getByRole('switch', { name: 'Subagents' })
     expect(master.getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByRole('status').textContent).toBe('No changes')
+    expect(footerMessage()).toBe('No changes')
     fireEvent.click(master)
     expect(master.getAttribute('aria-checked')).toBe('false')
     fireEvent.click(screen.getByRole('switch', { name: 'Enable role worker' }))
     expect(within(rowOf('worker')).getByRole('switch').getAttribute('aria-checked')).toBe('false')
-    expect(screen.getByRole('status').textContent).toBe('Unsaved changes')
+    expect(footerMessage()).toBe('Unsaved changes')
     expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
   })
 
@@ -257,6 +267,82 @@ describe('role editor', () => {
     expect(within(rowOf('worker')).getByText("Model: parent's model")).toBeTruthy()
   })
 
+  it('allows unlisted model IDs and refreshes models and presets independently', async () => {
+    const { remote } = await mount()
+    fireEvent.click(button('Edit role worker'))
+    const row = within(rowOf('worker'))
+    fireEvent.click(row.getByRole('button', { name: 'Enter model IDs manually' }))
+    const provider = row.getByLabelText('Provider') as HTMLInputElement
+    fireEvent.change(provider, { target: { value: 'custom-provider' } })
+    fireEvent.change(row.getByLabelText('Model'), { target: { value: 'private-model' } })
+    const modelsBefore = remote.session.modelCatalog.mock.calls.length
+    const presetsBefore = remote.agentPresets.list.mock.calls.length
+    fireEvent.click(row.getByRole('button', { name: 'Refresh DSH models' }))
+    await settle()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(modelsBefore + 1)
+    expect(remote.agentPresets.list).toHaveBeenCalledTimes(presetsBefore)
+    expect(row.getByLabelText('Provider')).toBe(provider)
+    expect(provider.value).toBe('custom-provider')
+    expect((row.getByLabelText('Model') as HTMLInputElement).value).toBe('private-model')
+    fireEvent.click(row.getByRole('button', { name: 'Refresh presets' }))
+    await settle()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(modelsBefore + 1)
+    expect(remote.agentPresets.list).toHaveBeenCalledTimes(presetsBefore + 1)
+    fireEvent.click(row.getByRole('button', { name: 'Choose from model list' }))
+    expect(row.getByRole('option', { name: 'custom-provider (not listed)' })).toBeTruthy()
+    expect(row.getByRole('option', { name: 'private-model (not listed)' })).toBeTruthy()
+  })
+
+  it('keeps typed model inputs mounted when delayed lists arrive', async () => {
+    const remote = fakeRemote()
+    let resolveCatalog!: (value: ReturnType<typeof ok<typeof CATALOG>>) => void
+    let resolvePresets!: (value: ReturnType<typeof ok<typeof PRESETS>>) => void
+    remote.session.modelCatalog.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveCatalog = resolve
+        }),
+    )
+    remote.agentPresets.list.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolvePresets = resolve
+        }),
+    )
+    await mount({ remote, preload: false })
+    fireEvent.click(button('Edit role worker'))
+    const row = within(rowOf('worker'))
+    const provider = row.getByLabelText('Provider') as HTMLInputElement
+    fireEvent.change(provider, { target: { value: 'custom' } })
+    fireEvent.change(row.getByLabelText('Model'), { target: { value: 'model' } })
+    resolveCatalog(ok(CATALOG))
+    resolvePresets(ok(PRESETS))
+    await settle()
+    expect(row.getByLabelText('Provider')).toBe(provider)
+    expect(provider.value).toBe('custom')
+    expect((row.getByLabelText('Model') as HTMLInputElement).value).toBe('model')
+  })
+
+  it('does not replace a focused input when a delayed catalog arrives before typing', async () => {
+    const remote = fakeRemote()
+    let resolveCatalog!: (value: ReturnType<typeof ok<typeof CATALOG>>) => void
+    remote.session.modelCatalog.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveCatalog = resolve
+        }),
+    )
+    await mount({ remote, preload: false })
+    fireEvent.click(button('Edit role worker'))
+    const row = within(rowOf('worker'))
+    const provider = row.getByLabelText('Provider') as HTMLInputElement
+    update(() => provider.focus())
+    resolveCatalog(ok(CATALOG))
+    await settle()
+    expect(row.getByLabelText('Provider')).toBe(provider)
+    expect(document.activeElement).toBe(provider)
+  })
+
   it('keeps a stored route that the catalog no longer lists', async () => {
     const roles = DEFAULT_ROLES.map(role =>
       role.id === 'worker' ? { ...role, model: { provider: 'gone', model: 'old' } } : role,
@@ -289,9 +375,26 @@ describe('role editor', () => {
     fireEvent.change(preset, { target: { value: 'ptc' } })
     expect(within(rowOf('worker')).getByText('Preset: ptc')).toBeTruthy()
     remote.session.modelCatalog.mockResolvedValue({ ok: true, value: { groups: [], failures: [] } })
-    fireEvent.click(within(rowOf('worker')).getByRole('button', { name: 'Retry' }))
+    fireEvent.click(within(rowOf('worker')).getByRole('button', { name: 'Retry models' }))
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps typed preset ID during retry and permits switching to the recovered list', async () => {
+    const remote = fakeRemote()
+    remote.agentPresets.list.mockRejectedValueOnce(new Error('down'))
+    await mount({ remote, preload: false })
+    fireEvent.click(button('Edit role worker'))
+    await settle()
+    const row = within(rowOf('worker'))
+    const preset = row.getByLabelText('Agent preset') as HTMLInputElement
+    fireEvent.change(preset, { target: { value: 'custom-preset' } })
+    fireEvent.click(row.getByRole('button', { name: 'Retry presets' }))
+    await settle()
+    expect(row.getByLabelText('Agent preset')).toBe(preset)
+    expect(preset.value).toBe('custom-preset')
+    fireEvent.click(row.getByRole('button', { name: 'Choose from preset list' }))
+    expect(row.getByRole('option', { name: 'custom-preset (not listed)' })).toBeTruthy()
   })
 
   it('offers the agent presets and explains what a preset changes', async () => {
@@ -307,6 +410,178 @@ describe('role editor', () => {
   })
 })
 
+describe('AI role-management permission', () => {
+  it('starts OFF and saves ON/OFF immediately without using the role Save button', async () => {
+    const { fake } = await mount()
+    const control = screen.getByRole('switch', { name: 'Allow AI role management' })
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText(/administer role configuration for this Host\/profile/)).toBeTruthy()
+    expect(screen.getByText(/Children do not inherit it/)).toBeTruthy()
+    fireEvent.click(control)
+    await settle()
+    await screen.findByText('AI role-management permission saved.')
+    expect(control.getAttribute('aria-checked')).toBe('true')
+    expect(fake.calls[0]).toEqual({ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: true }], revision: 1 })
+    expect(footerMessage()).toBe('No changes')
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(control)
+    await settle()
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'))
+    expect(fake.calls[1]).toEqual({ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 2 })
+  })
+
+  it('keeps accepted ON visible while OFF is pending, disables controls, and preserves dirty role input', async () => {
+    const { fake } = await mount({
+      form: { value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } },
+    })
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Description for the parent'), { target: { value: 'unsaved role input' } })
+    let release = () => {}
+    fake.gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const control = screen.getByRole('switch', { name: 'Allow AI role management' })
+    fireEvent.click(control)
+    expect(control.getAttribute('aria-checked')).toBe('true')
+    expect((control as HTMLButtonElement).disabled).toBe(true)
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText('Saving AI role-management permission…')).toBeTruthy()
+    update(release)
+    await settle()
+    await screen.findByText('AI role-management permission saved.')
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    expect((screen.getByLabelText('Description for the parent') as HTMLTextAreaElement).value).toBe(
+      'unsaved role input',
+    )
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByText(/nothing was saved/)).toBeNull()
+    expect(fake.calls).toHaveLength(1)
+  })
+
+  it('shows permission failure without changing the switch or dirtying roles', async () => {
+    const { fake } = await mount()
+    fake.outcome = 'throw'
+    const control = screen.getByRole('switch', { name: 'Allow AI role management' })
+    fireEvent.click(control)
+    await settle()
+    await screen.findByText(
+      'Could not confirm the permission change. The switch shows the Host’s current value; try again.',
+    )
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    expect((control as HTMLButtonElement).disabled).toBe(false)
+    expect(footerMessage()).toBe('No changes')
+  })
+
+  it('shows a gate revision conflict and does not automatically retry it', async () => {
+    const { fake } = await mount()
+    fake.outcome = 'refuse'
+    fake.onRefuse = () =>
+      fake.set({ revision: 2, value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } })
+    fireEvent.click(screen.getByRole('switch', { name: 'Allow AI role management' }))
+    await settle()
+    await screen.findByText(
+      'Settings changed before this permission could be saved. The switch shows the Host’s current value; try again.',
+    )
+    expect(screen.getByRole('switch', { name: 'Allow AI role management' }).getAttribute('aria-checked')).toBe('true')
+    expect(fake.calls).toHaveLength(1)
+  })
+
+  it('labels the independent permission in Japanese and requires a revision before writing', async () => {
+    const { fake } = await mount({ locale: 'ja', form: { revision: undefined } })
+    const control = screen.getByRole('switch', { name: 'AIによるロール管理を許可' })
+    expect((control as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText('この許可を変更するには、Hostの現在の設定リビジョンが必要です。')).toBeTruthy()
+    fireEvent.click(control)
+    expect(fake.calls).toHaveLength(0)
+  })
+})
+
+describe('role write-safety diagnostics', () => {
+  it('reports accepted but unconfirmed saves without discarding input or suggesting an automatic retry', async () => {
+    const { fake } = await mount()
+    fake.form.mutate = async () => true
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Description for the parent'), {
+      target: { value: 'keep submitted description' },
+    })
+    fireEvent.click(button('Save'))
+    await settle()
+    expect(footerMessage()).toContain('The Host accepted the save')
+    expect(footerMessage()).toContain('write may already be committed')
+    expect((screen.getByLabelText('Description for the parent') as HTMLTextAreaElement).value).toBe(
+      'keep submitted description',
+    )
+    expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
+  })
+  it('explains expression-backed settings without discarding input or preventing independent OFF', async () => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async () =>
+      ok({ safe: false, revision: 1, reason: 'expression-backed-role-settings' }),
+    )
+    const { fake } = await mount({
+      form: { value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } },
+      roleWriteSafety: guard,
+    })
+    fireEvent.click(button('Edit role worker'))
+    fireEvent.change(screen.getByLabelText('Description for the parent'), { target: { value: 'keep typed text' } })
+    fireEvent.click(button('Save'))
+    await settle()
+    expect(footerMessage()).toBe(
+      'Executable expressions or other unsupported role settings cannot be safely saved from this page. Edit the native profile configuration instead. Your draft is unchanged.',
+    )
+    expect((screen.getByLabelText('Description for the parent') as HTMLTextAreaElement).value).toBe('keep typed text')
+    expect(fake.calls).toHaveLength(0)
+    fireEvent.click(screen.getByRole('switch', { name: 'Allow AI role management' }))
+    await settle()
+    expect(fake.calls).toEqual([{ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 1 }])
+    expect(guard).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows OFF during a pending guard and refuses its stale positive answer without any roles write', async () => {
+    let release: (answer: Awaited<ReturnType<RoleWriteSafetyCall>>) => void = () => {}
+    const guard = vi.fn<RoleWriteSafetyCall>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { fake } = await mount({
+      form: { value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } },
+      roleWriteSafety: guard,
+    })
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable role worker' }))
+    fireEvent.click(button('Save'))
+    const control = screen.getByRole('switch', { name: 'Allow AI role management' })
+    expect((control as HTMLButtonElement).disabled).toBe(false)
+    expect((button('Saving…') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(control)
+    await settle()
+    expect(control.getAttribute('aria-checked')).toBe('false')
+    update(() => release(ok({ safe: true, revision: 1, reason: 'literal-role-settings' })))
+    await settle()
+    expect(footerMessage()).toBe(
+      'Settings changed before role-write safety could be confirmed. Nothing was written by this attempt; review the current settings and try again.',
+    )
+    expect(fake.calls).toHaveLength(1)
+    expect(fake.calls[0]?.ops[0]?.path).toEqual(['allowAiRoleManagement'])
+    expect(screen.getByRole('switch', { name: 'Enable role worker' }).getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('shows a fixed localized unavailable diagnostic rather than a raw transport error', async () => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async () => {
+      throw new Error('SECRET raw error')
+    })
+    const { fake } = await mount({ locale: 'ja', roleWriteSafety: guard })
+    fireEvent.click(screen.getByRole('switch', { name: 'サブエージェント' }))
+    fireEvent.click(button('保存'))
+    await settle()
+    expect(footerMessage()).toBe(
+      'Hostがロール設定を書き込んでよいか確認できませんでした。この試行では何も書き込んでいません。接続やHostの対応を確認して再試行してください。',
+    )
+    expect(document.body.textContent).not.toContain('SECRET')
+    expect(fake.calls).toHaveLength(0)
+  })
+})
+
 describe('saving', () => {
   it('writes the draft once and tells the user when it applies', async () => {
     const { fake } = await mount()
@@ -315,8 +590,8 @@ describe('saving', () => {
     expect(button('Saving…').getAttribute('aria-busy')).toBe('true')
     await saved(fake)
     expect(fake.calls).toHaveLength(1)
-    expect(screen.getByRole('status').textContent).toBe(
-      'Saved. Changes apply to new sessions; running sessions keep their roles and workflow default model.',
+    expect(footerMessage()).toBe(
+      'Saved. New root conversations use these settings. AI can explicitly use apply_current to update its own roles for future delegations, never existing children. Running sessions keep their workflow default model.',
     )
     expect((button('Save') as HTMLButtonElement).disabled).toBe(true)
   })
@@ -328,6 +603,21 @@ describe('saving', () => {
     fireEvent.click(button('Save'))
     await screen.findByText('Could not save. Check the connection and try again.')
     expect((button('Save') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('keeps a retained draft when the Host accepts a save the mirror has not confirmed', async () => {
+    const { fake } = await mount()
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable role worker' }))
+    expect(screen.getByRole('switch', { name: 'Enable role worker' }).getAttribute('aria-checked')).toBe('false')
+    fake.form.mutate = async (ops, revision) => {
+      fake.calls.push({ ops, revision })
+      return true
+    }
+    fireEvent.click(button('Save'))
+    await screen.findByText(/Your draft is retained/)
+    expect(screen.queryByRole('button', { name: 'Reload latest settings' })).toBeNull()
+    expect(screen.getByRole('switch', { name: 'Enable role worker' }).getAttribute('aria-checked')).toBe('false')
+    expect((button('Discard') as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('reports a conflict and reloads the latest settings on request', async () => {
@@ -406,7 +696,7 @@ describe('language', () => {
     expect(within(rowOf('worker')).getByText('モデル: 親と同じモデル')).toBeTruthy()
     expect(document.querySelector('.dshrs-root')?.getAttribute('lang')).toBe('ja')
     fireEvent.click(screen.getByRole('switch', { name: 'サブエージェント' }))
-    expect(screen.getByRole('status').textContent).toBe('未保存の変更があります')
+    expect(footerMessage()).toBe('未保存の変更があります')
   })
 
   it('switches language live and falls back to English for other locales', async () => {
@@ -461,7 +751,7 @@ describe('workflow model section', () => {
     expect(picker.queryByLabelText('Reasoning effort')).toBeNull()
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(1)
-    fireEvent.click(picker.getByRole('button', { name: 'Retry' }))
+    fireEvent.click(picker.getByRole('button', { name: 'Retry models' }))
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(2)
   })
@@ -484,6 +774,8 @@ describe('runs on an external CLI', () => {
       'Claude Code',
       'Antigravity',
       'OpenCode',
+      'Grok Build',
+      'Pi',
     ])
     fireEvent.change(runsOn, { target: { value: 'codex' } })
     const editor = editorOf('worker')
@@ -539,6 +831,10 @@ describe('runs on an external CLI', () => {
     expect([...permission.options].map(option => [option.textContent, option.disabled])).toEqual([
       ['Read-only — no file changes', false],
       ['Edit files (no shell) — edits in the workspace', true],
+      [
+        'Native accept-edits (keep settings and extensions) — requires full-access parent; native CLI checks apply',
+        true,
+      ],
       ['Auto (classifier) — no restrictions', true],
       ['Bypass permissions — no restrictions', true],
     ])
@@ -556,6 +852,78 @@ describe('runs on an external CLI', () => {
     fireEvent.click(screen.getByLabelText('Block file writes for this role'))
     expect(permission.value).toBe('read-only')
     expect(screen.queryByText('Fix these before saving:')).toBeNull()
+  })
+
+  it.each(['grok-build', 'pi'])(
+    'selects the Host-confined workspace preset by default for %s, not native full access',
+    async cli => {
+      await mount()
+      fireEvent.click(button('Edit role explorer'))
+      fireEvent.click(screen.getByLabelText('Block file writes for this role'))
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: cli } })
+      const permission = select(screen.getByLabelText('Permission'))
+      expect(permission.value).toBe('workspace-write')
+      expect([...permission.options].map(option => option.value)).toEqual(['workspace-write', 'native'])
+      expect(screen.getByText(/Host DSH sandbox/)).toBeTruthy()
+      expect(screen.getByText(/static API-key credentials/)).toBeTruthy()
+    },
+  )
+
+  it.each(['agy', 'codex'] as const)(
+    'refreshes %s models explicitly and retains selected values and dynamic efforts on failure',
+    async cli => {
+      const probe = fakeProbe()
+      probe.mockResolvedValueOnce(probeAnswer(cli, { models: [{ id: 'live-model', efforts: ['high'] }] }))
+      await mount({ probe })
+      fireEvent.click(button('Edit role worker'))
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: cli } })
+      expect(probe).not.toHaveBeenCalled()
+      fireEvent.click(button('Refresh models'))
+      await settle()
+      const editor = editorOf('worker')
+      const model = input(editor.getByLabelText('Model'))
+      fireEvent.change(model, { target: { value: 'live-model' } })
+      const effort = select(editor.getByLabelText('Reasoning effort'))
+      expect([...effort.options].map(option => option.value)).toEqual(['', 'high'])
+      fireEvent.change(effort, { target: { value: 'high' } })
+      probe.mockResolvedValueOnce(probeAnswer(cli, { models: [{ id: 'live-model', efforts: ['low'] }] }))
+      fireEvent.click(button('Refresh models'))
+      await settle()
+      expect(effort.value).toBe('high')
+      expect([...effort.options].map(option => option.value)).toEqual(['', 'low', 'high'])
+      probe.mockRejectedValueOnce(new Error('private diagnostic'))
+      fireEvent.click(button('Refresh models'))
+      await settle()
+      expect(model.value).toBe('live-model')
+      expect(effort.value).toBe('high')
+      expect(editor.getByText(/Showing the last successful model list/)).toBeTruthy()
+      expect(editor.getByText(/Last successful model list/)).toBeTruthy()
+      expect(editor.getByText(/Diagnostics could not reach the Host reliably/)).toBeTruthy()
+      expect(document.body.textContent).not.toContain('private diagnostic')
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: 'claude-code' } })
+      expect(screen.queryByRole('button', { name: 'Refresh models' })).toBeNull()
+      expect(editor.getByText(/Built-in Claude aliases/)).toBeTruthy()
+      fireEvent.change(screen.getByLabelText('Runs on'), { target: { value: 'pi' } })
+      expect(screen.queryByRole('button', { name: 'Refresh models' })).toBeNull()
+      expect(editor.getByText(/Live model discovery is not supported/)).toBeTruthy()
+    },
+  )
+
+  it.each([
+    ['models-timeout', 'en', /model-list command timed out/],
+    ['models-unavailable', 'en', /model-list command failed/],
+    ['models-timeout', 'ja', /一覧コマンドがタイムアウト/],
+    ['models-unavailable', 'ja', /一覧コマンドが失敗/],
+    ['secret failure text', 'en', /returned no usable model list/],
+  ] as const)('explains allowlisted %s model discovery failures in %s', async (message, locale, expected) => {
+    const probe = fakeProbe()
+    probe.mockResolvedValueOnce(probeAnswer('opencode', { message }))
+    const { controller } = await mount({ probe, locale })
+    update(() => controller.refreshCliModels('opencode'))
+    await settle()
+    const card = document.querySelector('[aria-label="OpenCode"]') as HTMLElement
+    expect(within(card).getByText(expected)).toBeTruthy()
+    expect(document.body.textContent).not.toContain('secret failure text')
   })
 
   it('asks OpenCode for a provider and a model, with suggestions from the connection test', async () => {
@@ -684,6 +1052,10 @@ describe('external CLIs section', () => {
     expect(
       cardOf('Codex').getByText('Found: /usr/local/bin/codex · Version 0.200.0 · Signed in · 2 models listed'),
     ).toBeTruthy()
+    expect(cardOf('Codex').getByText('Compatibility verification records')).toBeTruthy()
+    expect(cardOf('Codex').getByText('Verification scope unknown')).toBeTruthy()
+    expect(cardOf('Codex').queryByText('Tested for this exact scope')).toBeNull()
+    expect(cardOf('Codex').getByText(/Version detection alone does not verify/)).toBeTruthy()
     fireEvent.click(button('Test connection to Antigravity'))
     fireEvent.click(button('Test connection to OpenCode'))
     fireEvent.click(button('Test connection to Claude Code'))
@@ -697,18 +1069,37 @@ describe('external CLIs section', () => {
     expect(probe).toHaveBeenCalledWith('codex', expect.any(AbortSignal))
   })
 
-  it('reports a failed test, and hides the button when the Host has no probe', async () => {
+  it('distinguishes transport and Remote failures without hiding retries or other cards', async () => {
     const probe = fakeProbe()
     probe.mockRejectedValueOnce(new Error('network down'))
     probe.mockResolvedValueOnce(fail('gateway/invocation-unavailable'))
     await mount({ probe })
     fireEvent.click(button('Test connection to Codex'))
     await settle()
-    expect(cardOf('Codex').getByText('The test could not run. Check the connection and try again.')).toBeTruthy()
+    expect(cardOf('Codex').getByText(/Diagnostics could not reach the Host reliably/)).toBeTruthy()
     fireEvent.click(button('Test connection to Codex'))
     await settle()
-    expect(screen.queryByRole('button', { name: /Test connection/ })).toBeNull()
-    expect(screen.getByText('The connection test is not available on this Host.')).toBeTruthy()
+    expect(cardOf('Codex').getByText(/diagnostic Remote service or method is unavailable/)).toBeTruthy()
+    expect(button('Test connection to Codex')).toBeTruthy()
+    expect(button('Test connection to Claude Code')).toBeTruthy()
+    fireEvent.click(button('Test connection to Codex'))
+    await settle()
+    expect(cardOf('Codex').getByText(/Found:/)).toBeTruthy()
+  })
+
+  it.each([
+    [new Error('transport failure: HTTP 401 secret-token'), /DSH のサインイン・アクセス権限/],
+    [new Error('transport failure: HTTP 404 secret-token'), /この応答だけでは区別できません/],
+    [new TypeError('connection: invalid server-response envelope secret-token'), /診断応答が不正/],
+  ])('shows localized diagnostic failures without leaking raw errors', async (error, expected) => {
+    const probe = fakeProbe().mockRejectedValueOnce(error)
+    await mount({ locale: 'ja', probe })
+    fireEvent.click(screen.getByRole('button', { name: 'Codex への接続をテスト' }))
+    await settle()
+    expect(cardOf('Codex').getByText(expected)).toBeTruthy()
+    expect(screen.queryByText(/secret-token/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Codex への接続をテスト' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'ロール worker を編集' })).toBeTruthy()
   })
 
   it('shows the CLI editor and section in Japanese', async () => {

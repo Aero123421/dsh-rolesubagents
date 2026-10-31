@@ -4,16 +4,28 @@ import {
   cliSuggestions,
   createController,
   type ProbeCall,
+  type RoleWriteSafetyCall,
   probeResultOf,
   ProbeUnavailableError,
 } from '../src/client/controller.ts'
-import { DEFAULT_ROLES, type RoleDefinition } from '../src/shared/roles.ts'
+import { DEFAULT_ROLES, normalizeSettings, type RoleDefinition } from '../src/shared/roles.ts'
 import { CATALOG, fail, type FakeForm, fakeForm, fakeProbe, fakeRemote, ok, probeAnswer } from './client-helpers.ts'
 
-function setup(initial: Parameters<typeof fakeForm>[0] = {}, locale = 'en', probe?: ProbeCall) {
+function setup(
+  initial: Parameters<typeof fakeForm>[0] = {},
+  locale = 'en',
+  probe?: ProbeCall,
+  roleWriteSafety?: RoleWriteSafetyCall,
+) {
   const fake = fakeForm(initial)
   const remote = fakeRemote()
-  const controller = createController({ form: fake.form, remote, locale, ...(probe === undefined ? {} : { probe }) })
+  const controller = createController({
+    form: fake.form,
+    remote,
+    locale,
+    ...(probe === undefined ? {} : { probe }),
+    ...(roleWriteSafety === undefined ? {} : { roleWriteSafety }),
+  })
   return { fake, remote, controller }
 }
 
@@ -98,6 +110,147 @@ describe('state', () => {
   })
 })
 
+describe('retained drafts and acknowledged saves', () => {
+  it.each(['unavailable', 'loading'] as const)(
+    'keeps dirty inputs across %s and rejects conflicting returned data',
+    status => {
+      const { controller, fake } = setup()
+      const uid = uidOf(controller, 'worker')
+      controller.toggleEditor(uid)
+      controller.patchRole(uid, { instructions: 'retain my draft' })
+      fake.set({ status, value: undefined, revision: undefined })
+      expect(controller.getSnapshot()).toMatchObject({ draft: undefined, canSave: false })
+      fake.set({ status: 'ready', revision: 1, value: { enabled: false, roles: DEFAULT_ROLES } })
+      expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, canSave: false, expanded: uid })
+      expect(rows(controller).find(row => row.uid === uid)?.role.instructions).toBe('retain my draft')
+    },
+  )
+  it('allows explicit save of normalization repairs without an unrelated role edit', async () => {
+    const { controller, fake } = setup({ value: { enabled: true, roles: [{ id: 'Bad Id' }, ...DEFAULT_ROLES] } })
+    expect(controller.getSnapshot()).toMatchObject({ dirty: false, canSave: true })
+    await controller.save()
+    expect(fake.calls).toHaveLength(1)
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', repaired: [], canSave: false })
+  })
+  it.each(['ready', 'unavailable'] as const)(
+    'retains an accepted save until its %s mirror confirms the submitted values',
+    async status => {
+      const { controller, fake } = setup()
+      controller.patchRole(uidOf(controller, 'worker'), { instructions: 'accepted but not mirrored' })
+      let written: Record<string, unknown> | undefined
+      fake.form.mutate = async ops => {
+        written = { ...(fake.form.getSnapshot().value as Record<string, unknown>) }
+        for (const op of ops) if (op.op === 'set') written[op.path[0] ?? ''] = structuredClone(op.value)
+        if (status === 'unavailable') fake.set({ status })
+        return true
+      }
+      await controller.save()
+      expect(controller.getSnapshot()).toMatchObject({
+        save: 'idle',
+        conflict: true,
+        canSave: false,
+        saveIssue: 'role-save-unconfirmed',
+      })
+      fake.set({ status: 'ready', revision: 2 })
+      expect(controller.getSnapshot()).toMatchObject({
+        dirty: true,
+        conflict: true,
+        canSave: false,
+        saveIssue: 'role-save-unconfirmed',
+      })
+      expect(rows(controller).find(row => row.role.id === 'worker')?.role.instructions).toBe(
+        'accepted but not mirrored',
+      )
+      fake.set({ value: written, revision: 3 })
+      expect(controller.getSnapshot()).toMatchObject({ dirty: false, conflict: false, saveIssue: undefined })
+      expect(rows(controller).find(row => row.role.id === 'worker')?.role.instructions).toBe(
+        'accepted but not mirrored',
+      )
+    },
+  )
+  it.each([
+    { enabled: true, roles: [{ id: 'Bad Id' }, ...DEFAULT_ROLES] },
+    { enabled: true, roles: DEFAULT_ROLES, workflowModel: { provider: 'p' } },
+  ])(
+    'keeps an accepted repair-only submission unconfirmed until its exact canonical mirror arrives: %j',
+    async malformed => {
+      const guard = vi.fn<RoleWriteSafetyCall>(async revision =>
+        ok({ safe: true, revision, reason: 'literal-role-settings' }),
+      )
+      const { controller, fake } = setup({ value: malformed }, 'en', undefined, guard)
+      let submitted: Record<string, unknown> = {}
+      let calls = 0
+      fake.form.mutate = async ops => {
+        calls++
+        submitted = Object.fromEntries(ops.filter(op => op.op === 'set').map(op => [op.path[0], op.value]))
+        return true
+      }
+      await controller.save()
+      expect(controller.getSnapshot()).toMatchObject({
+        dirty: false,
+        conflict: true,
+        canSave: false,
+        saveIssue: 'role-save-unconfirmed',
+      })
+      fake.set({ revision: 2, value: { ...malformed, allowAiRoleManagement: true } })
+      expect(controller.getSnapshot()).toMatchObject({
+        dirty: false,
+        conflict: true,
+        canSave: false,
+        saveIssue: 'role-save-unconfirmed',
+      })
+      await controller.save()
+      expect(calls).toBe(1)
+      expect(guard).toHaveBeenCalledTimes(1)
+      fake.set({ revision: 3, value: { ...submitted, allowAiRoleManagement: true } })
+      expect(controller.getSnapshot()).toMatchObject({
+        dirty: false,
+        conflict: false,
+        canSave: false,
+        repaired: [],
+        saveIssue: undefined,
+      })
+    },
+  )
+
+  it('does not erase opaque metadata when acceptance is followed by a competing mirror', async () => {
+    const stored = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, opaque: 'original' } : role))
+    const { controller, fake } = setup({ value: { enabled: true, roles: stored } })
+    controller.patchRole(uidOf(controller, 'worker'), { instructions: 'submitted' })
+    fake.form.mutate = async ops => {
+      const values = Object.fromEntries(ops.filter(op => op.op === 'set').map(op => [op.path[0], op.value]))
+      fake.set({
+        revision: 2,
+        value: {
+          ...values,
+          roles: (values.roles as Record<string, unknown>[]).map(role =>
+            role.id === 'worker' ? { ...role, opaque: 'other writer' } : role,
+          ),
+        },
+      })
+      return true
+    }
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, saveIssue: 'role-save-unconfirmed' })
+    expect(controller.getSnapshot().draft?.rawBaseRoles).toEqual(stored)
+  })
+  it('does not start writes or reference/probe reads from stale actions after disposal', async () => {
+    const probe = vi.fn<ProbeCall>()
+    const { controller, fake, remote } = setup({}, 'en', probe)
+    controller.setEnabled(false)
+    controller.dispose()
+    await controller.save()
+    await controller.setAllowAiRoleManagement(true)
+    controller.loadReference()
+    controller.loadWorkflowCatalog()
+    controller.probeCli('codex')
+    expect(fake.calls).toHaveLength(0)
+    expect(remote.session.modelCatalog).not.toHaveBeenCalled()
+    expect(remote.agentPresets.list).not.toHaveBeenCalled()
+    expect(probe).not.toHaveBeenCalled()
+  })
+})
+
 describe('editing', () => {
   it('opens the editor of an added or duplicated role and closes the editor of a deleted one', () => {
     const { controller, remote } = setup()
@@ -155,6 +308,89 @@ describe('editing', () => {
 })
 
 describe('save', () => {
+  it('saves an intentionally accepted duplicate-id repair using only first-selected raw metadata', async () => {
+    const first = { ...DEFAULT_ROLES[2], metadata: { source: 'first-selected' } }
+    const discarded = { ...DEFAULT_ROLES[2], metadata: { secret: 'SECRET_DISCARDED_DUPLICATE' } }
+    const stored = { enabled: true, roles: [...DEFAULT_ROLES.slice(0, 2), first, ...DEFAULT_ROLES.slice(3), discarded] }
+    const { controller, fake } = setup({ value: stored })
+    expect(controller.getSnapshot().repaired.some(problem => problem.code === 'duplicate-id')).toBe(true)
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'Explicitly accepted repair' })
+    expect(controller.getSnapshot().canSave).toBe(true)
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', dirty: false, conflict: false })
+    expect(fake.calls).toHaveLength(1)
+    expect(roleOf(fake, 'worker')).toHaveProperty('metadata', { source: 'first-selected' })
+    expect(JSON.stringify(fake.calls)).not.toContain('SECRET_DISCARDED_DUPLICATE')
+    expect(normalizeSettings(fake.form.getSnapshot().value).problems).toEqual([])
+  })
+
+  it('saves missing-builtin repairs without a phantom source mapping', async () => {
+    const stored = { enabled: true, roles: DEFAULT_ROLES.filter(role => role.builtin !== 'general') }
+    const { controller, fake } = setup({ value: stored })
+    expect(controller.getSnapshot().repaired.some(problem => problem.code === 'builtin-missing')).toBe(true)
+    expect(rows(controller).find(row => row.role.id === 'general')?.sourceId).toBeUndefined()
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'Accept repaired catalog' })
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', dirty: false, conflict: false })
+    expect(roleOf(fake, 'general')).toMatchObject({ id: 'general', builtin: 'general', enabled: false })
+    expect(normalizeSettings(fake.form.getSnapshot().value).problems).toEqual([])
+  })
+
+  it('saves corrected builtin ids while retaining the selected raw builtin metadata', async () => {
+    const stored = {
+      enabled: true,
+      roles: DEFAULT_ROLES.map(role =>
+        role.builtin === 'general'
+          ? { ...role, id: 'incorrect_raw_id', metadata: { source: 'original-builtin' } }
+          : role,
+      ),
+    }
+    const { controller, fake } = setup({ value: stored })
+    expect(rows(controller).find(row => row.role.id === 'general')?.sourceId).toBe('general')
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'Save corrected builtin id' })
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', dirty: false, conflict: false })
+    expect(roleOf(fake, 'general')).toHaveProperty('metadata', { source: 'original-builtin' })
+    expect(roleOf(fake, 'incorrect_raw_id')).toBeUndefined()
+    expect(normalizeSettings(fake.form.getSnapshot().value).problems).toEqual([])
+  })
+
+  it('writes accepted semantic repairs instead of retaining ignored raw builtin fields', async () => {
+    const stored = {
+      enabled: true,
+      roles: DEFAULT_ROLES.map(role =>
+        role.builtin === 'general'
+          ? { ...role, metadata: 'kept-general', runner: { cli: 'pi', permission: 'native' } }
+          : role.builtin === 'fork'
+            ? { ...role, metadata: 'kept-fork', model: { provider: 'fake', model: 'fake' }, agentPreset: 'ignored' }
+            : role,
+      ),
+    }
+    const { controller, fake } = setup({ value: stored })
+    expect(controller.getSnapshot().repaired.map(problem => problem.code)).toEqual(
+      expect.arrayContaining(['builtin-runner-ignored', 'fork-model-ignored', 'fork-preset-ignored']),
+    )
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'Accept semantic repairs' })
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', dirty: false, conflict: false, repaired: [] })
+    expect(roleOf(fake, 'general')).not.toHaveProperty('runner')
+    expect(roleOf(fake, 'fork')).not.toHaveProperty('model')
+    expect(roleOf(fake, 'fork')).not.toHaveProperty('agentPreset')
+    expect(roleOf(fake, 'general')).toHaveProperty('metadata', 'kept-general')
+    expect(roleOf(fake, 'fork')).toHaveProperty('metadata', 'kept-fork')
+    expect(normalizeSettings(fake.form.getSnapshot().value).problems).toEqual([])
+  })
+
+  it('keeps legacy default-backed drafts editable across a disjoint gate update', async () => {
+    const { controller, fake } = setup({ value: { enabled: true, allowAiRoleManagement: false } })
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'Unsaved legacy draft' })
+    await controller.setAllowAiRoleManagement(true)
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: false, canSave: true })
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', dirty: false, conflict: false })
+    expect(roleOf(fake, 'worker')?.description).toBe('Unsaved legacy draft')
+  })
+
   it('writes enabled and roles in one fenced mutation, then shows the saved settings', async () => {
     const { controller, fake } = setup({ revision: 4 })
     controller.setEnabled(false)
@@ -237,6 +473,33 @@ describe('save', () => {
     expect(rows(controller).map(row => row.role.id)).toEqual(['general', 'fork'])
   })
 
+  it('retains dirty inputs without conflict when an in-flight role write loses only to an external gate change', async () => {
+    const { controller, fake } = setup()
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'mine' })
+    let release = () => {}
+    fake.gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    fake.outcome = 'refuse'
+    const pending = controller.save()
+    fake.set({ revision: 2, value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } })
+    release()
+    await pending
+    expect(fake.calls).toHaveLength(1)
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      conflict: false,
+      canSave: true,
+      save: 'idle',
+      management: { enabled: true },
+    })
+    expect(controller.getSnapshot().draft?.revision).toBe(2)
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('mine')
+    fake.outcome = 'accept'
+    await controller.save()
+    expect(fake.calls[1]?.revision).toBe(2)
+  })
+
   it('does not send a write once the Host revision moved, even if no notification arrived', async () => {
     const { controller, fake } = setup()
     controller.setEnabled(false)
@@ -256,7 +519,444 @@ describe('save', () => {
   })
 })
 
+describe('role write syntax safety', () => {
+  const literal = (revision: number) => ok({ safe: true, revision, reason: 'literal-role-settings' })
+
+  it('requires a positive literal check at the exact sent revision before writing', async () => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async revision => literal(revision))
+    const { controller, fake } = setup({}, 'en', undefined, guard)
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'literal edit' })
+    await controller.save()
+    expect(guard).toHaveBeenCalledExactlyOnceWith(1, expect.any(AbortSignal))
+    expect(fake.calls).toHaveLength(1)
+    expect(fake.calls[0]?.revision).toBe(1)
+    expect(controller.getSnapshot()).toMatchObject({ save: 'saved', saveIssue: undefined, dirty: false })
+  })
+
+  it.each([
+    [ok({ safe: false, revision: 1, reason: 'expression-backed-role-settings' }), 'expression-backed-role-settings'],
+    [ok({ safe: false, reason: 'safety-unavailable' }), 'role-write-safety-unavailable'],
+    [ok({ safe: false, revision: 2, reason: 'revision-conflict' }), 'role-write-safety-conflict'],
+    [ok({ safe: true, revision: 2, reason: 'literal-role-settings' }), 'role-write-safety-conflict'],
+    [ok({ safe: true, revision: 1 }), 'role-write-safety-unavailable'],
+    [ok({ safe: 'true', revision: 1, reason: 'literal-role-settings' }), 'role-write-safety-unavailable'],
+    [ok({ safe: true, reason: 'literal-role-settings' }), 'role-write-safety-unavailable'],
+    [ok(null), 'role-write-safety-unavailable'],
+    [fail('gateway/method-unavailable'), 'role-write-safety-unavailable'],
+  ])('refuses unsafe, stale or malformed safety replies without any role write: %j', async (answer, issue) => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async () => answer as Awaited<ReturnType<RoleWriteSafetyCall>>)
+    const { controller, fake } = setup({}, 'en', undefined, guard)
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'keep this input' })
+    await controller.save()
+    expect(fake.calls).toHaveLength(0)
+    expect(guard).toHaveBeenCalledTimes(1)
+    expect(controller.getSnapshot()).toMatchObject({ save: 'failed', saveIssue: issue, dirty: true })
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('keep this input')
+  })
+
+  it('converts transport failure to a fixed issue without exposing exception text', async () => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async () => {
+      throw new Error('SECRET expression value')
+    })
+    const { controller, fake } = setup({}, 'en', undefined, guard)
+    controller.setEnabled(false)
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({
+      save: 'failed',
+      saveIssue: 'role-write-safety-unavailable',
+      dirty: true,
+    })
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain('SECRET')
+    expect(fake.calls).toHaveLength(0)
+  })
+
+  it('does not call the guard or write roles when a revision is unavailable', async () => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async revision => literal(revision))
+    const { controller, fake } = setup({ revision: undefined }, 'en', undefined, guard)
+    controller.setEnabled(false)
+    await controller.save()
+    expect(guard).not.toHaveBeenCalled()
+    expect(fake.calls).toHaveLength(0)
+    expect(controller.getSnapshot().saveIssue).toBe('role-write-safety-unavailable')
+  })
+
+  it('keeps permission OFF independent of an expression-backed role-save failure', async () => {
+    const guard = vi.fn<RoleWriteSafetyCall>(async () =>
+      ok({ safe: false, revision: 1, reason: 'expression-backed-role-settings' }),
+    )
+    const { controller, fake } = setup(
+      { value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } },
+      'en',
+      undefined,
+      guard,
+    )
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'unchanged draft' })
+    await controller.save()
+    await controller.setAllowAiRoleManagement(false)
+    expect(guard).toHaveBeenCalledTimes(1)
+    expect(fake.calls).toEqual([{ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 1 }])
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, management: { enabled: false, save: 'saved' } })
+  })
+
+  it('allows immediate OFF while a safety request is pending and fences its later stale positive answer', async () => {
+    let release: (value: Awaited<ReturnType<RoleWriteSafetyCall>>) => void = () => {}
+    const guard = vi.fn<RoleWriteSafetyCall>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { controller, fake } = setup(
+      { value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } },
+      'en',
+      undefined,
+      guard,
+    )
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'pending input' })
+    const pending = controller.save()
+    expect(controller.getSnapshot()).toMatchObject({
+      save: 'saving',
+      canEdit: false,
+      management: { enabled: true, canToggle: true },
+    })
+    await controller.save()
+    await controller.setAllowAiRoleManagement(false)
+    expect(fake.calls).toEqual([{ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 1 }])
+    release(literal(1))
+    await pending
+    expect(guard).toHaveBeenCalledTimes(1)
+    expect(fake.calls).toHaveLength(1)
+    expect(controller.getSnapshot()).toMatchObject({
+      save: 'failed',
+      saveIssue: 'role-write-safety-conflict',
+      dirty: true,
+      conflict: false,
+      management: { enabled: false },
+    })
+    expect(controller.getSnapshot().draft?.revision).toBe(2)
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('pending input')
+  })
+
+  it('rejects an old positive answer after loading and a different ready document reuse the same numeric revision', async () => {
+    let release: (value: Awaited<ReturnType<RoleWriteSafetyCall>>) => void = () => {}
+    const guard = vi.fn<RoleWriteSafetyCall>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { controller, fake } = setup({}, 'en', undefined, guard)
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'old-host unsaved input' })
+    const pending = controller.save()
+    fake.set({ status: 'loading', value: undefined, revision: undefined })
+    expect(guard.mock.calls[0]?.[1].aborted).toBe(true)
+    const replacement = DEFAULT_ROLES.map(role =>
+      role.id === 'worker' ? { ...role, description: 'new-host accepted value' } : role,
+    )
+    fake.set({ status: 'ready', value: { enabled: true, roles: replacement }, revision: 1 })
+    release(literal(1))
+    await pending
+    expect(fake.calls).toHaveLength(0)
+    expect(roleOf(fake, 'worker')?.description).toBe('new-host accepted value')
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      conflict: true,
+      canSave: false,
+      saveIssue: 'role-write-safety-conflict',
+    })
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('old-host unsaved input')
+  })
+
+  it('also rejects a same-revision value replacement without a loading transition', async () => {
+    let release: (value: Awaited<ReturnType<RoleWriteSafetyCall>>) => void = () => {}
+    const guard = vi.fn<RoleWriteSafetyCall>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { controller, fake } = setup({}, 'en', undefined, guard)
+    controller.setEnabled(false)
+    const pending = controller.save()
+    fake.set({ value: { enabled: true, roles: DEFAULT_ROLES.slice(0, 3) }, revision: 1 })
+    release(literal(1))
+    await pending
+    expect(fake.calls).toHaveLength(0)
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      conflict: true,
+      saveIssue: 'role-write-safety-conflict',
+    })
+  })
+
+  it('requires a fresh accepted form after a transport reset before any explicit retry', async () => {
+    let release: (value: Awaited<ReturnType<RoleWriteSafetyCall>>) => void = () => {}
+    const guard = vi.fn<RoleWriteSafetyCall>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { controller, fake } = setup({}, 'en', undefined, guard)
+    controller.setEnabled(false)
+    const pending = controller.save()
+    controller.resetRoleWriteSafety()
+    expect(guard.mock.calls[0]?.[1].aborted).toBe(true)
+    release(literal(1))
+    await pending
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      canSave: false,
+      saveIssue: 'role-write-safety-conflict',
+    })
+    await controller.save()
+    expect(guard).toHaveBeenCalledTimes(1)
+    expect(fake.calls).toHaveLength(0)
+    fake.set({ value: { enabled: true, roles: structuredClone(DEFAULT_ROLES) }, revision: 1 })
+    expect(controller.getSnapshot().canSave).toBe(true)
+  })
+
+  it('aborts the safety signal on disposal and never writes from its later answer', async () => {
+    let release: (value: Awaited<ReturnType<RoleWriteSafetyCall>>) => void = () => {}
+    const guard = vi.fn<RoleWriteSafetyCall>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { controller, fake } = setup({}, 'en', undefined, guard)
+    controller.setEnabled(false)
+    const pending = controller.save()
+    controller.dispose()
+    expect(guard.mock.calls[0]?.[1].aborted).toBe(true)
+    release(literal(1))
+    await pending
+    expect(fake.calls).toHaveLength(0)
+  })
+})
+
+describe('immediate AI role-management permission', () => {
+  it('defaults OFF and persists ON/OFF through path-only revision-fenced writes without dirtying the role draft', async () => {
+    const { controller, fake } = setup()
+    expect(controller.getSnapshot().management).toMatchObject({ enabled: false, save: 'idle', canToggle: true })
+    await controller.setAllowAiRoleManagement(true)
+    expect(fake.calls[0]).toEqual({ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: true }], revision: 1 })
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: false,
+      save: 'idle',
+      management: { enabled: true, save: 'saved' },
+    })
+    expect(controller.getSnapshot().draft?.base).not.toHaveProperty('allowAiRoleManagement')
+    await controller.setAllowAiRoleManagement(false)
+    expect(fake.calls[1]).toEqual({ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 2 })
+    expect(controller.getSnapshot().management).toMatchObject({ enabled: false, save: 'saved' })
+    await controller.save()
+    expect(fake.calls).toHaveLength(2)
+  })
+
+  it.each(['refuse', 'throw'] as const)(
+    'keeps the accepted value and reports %s instead of optimistic success',
+    async outcome => {
+      const { controller, fake } = setup()
+      fake.outcome = outcome
+      await controller.setAllowAiRoleManagement(true)
+      expect(controller.getSnapshot().management).toMatchObject({ enabled: false, save: 'failed', canToggle: true })
+    },
+  )
+
+  it('uses the current Host revision even while the role draft is in conflict, without clearing that conflict', async () => {
+    const { controller, fake } = setup()
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'unsaved input' })
+    fake.set({ revision: 3, value: { enabled: true, roles: DEFAULT_ROLES.slice(0, 3) } })
+    expect(controller.getSnapshot().conflict).toBe(true)
+    await controller.setAllowAiRoleManagement(false)
+    expect(fake.calls).toHaveLength(0)
+    await controller.setAllowAiRoleManagement(true)
+    expect(fake.calls[0]?.revision).toBe(3)
+    expect(controller.getSnapshot()).toMatchObject({ conflict: true, dirty: true, management: { enabled: true } })
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('unsaved input')
+  })
+
+  it('does not retry a stale permission write and follows the latest accepted permission', async () => {
+    const { controller, fake } = setup()
+    fake.outcome = 'refuse'
+    fake.onRefuse = () =>
+      fake.set({ revision: 2, value: { enabled: true, roles: DEFAULT_ROLES, allowAiRoleManagement: true } })
+    await controller.setAllowAiRoleManagement(true)
+    expect(fake.calls).toHaveLength(1)
+    expect(controller.getSnapshot().management).toMatchObject({ enabled: true, save: 'conflict' })
+  })
+
+  it('does not report success from a mutation answer without confirming an accepted value', async () => {
+    const { controller, fake } = setup()
+    fake.form.mutate = async () => true
+    await controller.setAllowAiRoleManagement(true)
+    expect(controller.getSnapshot().management).toMatchObject({ enabled: false, save: 'failed' })
+  })
+
+  it('blocks duplicate permission requests, draft writes and discard while permission persistence is pending', async () => {
+    const { controller, fake } = setup()
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'mine' })
+    let release = () => {}
+    fake.gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const pending = controller.setAllowAiRoleManagement(true)
+    expect(controller.getSnapshot()).toMatchObject({
+      canEdit: false,
+      canSave: false,
+      management: { enabled: false, save: 'saving', canToggle: false },
+    })
+    await controller.setAllowAiRoleManagement(true)
+    controller.setEnabled(false)
+    controller.discard()
+    await controller.save()
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('mine')
+    release()
+    await pending
+    expect(fake.calls).toHaveLength(1)
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      conflict: false,
+      canSave: true,
+      management: { enabled: true, save: 'saved' },
+    })
+    await controller.save()
+    expect(fake.calls[1]?.revision).toBe(2)
+    expect(fake.calls[1]?.ops.some(op => op.path[0] === 'allowAiRoleManagement')).toBe(false)
+    expect((fake.form.getSnapshot().value as { allowAiRoleManagement: boolean }).allowAiRoleManagement).toBe(true)
+  })
+
+  it('disables permission changes while role persistence is pending or the Host cannot fence writes', async () => {
+    const { controller, fake } = setup()
+    controller.setEnabled(false)
+    let release = () => {}
+    fake.gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const save = controller.save()
+    await controller.setAllowAiRoleManagement(true)
+    expect(fake.calls).toHaveLength(1)
+    release()
+    await save
+    fake.set({ revision: undefined })
+    expect(controller.getSnapshot().management.canToggle).toBe(false)
+    await controller.setAllowAiRoleManagement(true)
+    expect(fake.calls).toHaveLength(1)
+    fake.set({ revision: 3, writable: false })
+    await controller.setAllowAiRoleManagement(true)
+    expect(fake.calls).toHaveLength(1)
+  })
+})
+
+describe('raw role preservation', () => {
+  it('retains unknown role, runner and model fields across normal saves and a custom-role rename', async () => {
+    const stored = DEFAULT_ROLES.map(role =>
+      role.id === 'worker'
+        ? {
+            ...role,
+            vendorRole: { icon: 'kept' },
+            runner: { cli: 'codex', permission: 'workspace-write', model: 'm', vendorRunner: { setting: 7 } },
+          }
+        : role.id === 'reviewer'
+          ? { ...role, model: { provider: 'p', model: 'm', vendorModel: { tag: 'kept' } } }
+          : role,
+    )
+    const { controller, fake } = setup({
+      value: { enabled: true, roles: stored, allowAiRoleManagement: true, unrelated: 'stay' },
+    })
+    controller.patchRole(uidOf(controller, 'worker'), { id: 'coder', description: 'edited' })
+    await controller.save()
+    const value = fake.form.getSnapshot().value as {
+      roles: Record<string, unknown>[]
+      allowAiRoleManagement: boolean
+      unrelated: string
+    }
+    expect(value.roles.find(role => role.id === 'worker')).toBeUndefined()
+    expect(value.roles.find(role => role.id === 'coder')).toMatchObject({
+      description: 'edited',
+      vendorRole: { icon: 'kept' },
+      runner: { vendorRunner: { setting: 7 } },
+    })
+    expect(value.roles.find(role => role.id === 'reviewer')).toMatchObject({ model: { vendorModel: { tag: 'kept' } } })
+    expect(value).toMatchObject({ allowAiRoleManagement: true, unrelated: 'stay' })
+    expect(fake.calls[0]?.ops.some(op => op.path[0] === 'allowAiRoleManagement')).toBe(false)
+  })
+
+  it('does not resurrect opaque metadata when a removed id is reused by a new row', async () => {
+    const stored = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, opaque: 'old-instance' } : role))
+    const { controller, fake } = setup({ value: { enabled: true, roles: stored } })
+    controller.removeRole(uidOf(controller, 'worker'))
+    controller.addTemplate('worker')
+    await controller.save()
+    const value = fake.form.getSnapshot().value as { roles: Record<string, unknown>[] }
+    expect(value.roles.find(role => role.id === 'worker')).toBeDefined()
+    expect(value.roles.find(role => role.id === 'worker')).not.toHaveProperty('opaque')
+  })
+
+  it('does not transfer opaque metadata from a source row into a newly duplicated role', async () => {
+    const stored = DEFAULT_ROLES.map(role =>
+      role.id === 'worker' ? { ...role, opaque: { secretMetadata: 'original-only' } } : role,
+    )
+    const { controller, fake } = setup({ value: { enabled: true, roles: stored } })
+    controller.duplicateRole(uidOf(controller, 'worker'))
+    await controller.save()
+    const value = fake.form.getSnapshot().value as { roles: Record<string, unknown>[] }
+    expect(value.roles.find(role => role.id === 'worker')).toHaveProperty('opaque')
+    expect(value.roles.find(role => role.id === 'worker-2')).not.toHaveProperty('opaque')
+  })
+})
+
 describe('Host changes', () => {
+  it('follows a same-revision replacement when clean and conflicts with it when dirty', () => {
+    const { controller, fake } = setup()
+    const first = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, description: 'replacement one' } : role))
+    fake.set({ value: { enabled: true, roles: first }, revision: 1 })
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('replacement one')
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'my input' })
+    const second = first.map(role => (role.id === 'worker' ? { ...role, description: 'replacement two' } : role))
+    fake.set({ value: { enabled: true, roles: second }, revision: 1 })
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, canSave: false })
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('my input')
+  })
+  it('retains all dirty inputs, row identity and open editor while advancing only the revision for a gate-only update', () => {
+    const stored = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, opaque: { a: 1, b: ['x'] } } : role))
+    const { controller, fake } = setup({ value: { enabled: true, roles: stored } })
+    const uid = uidOf(controller, 'worker')
+    controller.toggleEditor(uid)
+    controller.patchRole(uid, { id: 'renamed', description: 'typed input' })
+    const before = controller.getSnapshot().draft!
+    fake.set({ revision: 2, value: { enabled: true, roles: structuredClone(stored), allowAiRoleManagement: true } })
+    const after = controller.getSnapshot()
+    expect(after).toMatchObject({ dirty: true, conflict: false, expanded: uid, management: { enabled: true } })
+    expect(after.draft?.revision).toBe(2)
+    expect(after.draft?.rows).toBe(before.rows)
+    expect(after.draft?.base).toBe(before.base)
+    expect(rows(controller).find(row => row.uid === uid)).toMatchObject({
+      sourceId: 'worker',
+      role: { id: 'renamed', description: 'typed input' },
+    })
+  })
+
+  it('treats unknown raw metadata changes as a real conflict rather than a harmless gate change', () => {
+    const stored = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, opaque: { value: 'before' } } : role))
+    const { controller, fake } = setup({ value: { enabled: true, roles: stored } })
+    controller.patchRole(uidOf(controller, 'worker'), { description: 'mine' })
+    const changed = stored.map(role => (role.id === 'worker' ? { ...role, opaque: { value: 'after' } } : role))
+    fake.set({ revision: 2, value: { enabled: true, roles: changed, allowAiRoleManagement: true } })
+    expect(controller.getSnapshot()).toMatchObject({ dirty: true, conflict: true, canSave: false })
+    expect(controller.getSnapshot().draft?.revision).toBe(1)
+  })
+
+  it('rebases a clean draft when AI changes roles and follows the separately accepted gate', () => {
+    const { controller, fake } = setup()
+    const changed = DEFAULT_ROLES.map(role =>
+      role.id === 'worker' ? { ...role, description: 'AI changed this' } : role,
+    )
+    fake.set({ revision: 2, value: { enabled: true, roles: changed, allowAiRoleManagement: true } })
+    expect(controller.getSnapshot()).toMatchObject({ dirty: false, conflict: false, management: { enabled: true } })
+    expect(rows(controller).find(row => row.role.id === 'worker')?.role.description).toBe('AI changed this')
+  })
   it('follows the Host while the draft holds no edits', () => {
     const { controller, fake } = setup()
     controller.toggleEditor(uidOf(controller, 'worker'))
@@ -555,7 +1255,7 @@ describe('CLI connection test', () => {
     expect(controller.getSnapshot().probes.clis.codex.status).toBe('loading')
     await flushAll()
     expect(probe).toHaveBeenCalledWith('codex', expect.any(AbortSignal))
-    expect(controller.getSnapshot().probes.clis.codex).toEqual({
+    expect(controller.getSnapshot().probes.clis.codex).toMatchObject({
       status: 'ready',
       result: {
         cli: 'codex',
@@ -572,21 +1272,55 @@ describe('CLI connection test', () => {
   })
 
   it.each([
-    ['a Host without the probe method', async () => fail('gateway/invocation-unavailable')],
-    ['a Host without the Remote service', async () => fail('gateway/method-unavailable')],
-    ['a client without the connection service', async () => Promise.reject(new ProbeUnavailableError())],
-    ['a Host without the Gateway route', async () => Promise.reject(new Error('transport failure: HTTP 404'))],
-  ])('hides the test for %s', async (_name, answer) => {
+    ['a Host without the probe method', async () => fail('gateway/invocation-unavailable'), 'remote-unavailable'],
+    ['a Host without the Remote service', async () => fail('gateway/method-unavailable'), 'remote-unavailable'],
+    ['a missing service', async () => fail('gateway/service-unavailable'), 'remote-unavailable'],
+    [
+      'a client without the connection service',
+      async () => Promise.reject(new ProbeUnavailableError()),
+      'connection-unavailable',
+    ],
+    [
+      'an ambiguous missing endpoint',
+      async () => Promise.reject(new Error('transport failure: HTTP 404')),
+      'endpoint-unavailable',
+    ],
+    ['host authentication', async () => Promise.reject(new Error('transport failure: HTTP 401')), 'host-auth'],
+    ['host authorization', async () => Promise.reject(new Error('transport failure: HTTP 403')), 'host-auth'],
+    ['structured access denial', async () => fail('remote-access/denied'), 'host-auth'],
+    ['transport failure', async () => Promise.reject(new Error('transport failure: HTTP 503')), 'transport'],
+    ['invalid JSON', async () => Promise.reject(new SyntaxError('bad JSON')), 'malformed'],
+    [
+      'invalid carrier envelope',
+      async () => Promise.reject(new TypeError('connection: invalid server-response envelope')),
+      'malformed',
+    ],
+    [
+      'correlation mismatch',
+      async () => Promise.reject(new Error('rpcId mismatch for rolesubagentsCli/probe')),
+      'malformed',
+    ],
+    ['withdrawn definition', async () => fail('gateway/definition-unavailable'), 'remote-unavailable'],
+    ['invalid envelope', async () => null, 'malformed'],
+    ['invalid error envelope', async () => ({ ok: false, error: null }), 'malformed'],
+  ])('distinguishes %s and allows retry', async (_name, answer, issue) => {
     const probe = vi.fn<ProbeCall>(answer as ProbeCall)
     const { controller } = setup({}, 'en', probe)
     controller.probeCli('agy')
     await flushAll()
-    expect(controller.getSnapshot().probes.available).toBe(false)
-    expect(controller.getSnapshot().probes.clis.agy).toEqual({ status: 'idle' })
-    controller.probeCli('agy')
-    expect(probe).toHaveBeenCalledTimes(1)
-    controller.resetProbes()
     expect(controller.getSnapshot().probes.available).toBe(true)
+    expect(controller.getSnapshot().probes.clis.agy).toMatchObject({
+      status: 'error',
+      issue,
+      checkedAt: expect.any(Number),
+    })
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
+    probe.mockResolvedValueOnce(probeAnswer('agy'))
+    controller.probeCli('agy')
+    await flushAll()
+    expect(probe).toHaveBeenCalledTimes(2)
+    expect(controller.getSnapshot().probes.clis.agy.status).toBe('ready')
+    expect(controller.getSnapshot().canEdit).toBe(true)
   })
 
   it.each([
@@ -633,6 +1367,79 @@ describe('CLI connection test', () => {
   })
 })
 
+describe('CLI model refresh', () => {
+  const flushAll = async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+  }
+  it('never discovers automatically or for unsupported adapters', async () => {
+    const probe = fakeProbe()
+    const { controller } = setup({}, 'en', probe)
+    controller.loadReference()
+    for (const cli of ['claude-code', 'pi', 'grok-build'] as const) controller.refreshCliModels(cli)
+    await flushAll()
+    expect(probe).not.toHaveBeenCalled()
+    controller.refreshCliModels('codex')
+    await flushAll()
+    expect(probe).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains models and efforts while loading, on transport errors and empty/auth-failed responses', async () => {
+    const probe = fakeProbe()
+    probe.mockResolvedValueOnce(probeAnswer('agy', { models: [{ id: 'live', efforts: ['high'] }] }))
+    const { controller } = setup({}, 'en', probe)
+    controller.refreshCliModels('agy')
+    await flushAll()
+    const first = controller.getSnapshot().probes.clis.agy
+    expect(first.modelsCheckedAt).toEqual(expect.any(Number))
+    for (const answer of [
+      () => Promise.reject(new Error('secret token')),
+      async () => probeAnswer('agy', { models: [] }),
+      async () => probeAnswer('agy', { auth: 'missing', models: [{ id: 'bad' }] }),
+    ]) {
+      probe.mockImplementationOnce(answer)
+      controller.refreshCliModels('agy')
+      expect(cliSuggestions(controller.getSnapshot().probes.clis.agy, 'agy').models).toEqual(['live'])
+      await flushAll()
+      const current = controller.getSnapshot().probes.clis.agy
+      expect(cliSuggestions(current, 'agy', '', 'live').efforts).toEqual(['high'])
+      expect(current.modelsCheckedAt).toBe(first.modelsCheckedAt)
+    }
+  })
+
+  it('invalidates only changed saved CLI settings and rejects their in-flight replies', async () => {
+    const probe = fakeProbe()
+    probe.mockResolvedValueOnce(probeAnswer('codex', { models: [{ id: 'old' }] }))
+    const { controller, fake } = setup({}, 'en', probe)
+    controller.refreshCliModels('codex')
+    await flushAll()
+    controller.setCliSettings('codex', { executable: '/new/codex' })
+    expect(controller.getSnapshot().probes.clis.codex.models).toEqual([{ id: 'old' }])
+    let resolve!: (answer: Awaited<ReturnType<ProbeCall>>) => void
+    probe.mockImplementationOnce(
+      () =>
+        new Promise(done => {
+          resolve = done
+        }),
+    )
+    controller.refreshCliModels('codex')
+    const signal = probe.mock.calls.at(-1)?.[1]
+    await controller.save()
+    expect(signal?.aborted).toBe(true)
+    resolve(probeAnswer('codex', { models: [{ id: 'stale' }] }))
+    await flushAll()
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
+    probe.mockResolvedValueOnce(probeAnswer('codex', { models: [{ id: 'new' }] }))
+    controller.refreshCliModels('codex')
+    await flushAll()
+    fake.set({ revision: 99 })
+    expect(controller.getSnapshot().probes.clis.codex.models).toEqual([{ id: 'new' }])
+    controller.resetProbes()
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({ status: 'idle' })
+  })
+})
+
 describe('CLI suggestions', () => {
   it('suggests the static models until a test lists the CLI models', () => {
     expect(cliSuggestions(undefined, 'claude-code').models).toEqual(['default', 'opus', 'sonnet', 'haiku', 'fable'])
@@ -644,7 +1451,7 @@ describe('CLI suggestions', () => {
       result: { cli: 'agy' as const, found: true, models: [{ id: 'a', efforts: ['low'] }, { id: 'b' }, { id: 'a' }] },
     }
     expect(cliSuggestions(ready, 'agy', '', 'a')).toEqual({ providers: [], models: ['a', 'b'], efforts: ['low'] })
-    expect(cliSuggestions({ ...ready, status: 'error' }, 'agy').models).toContain('gemini-3.1-pro')
+    expect(cliSuggestions({ ...ready, status: 'error' }, 'agy').models).toEqual(['a', 'b'])
   })
 
   it('splits OpenCode ids into providers and models', () => {

@@ -30,14 +30,25 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, normalize, sep } from 'node:path'
+import { dirname, isAbsolute, join, normalize, sep } from 'node:path'
 import { permissionPreset } from '../../shared/cli/index.ts'
 import type { CliSettings } from '../../shared/runner.ts'
-import type { LoggerPort, SubagentResultPort, SubagentRunPort, SubprocessHandlePort, SubprocessPort } from '../ports.ts'
+import type {
+  ConfinedArgvPort,
+  LoggerPort,
+  SandboxPort,
+  SubagentResultPort,
+  SubagentRunPort,
+  SubprocessHandlePort,
+  SubprocessPort,
+} from '../ports.ts'
 import { formatDiagnostic } from './diagnostic.ts'
+import type { ExternalRunStore } from './observability.ts'
+import type { ExternalRunStatus } from '../../shared/role-display.ts'
 import { composeEnv, definedEntries } from './env.ts'
+import { privateStateLaunch } from './private-state.ts'
 import { ByteTail, LineSplitter } from './lines.ts'
-import { assertUsableCwd } from './policy.ts'
+import { assertCwdAllowed, assertUsableCwd } from './policy.ts'
 import { findEscapingLink, findStartupCodeDir, gitTopLevelAbove, SCAN_MAX_ENTRIES, SCAN_MAX_MS } from './workspace.ts'
 import {
   type CliAdapter,
@@ -60,7 +71,7 @@ const DRAIN_MS = 2_000
 const PROBE_STDOUT_BYTES = 1024 * 1024
 const PROBE_STDERR_BYTES = 64 * 1024
 
-/** Live runs owned by the plugin; disposed when the plugin unloads. */
+/** Undisposed runs owned by the plugin, including settled results with a managed range still to drain. */
 export type RunTracker = Set<SubagentRunPort>
 
 /** Randomness used by the engine; tests replace it for stable values. */
@@ -81,10 +92,13 @@ const defaultRandom: EngineRandom = {
 
 /** Services and environment the engine uses. */
 export interface EngineDeps {
+  readonly observability?: ExternalRunStore
   /** Lazily resolves `ctx.subprocess`; undefined refuses external runs. */
   readonly subprocess: () => SubprocessPort | undefined
+  /** DSH's optional existing file-effect sandbox; selected host-sandbox presets never run without it. */
+  readonly sandbox?: () => SandboxPort | undefined
   readonly logger: LoggerPort
-  /** Every live run is added here until it settles or is disposed. */
+  /** Every spawned run stays here until disposal finishes, even after its result settles. */
   readonly runs: RunTracker
   /** Host environment; defaults to `process.env`. */
   readonly hostEnv?: Readonly<Record<string, string | undefined>>
@@ -97,6 +111,8 @@ export interface EngineDeps {
 
 /** One run to start. */
 export interface ExternalRunSpec {
+  /** Internal metadata only; exceptions never affect the delivered result. */
+  readonly onTerminalStatus?: (status: Exclude<ExternalRunStatus, 'running'>) => void
   readonly adapter: CliAdapter
   /** Plan input; its `cwd` is validated here. */
   readonly input: PlanInput
@@ -351,6 +367,106 @@ function contained(action: () => void, onThrow: (error: unknown) => void): void 
   }
 }
 
+/** Same path-based policy as parent DSH tools, not a promise of inode or network isolation. */
+export const HOST_SANDBOX_NOTICE =
+  'DSH workspace file policy is active. Existing hard-link aliases can share writes across workspace boundaries; network access and process visibility are not restricted.'
+
+/** Visible whenever the Host reports incomplete file-effect enforcement; never a network guarantee. */
+export const PARTIAL_SANDBOX_WARNING =
+  'Warning: DSH reports partial file-effect sandbox enforcement on this host. Some file operations are not covered; network access and process visibility are not restricted by this policy.'
+
+const STARTUP_ENV_NAMES = new Set([
+  'LIBPATH',
+  'SHLIB_PATH',
+  'BASH_ENV',
+  'ENV',
+  'ZDOTDIR',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'PYTHONPATH',
+  'PYTHONHOME',
+  'PYTHONSTARTUP',
+  'RUBYOPT',
+  'RUBYLIB',
+  'PERL5OPT',
+  'PERL5LIB',
+  'JAVA_TOOL_OPTIONS',
+  '_JAVA_OPTIONS',
+  'JDK_JAVA_OPTIONS',
+  'DOTNET_STARTUP_HOOKS',
+  'GCONV_PATH',
+  'LOCPATH',
+  'NLSPATH',
+])
+
+/** The sandbox runner itself starts before confinement; its loader/startup hooks must not be caller-controlled. */
+function scrubSandboxStartupEnv(
+  env: Record<string, string | undefined>,
+  hostEnv: Readonly<Record<string, string | undefined>>,
+): void {
+  for (const key of new Set([...STARTUP_ENV_NAMES, ...Object.keys(hostEnv), ...Object.keys(env)])) {
+    if (STARTUP_ENV_NAMES.has(key) || /^(?:LD_|DYLD_|_RLD|LDR_)/.test(key)) env[key] = undefined
+  }
+}
+
+function strings(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every(item => typeof item === 'string' && item.length > 0 && !item.includes('\0'))
+  )
+}
+
+function validConfinement(value: unknown, exact: readonly string[]): value is ConfinedArgvPort {
+  if (value === null || typeof value !== 'object') return false
+  const candidate = value as Partial<ConfinedArgvPort>
+  if (
+    !Array.isArray(candidate.argv) ||
+    candidate.argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) ||
+    !candidate.argv[0] ||
+    candidate.argv.length <= exact.length ||
+    !exact.every((arg, index) => candidate.argv?.[candidate.argv.length - exact.length + index] === arg) ||
+    (candidate.enforcement !== 'full' && candidate.enforcement !== 'partial') ||
+    !strings(candidate.denialSignatures) ||
+    !Array.isArray(candidate.runnerFailureRules)
+  )
+    return false
+  return candidate.runnerFailureRules.every(
+    rule =>
+      rule !== null &&
+      typeof rule === 'object' &&
+      strings(rule.fatalSignatures) &&
+      rule.fatalSignatures.length > 0 &&
+      (rule.informationalLines === undefined || strings(rule.informationalLines)) &&
+      (rule.allowedExitCodes === undefined ||
+        (Array.isArray(rule.allowedExitCodes) &&
+          rule.allowedExitCodes.every(
+            (code: unknown) => typeof code === 'number' && Number.isInteger(code) && code > 0,
+          ))),
+  )
+}
+
+/** Follow DSH's structured runner-failure contract; exit status alone never proves command admission failed. */
+function sandboxRunnerFailed(confined: ConfinedArgvPort | undefined, code: number | null, stderr: string): boolean {
+  if (confined === undefined || code === null || code === 0) return false
+  const lines = stderr.split(/\r?\n/).map(line => line.trim().toLowerCase())
+  return confined.runnerFailureRules.some(
+    rule =>
+      (rule.allowedExitCodes === undefined || rule.allowedExitCodes.includes(code)) &&
+      lines.some(
+        line =>
+          !rule.informationalLines?.some(info => info.trim().toLowerCase() === line) &&
+          rule.fatalSignatures.some(signature => line.includes(signature.toLowerCase())),
+      ),
+  )
+}
+
+function addSandboxWarning(result: SubagentResultPort, partial: boolean, confined: boolean): SubagentResultPort {
+  const notices = [
+    ...(confined ? [{ type: 'text' as const, text: HOST_SANDBOX_NOTICE }] : []),
+    ...(partial ? [{ type: 'text' as const, text: PARTIAL_SANDBOX_WARNING }] : []),
+  ]
+  return notices.length ? { ...result, output: [...result.output, ...notices] } : result
+}
+
 /**
  * Start one external run.
  * @param spec - adapter, plan input, settings, timeout and DSH's signal.
@@ -373,6 +489,57 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
   }
   const cwd = assertUsableCwd(spec.input.cwd)
   const input: PlanInput = { ...spec.input, cwd }
+  const hostConfined = permissionPreset(adapter.descriptor, input.preset)?.confinement === 'host-sandbox'
+  let sandbox: SandboxPort | undefined
+  if (hostConfined) {
+    try {
+      sandbox = deps.sandbox?.()
+    } catch (error) {
+      deps.logger.warn(`rolesubagents: could not resolve ${name} sandbox service: ${message(error)}`)
+      throw new Error(`${name} could not obtain a usable DSH file sandbox; no unconfined process was started`)
+    }
+  }
+  if (hostConfined && (input.access !== 'workspace-write' || sandbox === undefined)) {
+    throw new Error(
+      `${name} needs the Host's DSH file sandbox for its workspace-write preset; no unconfined process was started`,
+    )
+  }
+  // Use the parent's established policy root when known, not a model-selected child path that
+  // another workspace process could retarget through a symlink between containment check and wrapping.
+  const sandboxRoot = hostConfined ? assertUsableCwd(spec.workspaceRoot ?? cwd) : cwd
+  if (hostConfined) assertCwdAllowed(cwd, input.access, sandboxRoot)
+  let partialSandbox = false
+  const wrap = async (exact: readonly string[]): Promise<ConfinedArgvPort | undefined> => {
+    if (!hostConfined || sandbox === undefined) return undefined
+    try {
+      const confined: unknown = await sandbox.confine(
+        exact,
+        { mode: 'workspace-write', workspaceRoot: sandboxRoot },
+        signal,
+      )
+      signal.throwIfAborted()
+      if (!validConfinement(confined, exact)) throw new Error('invalid sandbox response')
+      const runner = confined.argv[0] as string
+      const resolved = isAbsolute(runner)
+        ? runner
+        : await subprocess.resolveExecutable(
+            runner,
+            definedEntries({ PATH: hostEnv.PATH ?? '', PATHEXT: hostEnv.PATHEXT }),
+            signal,
+          )
+      signal.throwIfAborted()
+      if (!isAbsolute(resolved) || resolved.includes('\0')) throw new Error('sandbox runner did not resolve absolutely')
+      if (confined.enforcement === 'partial' && !partialSandbox) {
+        partialSandbox = true
+        deps.logger.warn(`rolesubagents: ${name}: ${PARTIAL_SANDBOX_WARNING}`)
+      }
+      return { ...confined, argv: [resolved, ...confined.argv.slice(1)] }
+    } catch (error) {
+      signal.throwIfAborted()
+      deps.logger.warn(`rolesubagents: could not confine ${name}: ${message(error)}`)
+      throw new Error(`${name} could not obtain a usable DSH file sandbox; no unconfined process was started`)
+    }
+  }
   await checkWorkspace({ adapter, input, workspaceRoot: spec.workspaceRoot, home: hostEnv.HOME, signal, deps })
   signal.throwIfAborted()
   const nonce = random.nonce()
@@ -391,7 +558,13 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
       plan.envJson ?? {},
       Object.keys(plan.files ?? {}),
     ]).includes(RUN_DIR_TOKEN)
-    const runDir = needsRunDir ? await files.createRunDir(deps.tmpDir ?? tmpdir()) : ''
+    if (plan.privateState !== undefined && (!hostConfined || plan.preflight !== undefined)) {
+      throw new Error(`${name} private CLI state requires a confined run without a separate pre-flight`)
+    }
+    const runDir =
+      needsRunDir || plan.privateState !== undefined
+        ? await files.createRunDir(deps.tmpDir ?? (hostConfined && process.platform === 'linux' ? '/tmp' : tmpdir()))
+        : ''
     signal.throwIfAborted()
     const values: Placeholders = { ...placeholdersBase, RUN_DIR: runDir, HOME: home }
     const overlay: Record<string, string | undefined> = {}
@@ -407,6 +580,7 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
       ...(settings.envPassthrough === undefined ? {} : { passthrough: settings.envPassthrough }),
       hostEnv,
     })
+    if (hostConfined) scrubSandboxStartupEnv(env, hostEnv)
     const argv = plan.argv.map(arg => substituteArg(arg, values))
 
     const command = settings.executable ?? adapter.descriptor.executable
@@ -418,7 +592,7 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
       throw new Error(`${name} was not found (set its path in the plugin settings)`)
     }
     signal.throwIfAborted()
-    if (plan.files !== undefined) {
+    if (plan.files !== undefined && plan.privateState === undefined) {
       try {
         await files.write(plan.files, values)
       } catch (error) {
@@ -428,25 +602,48 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
       signal.throwIfAborted()
     }
     if (plan.preflight !== undefined) {
+      const confinedCheck = await wrap([executable, ...plan.preflight.argv])
       const check = await createProbeRunner(
         subprocess,
-        executable,
+        confinedCheck?.argv[0] ?? executable,
         env,
         cwd,
-      )(plan.preflight.argv, { timeoutMs: plan.preflight.timeoutMs }, signal)
+      )(confinedCheck?.argv.slice(1) ?? plan.preflight.argv, { timeoutMs: plan.preflight.timeoutMs }, signal)
       signal.throwIfAborted()
       if (check.code !== 0) {
+        const runnerFailed = sandboxRunnerFailed(confinedCheck, check.code, check.stderr)
         throw new Error(
-          formatDiagnostic(name, plan.preflight.category, check.timedOut ? { 'pre-flight': 'timeout' } : {}),
+          formatDiagnostic(
+            name,
+            runnerFailed ? 'config' : plan.preflight.category,
+            check.timedOut ? { 'pre-flight': 'timeout' } : runnerFailed ? { reason: 'sandbox-runner-failed' } : {},
+          ),
         )
       }
     }
+    let exact: readonly string[] = [executable, ...argv]
+    if (plan.privateState !== undefined) {
+      const prepared = privateStateLaunch(
+        plan.privateState,
+        runDir,
+        exact,
+        Object.fromEntries(
+          Object.entries(plan.files ?? {}).map(([key, value]) => [resolvePlanFile(key, values), value]),
+        ),
+        hostEnv,
+        cwd,
+      )
+      exact = prepared.argv
+      // Set after passthrough: callers cannot replace the trusted inner bootstrap envelope.
+      env.DSH_ROLES_CLI_BOOT = prepared.payload
+    }
+    const confinement = await wrap(exact)
     // Nothing is awaited from here until the run is tracked, so an unload cannot slip in between.
     signal.throwIfAborted()
     let handle: SubprocessHandlePort
     try {
       handle = subprocess.spawn({
-        argv: [executable, ...argv],
+        argv: confinement?.argv ?? exact,
         cwd,
         stdio: { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' },
         graceMs: SPAWN_GRACE_MS,
@@ -456,9 +653,23 @@ export async function startExternalRun(spec: ExternalRunSpec, deps: EngineDeps):
       deps.logger.warn(`rolesubagents: could not spawn ${name}: ${message(error)}`)
       throw new Error(`${name} could not be started`)
     }
-    return superviseRun({ spec, deps, plan, session, handle, files, id: random.id(), name })
+    return superviseRun({
+      spec,
+      deps,
+      plan,
+      session,
+      handle,
+      files,
+      id: random.id(),
+      name,
+      confinement,
+      partialSandbox,
+    })
   } catch (error) {
     await files.remove()
+    if (partialSandbox && !signal.aborted && error instanceof Error) {
+      throw new Error(`${error.message}\n${PARTIAL_SANDBOX_WARNING}`)
+    }
     throw error
   }
 }
@@ -537,6 +748,8 @@ interface Supervised {
   readonly files: RunFiles
   readonly id: string
   readonly name: string
+  readonly confinement: ConfinedArgvPort | undefined
+  readonly partialSandbox: boolean
 }
 
 /** Wire a spawned process to its session and publish the DSH run handle. */
@@ -614,8 +827,6 @@ function superviseRun(parts: Supervised): SubagentRunPort {
   contained(() => session.start(io), crash)
 
   // --- settlement -------------------------------------------------------------------------------------------
-  /** Untracked once settled; assigned below, before the result can settle. */
-  let tracked: SubagentRunPort | undefined
   const result = (async (): Promise<SubagentResultPort> => {
     let exit: { code: number | null; signal: string | null } = { code: null, signal: null }
     try {
@@ -638,8 +849,31 @@ function superviseRun(parts: Supervised): SubagentRunPort {
         crashed ??= error
         outcome = { status: 'failed', category: 'cli-crashed' }
       }
+      const privateStateFailed =
+        !cancelled &&
+        !timedOut &&
+        plan.privateState !== undefined &&
+        exit.code === 78 &&
+        stderr.text().includes('rolesubagents: limited CLI state preparation failed;')
+      if (privateStateFailed) {
+        outcome = { status: 'failed', category: 'config', facts: { reason: 'private-cli-state-unavailable' } }
+      }
+      if (!cancelled && !timedOut && sandboxRunnerFailed(parts.confinement, exit.code, stderr.text())) {
+        outcome = { status: 'failed', category: 'config', facts: { reason: 'sandbox-runner-failed' } }
+      }
       const facts = { ...(exit.code === null ? {} : { 'exit code': exit.code }), ...outcome.facts }
-      const mapped = toSubagentResult({ ...outcome, facts }, name, { cancelled, timedOut })
+      let mapped = toSubagentResult({ ...outcome, facts }, name, { cancelled, timedOut })
+      if (privateStateFailed)
+        mapped = {
+          ...mapped,
+          output: [
+            ...mapped.output,
+            {
+              type: 'text',
+              text: 'Limited CLI state could not be prepared. Check the native model/settings files and static API-key authentication; browser sign-ins require the explicit native preset.',
+            },
+          ],
+        }
       if (mapped.stopReason !== 'completed' && mapped.stopReason !== 'aborted') {
         const why = crashed === undefined ? '' : `; ${message(crashed)}`
         const tail = stderr.text().trim()
@@ -648,19 +882,33 @@ function superviseRun(parts: Supervised): SubagentRunPort {
             (tail === '' ? '' : `\nstderr tail:\n${tail}`),
         )
       }
-      return mapped
+      contained(
+        () =>
+          spec.onTerminalStatus?.(
+            cancelled ? 'cancelled' : timedOut ? 'timeout' : mapped.stopReason === 'completed' ? 'succeeded' : 'failed',
+          ),
+        () => {},
+      )
+      return addSandboxWarning(mapped, parts.partialSandbox, parts.confinement !== undefined)
     } catch (error) {
       // Defensive: nothing above should throw, but `result` must never reject.
+      contained(
+        () => spec.onTerminalStatus?.(cancelled ? 'cancelled' : timedOut ? 'timeout' : 'failed'),
+        () => {},
+      )
       deps.logger.warn(`rolesubagents: ${name} run ${id} could not be settled: ${message(error)}`)
-      return cancelled
-        ? { output: [], stopReason: 'aborted' }
-        : { output: [], stopReason: 'error', diagnostic: formatDiagnostic(name, 'unknown') }
+      return addSandboxWarning(
+        cancelled
+          ? { output: [], stopReason: 'aborted' }
+          : { output: [], stopReason: 'error', diagnostic: formatDiagnostic(name, 'unknown') },
+        parts.partialSandbox,
+        parts.confinement !== undefined,
+      )
     } finally {
       settled = true
       for (const timer of timers.splice(0)) clearTimeout(timer)
       spec.signal.removeEventListener('abort', onAbort)
       await files.remove()
-      if (tracked !== undefined) deps.runs.delete(tracked)
     }
   })()
 
@@ -696,7 +944,7 @@ function superviseRun(parts: Supervised): SubagentRunPort {
       return disposal
     },
   }
-  tracked = run
-  if (!settled) deps.runs.add(run)
+  // Result settlement does not establish that the managed range is empty; only disposal does.
+  deps.runs.add(run)
   return run
 }

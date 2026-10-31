@@ -31,10 +31,27 @@ import {
   selectableRoles,
 } from '../shared/roles.ts'
 import type { RunTracker } from './external/engine.ts'
+import { createExternalRunStore } from './external/observability.ts'
 import { mountProbeService } from './external/probe-service.ts'
 import { type AdapterLookup, CLI_ADAPTERS, defaultAdapterLookup } from './external/registry.ts'
 import type { AgentPort, HostContext, SessionPort } from './ports.ts'
+import type { CliId } from '../shared/cli/index.ts'
+import type { ProbeResult } from './external/types.ts'
+import { createManagementAudit } from './management/audit.ts'
+import { managementAuthorization } from './management/auth.ts'
+import { createManagementCatalog, type CatalogDeps } from './management/catalog.ts'
+import { createRoleManagement } from './management/service.ts'
+import { roleCatalogRevision } from './management/session.ts'
+import {
+  ManagementFailure,
+  managementSettings,
+  ownManagementNamespace,
+  ownManagementRawConfig,
+} from './management/settings.ts'
+import { mountManagementRemote } from './management/remote.ts'
+import { buildManagementTool, MANAGEMENT_TOOL_NAME } from './management/tool.ts'
 import { holdReadOnly, lastSandboxMode, readOnlyCallDenial, sandboxModeOf } from './readonly.ts'
+import { mountRoleDisplayService } from './role-display-service.ts'
 import { createRoleState } from './state.ts'
 import { buildTool, type PendingChild, TOOL_NAME } from './tool.ts'
 import { workflowTool } from './workflow.ts'
@@ -51,6 +68,8 @@ type Live<T> = T | { get(): T }
 export interface Config {
   /** Master switch for new Sessions. */
   enabled: Live<boolean>
+  /** Separate live permission for AI role administration; never inherited through a Session snapshot. */
+  allowAiRoleManagement?: Live<boolean>
   /** Role definitions; normalized on every read. */
   roles: Live<readonly unknown[]>
   /** Model-only default for workflow children; null means inherit. */
@@ -65,6 +84,7 @@ export interface Config {
 
 export const Config = z.object({
   enabled: z.boolean().default(true).volatile(),
+  allowAiRoleManagement: z.boolean().default(false).volatile(),
   roles: z
     .array(z.any())
     .default(DEFAULT_ROLES.map(role => ({ ...role })))
@@ -95,12 +115,21 @@ interface Prepared {
   workflowEpoch?: number
   tool?: () => void
   guard?: () => void
+  delegateEpoch: number
+  lifetime: AbortController
+  refreshingRoles?: boolean
+  management?: () => void
+  managementGuard?: () => void
+  managementDeny?: () => void
 }
 
 /** Test and integration seams; the Host never passes these. */
 export interface ApplyOptions {
   /** Replaces the adapter registry (the integration harness uses a test adapter). */
   readonly adapters?: AdapterLookup
+  /** Only isolated tests bypass Loader entry ownership resolution. Never supplied by the Host. */
+  readonly managementNamespace?: () => string | undefined
+  readonly managementRawConfig?: () => unknown
 }
 
 export function apply(ctx: HostContext, config: Partial<Config> = {}, options: ApplyOptions = {}): void {
@@ -109,13 +138,18 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   const state = createRoleState(ctx)
   /** Set by the effect cleanup: late callbacks (storage opening, probe import) must not touch an inactive context. */
   let disposed = false
+  let stateReady = false
+  void state.ready.then(() => {
+    stateReady = true
+  })
+  const disposedAgents = new WeakSet<AgentPort>()
   /** Run work after the store is ready, unless the plugin was unloaded first; never rejects. */
-  const whenReady = (label: string, task: () => void): void => {
+  const whenReady = (label: string, task: () => void | Promise<void>): void => {
     state.ready
-      .then(() => {
+      .then(async () => {
         if (disposed) return
         try {
-          task()
+          await task()
         } catch (error) {
           if (!disposed) {
             ctx.logger.warn(`rolesubagents: ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -133,12 +167,15 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       )
     }
   })
-  /** Live external runs; disposed on unload (DSH does not stop them when a plugin unloads). */
+  /** Undisposed external runs; drained on unload, even when their results already settled. */
   const runs: RunTracker = new Set()
+  const externalRunStore = createExternalRunStore(() => ctx.get('storageDomain'))
   /** Aborted on unload: a delegation still starting (executable lookup, files, pre-flight) then never spawns. */
   const lifetime = new AbortController()
   const pending = new Map<string, PendingChild>()
   const installed = new Map<AgentPort, Prepared>()
+  /** Shield tentative storage candidates until validation/publication (also across Agent replacement). */
+  const refreshingCatalogs = new Map<string, RoleSettings>()
   const sessions = new Map<string, SessionState>()
   /** Sessions whose live role is read-only, including the moment before the role record is written. */
   const readOnlySessions = new WeakSet<SessionPort>()
@@ -167,6 +204,8 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   }
 
   const roleOf = (agent: AgentPort): RoleDefinition | undefined => {
+    // A prompt/authorization read can precede storage opening; do not cache an incomplete image.
+    if (!stateReady) return undefined
     const sessionState = stateOf(agent.session.id)
     if (sessionState.role === undefined) sessionState.role = state.readRole(agent.session) ?? null
     return sessionState.role ?? undefined
@@ -174,11 +213,16 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
 
   /** The role list an Agent's Session runs with, recording one when the Session has none yet. */
   const snapshotFor = (agent: AgentPort): RoleSettings => {
+    const committed = refreshingCatalogs.get(agent.session.id)
+    if (committed) return committed
     const recorded = state.readSnapshot(agent.session)
     if (recorded !== undefined) return recorded
     const parentId = agent.session.header.parentSession
     const parentSession = parentId === undefined ? undefined : ctx.get('sessions')?.get(parentId)
-    const snapshot = (parentSession === undefined ? undefined : state.readSnapshot(parentSession)) ?? currentSettings()
+    const snapshot =
+      (parentId === undefined ? undefined : refreshingCatalogs.get(parentId)) ??
+      (parentSession === undefined ? undefined : state.readSnapshot(parentSession)) ??
+      currentSettings()
     state.writeSnapshot(agent.session, snapshot)
     return snapshot
   }
@@ -189,9 +233,13 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   }
 
   const disposePrepared = (prepared: Prepared | undefined): void => {
+    prepared?.lifetime.abort()
     prepared?.guard?.()
     prepared?.workflow?.()
     prepared?.tool?.()
+    prepared?.management?.()
+    prepared?.managementGuard?.()
+    prepared?.managementDeny?.()
   }
 
   // An external tool change invalidates in O(1), not by rebuilding every
@@ -209,7 +257,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     try {
       prepared.workflow?.()
       prepared.workflow = undefined
-      const original = agent.ctx.tools.get?.('workflow', agent)
+      // Newer hosts keep activation conditions on registrations, not definitions.
+      // Leave conditional workflows native rather than replacing them with an unconditional wrapper.
+      const original =
+        typeof agent.ctx.tools.executable === 'function'
+          ? agent.ctx.tools.executable('workflow', agent)
+          : agent.ctx.tools.get?.('workflow', agent)
       if (original !== undefined) {
         const wrapped = workflowTool(original, snapshot.workflowModel, () => {
           if (installed.get(agent) !== prepared) return undefined
@@ -230,28 +283,249 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   }
 
   const external = {
-    engine: { subprocess: () => ctx.get('subprocess'), logger: ctx.logger, runs, lifetime: lifetime.signal },
+    engine: {
+      observability: externalRunStore,
+      subprocess: () => ctx.get('subprocess'),
+      sandbox: () => ctx.get('sandbox'),
+      logger: ctx.logger,
+      runs,
+      lifetime: lifetime.signal,
+    },
     adapters: options.adapters ?? defaultAdapterLookup,
     cliSettings: () => currentSettings().clis,
   }
 
-  const install = (agent: AgentPort, snapshot: RoleSettings): void => {
-    if (installed.has(agent)) return
-    const definition = buildTool(snapshot, { ctx, spawnProvider, forkProvider, pending, state, external })
-    const prepared: Prepared = { snapshot }
-    if (definition !== undefined) {
+  const audit = createManagementAudit(() => ctx.get('storageDomain'))
+  const referenceProbes = new Map<CliId, { result: ProbeResult; settings: string; fetchedAt: string }>()
+  const referenceCatalog = createManagementCatalog({
+    llm: () => ctx.get('llm') as ReturnType<CatalogDeps['llm']>,
+    hostEnv: process.env,
+    cliSettings: () => currentSettings().clis,
+    sandboxAvailable: () => typeof ctx.get('sandbox')?.confine === 'function',
+    cachedProbe: cli => {
+      const cached = referenceProbes.get(cli)
+      if (!cached || cached.settings !== JSON.stringify(currentSettings().clis?.[cli] ?? {})) return undefined
+      return { models: cached.result.models, found: cached.result.found, fetchedAt: cached.fetchedAt }
+    },
+  })
+  const authorizeManagement = managementAuthorization({
+    isDisposed: () => disposed,
+    isCurrentAgent: agent => installed.has(agent),
+    isRecordedChild: agent => pending.has(agent.id) || roleOf(agent) !== undefined,
+    isReadOnly: agent => isReadOnlySession(agent.session),
+    sandboxPolicy: () => ctx.get('sandboxPolicy'),
+  })
+  function registerDelegate(agent: AgentPort, prepared: Prepared): void {
+    const epoch = ++prepared.delegateEpoch
+    const snapshot = prepared.snapshot
+    prepared.tool?.()
+    prepared.tool = undefined
+    stateOf(agent.session.id).toolInstalled = false
+    const definition = buildTool(snapshot, {
+      ctx,
+      spawnProvider,
+      forkProvider,
+      pending,
+      state,
+      external,
+      lifetime: AbortSignal.any([lifetime.signal, prepared.lifetime.signal]),
+      isAlive: caller => !disposed && caller === agent && installed.get(agent) === prepared,
+      isCurrent: caller =>
+        !disposed &&
+        caller === agent &&
+        installed.get(agent) === prepared &&
+        prepared.delegateEpoch === epoch &&
+        prepared.snapshot === snapshot,
+    })
+    if (definition) {
       prepared.tool = agent.ctx.tools.register(definition)
       stateOf(agent.session.id).toolInstalled = true
     }
+  }
+  const currentRefreshes = new Set<Promise<void>>()
+  const namespace = options.managementNamespace ?? ownManagementNamespace(ctx)
+  const roleSettings = managementSettings({
+    settings: () => ctx.get('settings'),
+    namespace,
+    rawConfig:
+      options.managementRawConfig ?? (options.managementNamespace ? undefined : ownManagementRawConfig(ctx, namespace)),
+  })
+  const management = createRoleManagement({
+    lifetime: lifetime.signal,
+    settings: roleSettings,
+    authorize: authorizeManagement,
+    catalog: referenceCatalog,
+    audit,
+    active: agent => {
+      const prepared = installed.get(agent)
+      return prepared
+        ? {
+            revision: roleCatalogRevision(prepared.snapshot),
+            enabled: prepared.snapshot.enabled,
+            roles: prepared.snapshot.roles,
+          }
+        : undefined
+    },
+    async applyCurrent(agent, roles, expectedSessionRevision, revalidate) {
+      revalidate()
+      const prepared = installed.get(agent)!
+      const previous = prepared.snapshot
+      const oldRevision = roleCatalogRevision(previous)
+      if (oldRevision !== expectedSessionRevision)
+        return {
+          applied: false,
+          durable: false,
+          revision: oldRevision,
+          code: 'session-revision-conflict',
+          outcome: 'unchanged',
+        }
+      if (prepared.refreshingRoles || refreshingCatalogs.has(agent.session.id))
+        return {
+          applied: false,
+          durable: false,
+          revision: oldRevision,
+          code: 'session-refresh-busy',
+          outcome: 'unchanged',
+        }
+      if (state.degraded)
+        return {
+          applied: false,
+          durable: false,
+          revision: oldRevision,
+          code: 'session-storage-unavailable',
+          outcome: 'unchanged',
+        }
+      const next = { ...previous, roles: structuredClone(roles) as RoleDefinition[] }
+      const nextRevision = roleCatalogRevision(next)
+      prepared.refreshingRoles = true
+      refreshingCatalogs.set(agent.session.id, previous)
+      let finish = () => {}
+      const settled = new Promise<void>(resolve => {
+        finish = resolve
+      })
+      currentRefreshes.add(settled)
+      let attempted = false
+      let persisted = false
+      let rebound = false
+      try {
+        await state.flush()
+        if (state.degraded)
+          return {
+            applied: false,
+            durable: false,
+            revision: oldRevision,
+            code: 'session-storage-unavailable',
+            outcome: 'unchanged',
+          }
+        revalidate()
+        if (nextRevision === oldRevision && (prepared.tool !== undefined || selectableRoles(previous).length === 0))
+          return { applied: true, durable: true, revision: oldRevision, outcome: 'applied' }
+        attempted = true
+        state.writeSnapshot(agent.session, next)
+        await state.flush()
+        persisted = true
+        revalidate()
+        rebound = true
+        prepared.snapshot = next
+        registerDelegate(agent, prepared)
+        return { applied: true, durable: true, revision: nextRevision, outcome: 'applied' }
+      } catch (error) {
+        prepared.snapshot = previous
+        if (rebound && !disposed && installed.get(agent) === prepared) {
+          try {
+            registerDelegate(agent, prepared)
+          } catch {
+            ctx.logger.warn('rolesubagents: could not restore the delegate catalog after a failed refresh')
+          }
+        }
+        let restored = !attempted
+        if (attempted) {
+          try {
+            state.writeSnapshot(agent.session, previous)
+            await state.flush()
+            restored = true
+          } catch {
+            /* No shared transaction: restoration may be unconfirmed. */
+          }
+        }
+        return {
+          applied: false,
+          durable: false,
+          revision: oldRevision,
+          code: !restored
+            ? 'session-rollback-unconfirmed'
+            : error instanceof ManagementFailure
+              ? error.code
+              : persisted
+                ? 'delegate-refresh-failed'
+                : 'session-storage-failed',
+          outcome: !restored ? 'unknown' : attempted ? 'restored' : 'unchanged',
+        }
+      } finally {
+        prepared.refreshingRoles = false
+        finish()
+        currentRefreshes.delete(settled)
+        refreshingCatalogs.delete(agent.session.id)
+      }
+    },
+  })
+  const managementChild = (agent: AgentPort): boolean =>
+    agent.session.header.origin === 'subagent' ||
+    (agent.session.header.delegationDepth ?? 0) !== 0 ||
+    pending.has(agent.id) ||
+    roleOf(agent) !== undefined
+  const refreshManagement = (agent: AgentPort, prepared: Prepared): void => {
+    if (managementChild(agent)) {
+      prepared.management?.()
+      prepared.management = undefined
+      if (read(config.allowAiRoleManagement, false)) {
+        prepared.managementGuard ??= agent.ctx.tools.guard(call =>
+          call.name === MANAGEMENT_TOOL_NAME || call.name.endsWith(`.${MANAGEMENT_TOOL_NAME}`)
+            ? 'Child agents cannot administer role configuration.'
+            : undefined,
+        )
+        // Native children may not inherit the parent's agent-local registration.
+        // After removing our own registration, only deny a visible inherited tool;
+        // restrict validates names against the inherited surface, not just globals.
+        if (agent.ctx.tools.get?.(MANAGEMENT_TOOL_NAME, agent) !== undefined) {
+          prepared.managementDeny ??= agent.ctx.tools.restrict?.({ deny: [MANAGEMENT_TOOL_NAME] })
+        }
+      }
+      return
+    }
+    if (read(config.allowAiRoleManagement, false) && management.available(agent)) {
+      if (!prepared.management) {
+        const definition = buildManagementTool(
+          agent,
+          management,
+          () => !disposed && installed.get(agent) === prepared && prepared.management !== undefined,
+        )
+        prepared.management = agent.ctx.tools.register(definition)
+      }
+    } else {
+      prepared.management?.()
+      prepared.management = undefined
+    }
+  }
+  const install = (agent: AgentPort, snapshot: RoleSettings): void => {
+    if (installed.has(agent)) return
+    const prepared: Prepared = { snapshot, delegateEpoch: 0, lifetime: new AbortController() }
+    installed.set(agent, prepared)
+    registerDelegate(agent, prepared)
     const role = roleOf(agent)
     if (role?.readOnly === true) {
       readOnlySessions.add(agent.session)
       prepared.guard = agent.ctx.tools.guard(call =>
-        readOnlyCallDenial(call.name, call.arguments, selectableRoles(snapshot), lastSandboxMode(agent.session)),
+        readOnlyCallDenial(
+          call.name,
+          call.arguments,
+          selectableRoles(prepared.snapshot),
+          lastSandboxMode(agent.session),
+        ),
       )
     }
-    installed.set(agent, prepared)
     refreshWorkflow(agent, prepared)
+    refreshManagement(agent, prepared)
   }
 
   const pinReadOnly = (agent: AgentPort): void => {
@@ -272,9 +546,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       install(agent, child.snapshot)
       return
     }
+    if (roleOf(agent)?.readOnly === true) pinReadOnly(agent)
     const snapshot = snapshotFor(agent)
     install(agent, snapshot)
-    if (roleOf(agent)?.readOnly === true) pinReadOnly(agent)
   }
 
   ctx.systemPrompt.context({
@@ -283,9 +557,12 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     interpolate: false,
     required: true,
     text: ({ agent }) => {
-      if (agent === undefined) return ''
+      if (disposed || agent === undefined || disposedAgents.has(agent)) return ''
       const prepared = installed.get(agent)
-      if (prepared !== undefined) refreshWorkflow(agent, prepared)
+      if (prepared !== undefined) {
+        refreshWorkflow(agent, prepared)
+        refreshManagement(agent, prepared)
+      }
       const lines: string[] = []
       const role = roleOf(agent)
       if (role !== undefined) {
@@ -305,12 +582,23 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     },
   })
 
-  const guarded = (agent: AgentPort, _source: string): void => {
+  const guarded = async (agent: AgentPort, _source: string): Promise<void> => {
+    await state.ready
+    if (disposed || disposedAgents.has(agent)) return
+    let failClosed = pending.get(agent.id)?.role.readOnly === true || readOnlySessions.has(agent.session)
     try {
+      failClosed ||= state.readRole(agent.session)?.readOnly === true
       onCreated(agent)
+      // Native agent/created is serially awaited before the first turn.
+      await state.flush()
     } catch (error) {
-      // A read-only child must not start writable: abort its creation.
-      if (pending.get(agent.id)?.role.readOnly === true) throw error
+      if (disposed || disposedAgents.has(agent)) return
+      const prepared = installed.get(agent)
+      installed.delete(agent)
+      disposePrepared(prepared)
+      stateOf(agent.session.id).toolInstalled = false
+      // Restored roles must fail closed just like reserved children, including partial installation.
+      if (failClosed) throw error
       // Anything else only costs this Agent the tool; a throw would abort its creation.
       ctx.logger.warn(
         `rolesubagents: could not prepare agent ${agent.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -320,28 +608,56 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
 
   const stopCreated = ctx.on('agent/created', ({ agent, source }) => guarded(agent, source))
   const stopTools = ctx.on('tools/change', () => {
-    if (!refreshingWorkflow) workflowEpoch++
+    if (!disposed && !refreshingWorkflow) workflowEpoch++
   })
+  // Volatile commits update all live references before this event. Visibility follows on/off;
+  // execution independently checks the authoritative settings descriptor and its CAS revision.
+  const onDynamic = ctx.on.bind(ctx) as unknown as (event: string, listener: (...args: unknown[]) => void) => unknown
+  const stopManagement = onDynamic('loader/volatile-update', () => {
+    if (disposed) return
+    referenceCatalog.invalidate()
+    if (!read(config.allowAiRoleManagement, false)) management.revoke()
+    for (const [agent, prepared] of installed) refreshManagement(agent, prepared)
+  })
+  const stopModelCatalog = onDynamic('llm/adapters-updated', () => {
+    if (!disposed) referenceCatalog.invalidate('dsh')
+  })
+  const repins = new Set<SessionPort>()
   const stopDisposed = ctx.on('agent/disposed', ({ agent }) => {
+    if (disposed) return
+    disposedAgents.add(agent)
+    repins.delete(agent.session)
+    management.disposeAgent(agent)
     const prepared = installed.get(agent)
     installed.delete(agent)
     disposePrepared(prepared)
     sessions.delete(agent.session.id)
   })
   const stopSession = ctx.on('session/event', (session, event) => {
-    if (event.type !== 'sandbox/mode' || sandboxModeOf(event.data) === 'read-only') return
-    if (!isReadOnlySession(session)) return
-    try {
-      holdReadOnly(session)
-    } catch (error) {
-      ctx.logger.warn(
-        `rolesubagents: could not re-pin read-only on session ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
+    if (disposed || event.type !== 'sandbox/mode' || sandboxModeOf(event.data) === 'read-only') return
+    if (!isReadOnlySession(session) || repins.has(session)) return
+    repins.add(session)
+    // Session publication is synchronous and non-reentrant. Append only after every listener saw the event.
+    queueMicrotask(() => {
+      if (!repins.delete(session) || disposed) return
+      try {
+        holdReadOnly(session)
+      } catch (error) {
+        ctx.logger.warn(
+          `rolesubagents: could not re-pin read-only on session ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    })
   })
-  // Agents that already exist are prepared once the stored state is readable.
-  whenReady('preparing existing agents', () => {
-    for (const agent of ctx.agents.list()) guarded(agent, 'resume')
+  // Already-live agents have no creation caller to reject; clean up and log each failure independently.
+  whenReady('preparing existing agents', async () => {
+    for (const agent of ctx.agents.list()) {
+      try {
+        await guarded(agent, 'resume')
+      } catch (error) {
+        if (!disposed) ctx.logger.warn(`rolesubagents: could not prepare existing agent ${agent.id}: ${String(error)}`)
+      }
+    }
   })
 
   // Adapter housekeeping (e.g. stale generated files) runs once per plugin start; failures are only logged.
@@ -349,7 +665,9 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
     const housekeeping = adapter.housekeeping?.bind(adapter)
     if (housekeeping === undefined) continue
     Promise.resolve()
-      .then(() => housekeeping(process.env.HOME ?? homedir()))
+      .then(() => {
+        if (!disposed) return housekeeping(process.env.HOME ?? homedir())
+      })
       .catch(error => {
         if (disposed) return
         ctx.logger.warn(
@@ -358,11 +676,31 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
       })
   }
 
+  void mountRoleDisplayService(ctx, {
+    state,
+    externalRuns: externalRunStore,
+    isDisposed: () => disposed,
+    lifetime: lifetime.signal,
+  })
+
+  void mountManagementRemote(ctx, {
+    isDisposed: () => disposed,
+    writeSafety: revision => roleSettings.writeSafety(revision),
+  })
   void mountProbeService(ctx, {
     subprocess: () => ctx.get('subprocess'),
     adapters: options.adapters ?? defaultAdapterLookup,
     cliSettings: () => currentSettings().clis,
     isDisposed: () => disposed,
+    onResult: (result, admittedSettings) => {
+      if (disposed) return
+      referenceProbes.set(result.cli, {
+        result,
+        settings: JSON.stringify(admittedSettings[result.cli] ?? {}),
+        fetchedAt: new Date().toISOString(),
+      })
+      referenceCatalog.invalidate(result.cli)
+    },
   })
 
   const unsubscribe = (stop: unknown): void => {
@@ -372,24 +710,44 @@ export function apply(ctx: HostContext, config: Partial<Config> = {}, options: A
   ctx.effect(
     () => () => {
       disposed = true
+      repins.clear()
       lifetime.abort(new Error('the rolesubagents plugin was unloaded'))
-      for (const run of [...runs]) {
-        run.dispose().catch(error => {
+      const runClosings = [...runs].map(async run => {
+        try {
+          await run.dispose()
+          // Successful disposal settles the run; also drain its history observer.
+          // A broken disposer must not block all remaining storage cleanup.
+          await run.result
+        } catch (error) {
           ctx.logger.warn(
             `rolesubagents: could not stop external run ${run.id}: ${error instanceof Error ? error.message : String(error)}`,
           )
-        })
-      }
+        }
+      })
       runs.clear()
       unsubscribe(stopCreated)
       unsubscribe(stopTools)
+      unsubscribe(stopManagement)
+      unsubscribe(stopModelCatalog)
+      management.dispose()
+      const auditClosing = audit
+        .close()
+        .catch(() => ctx.logger.warn('rolesubagents: could not close role-management audit storage'))
       unsubscribe(stopDisposed)
       unsubscribe(stopSession)
       for (const prepared of installed.values()) disposePrepared(prepared)
       installed.clear()
       sessions.clear()
       pending.clear()
-      void state.close()
+      return Promise.allSettled([...runClosings, ...currentRefreshes])
+        .then(async () => {
+          await auditClosing
+          await externalRunStore
+            .close()
+            .catch(() => ctx.logger.warn('rolesubagents: could not close external run history storage'))
+          await state.close()
+        })
+        .catch(() => ctx.logger.warn('rolesubagents: could not close Session role storage'))
     },
     'rolesubagents: scoped tools',
   )

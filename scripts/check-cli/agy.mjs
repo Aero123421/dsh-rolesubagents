@@ -8,15 +8,16 @@
  * `clis.agy.envPassthrough`, and HTTPS_PROXY points at the same fake, which refuses every proxied
  * host at once — so agy's telemetry / feature-flag / updater traffic never leaves the machine and no
  * OAuth login or sandbox credential is ever used. AGY_CLI_MODEL_API_MAX_RETRIES=1 (tests only) makes
- * scripted 5xx errors fail at once.
+ * scripted 5xx errors fail at once. The fake rejects credentials other than its fixed dummy key.
+ * Use a direct CLI executable: wrappers such as `snap run` can replace HOME and invalidate this isolation.
  */
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, symlinkSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
+import { FAKE_AGY_KEY as FAKE_KEY } from '../../tests/support/fake-models/agy.mjs'
 
 const FAKE_SERVER = 'tests/support/fake-models/agy.mjs'
-const FAKE_KEY = 'fake-gemini-key-rolesubagents-check'
 const KEEP_ENV = ['PATH', 'LANG', 'LC_ALL', 'TERM', 'SHELL', 'USER', 'LOGNAME', 'TMPDIR']
 const PASSTHROUGH = ['GEMINI_API_KEY', 'GOOGLE_GEMINI_BASE_URL', 'HTTPS_PROXY', 'AGY_CLI_MODEL_API_MAX_RETRIES']
 const AGENTS_DIR = '.gemini/config/agents'
@@ -35,15 +36,42 @@ async function isolatedEnv(env, fn) {
   }
 }
 
-/** Pids of live processes whose environment carries `entry` (e.g. this case's fake base URL). */
+/** Remember only this harness's descendants, including children later reparented to PID 1. */
+const ownedProcesses = new Map()
+
+/** Never inspect unrelated processes' environments: they may contain real credentials. */
 function pidsWithEnv(entry) {
-  const pids = []
+  const processes = new Map()
   for (const name of readdirSync('/proc')) {
-    if (!/^\d+$/.test(name) || Number(name) === process.pid) continue
+    if (!/^\d+$/.test(name)) continue
     try {
-      if (readFileSync(`/proc/${name}/environ`, 'latin1').split('\0').includes(entry)) pids.push(Number(name))
+      const stat = readFileSync(`/proc/${name}/stat`, 'utf8')
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+      if (!fields[19]) continue
+      processes.set(Number(name), { parent: Number(fields[1]), birth: fields[19] })
     } catch {}
   }
+  const belongs = pid => {
+    const seen = new Set()
+    for (let current = pid; !seen.has(current); ) {
+      if (current === process.pid) return true
+      seen.add(current)
+      const info = processes.get(current)
+      if (!info) return false
+      if (ownedProcesses.get(current) === info.birth) return true
+      current = info.parent
+    }
+    return false
+  }
+  const pids = []
+  for (const [pid, info] of processes) {
+    if (pid === process.pid || !belongs(pid)) continue
+    ownedProcesses.set(pid, info.birth)
+    try {
+      if (readFileSync(`/proc/${pid}/environ`, 'latin1').split('\0').includes(entry)) pids.push(pid)
+    } catch {}
+  }
+  for (const [pid, birth] of ownedProcesses) if (processes.get(pid)?.birth !== birth) ownedProcesses.delete(pid)
   return pids
 }
 
@@ -94,6 +122,10 @@ export async function cases(h) {
           })
           try {
             await body({ w, ws, home, requests, main, baseUrlEntry: `GOOGLE_GEMINI_BASE_URL=${fake.url}` })
+            h.assert.ok(
+              (await requests()).every(request => request.authenticated === true),
+              'every real CLI model request used only the expected dummy credential',
+            )
           } finally {
             await w.close()
           }
@@ -117,6 +149,61 @@ export async function cases(h) {
     const { childId } = await w.delegate({ role: roleId, prompt })
     return { childId, notice: await w.notice(childId, 90_000) }
   }
+
+  h.case('fake backend rejects missing and incorrect credentials and accepts only the dummy key', async () => {
+    const fake = await h.server(FAKE_SERVER)
+    try {
+      const endpoint = `${fake.url}/v1beta/models/gemini-3.8-flash:streamGenerateContent`
+      const body = JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'fixture authentication check' }] }] })
+      for (const key of [undefined, 'incorrect-fixture-key', FAKE_KEY]) {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(key === undefined ? {} : { 'x-goog-api-key': key }) },
+          body,
+        })
+        h.assert.equal(response.status, key === FAKE_KEY ? 200 : 401)
+        await response.text()
+      }
+      const requests = await (await fetch(`${fake.url}/__requests`)).json()
+      h.assert.deepEqual(
+        requests.map(request => request.authenticated),
+        [false, false, true],
+      )
+      h.assert.ok(!JSON.stringify(requests).includes(FAKE_KEY), 'credential values are never recorded')
+    } finally {
+      fake.stop()
+    }
+  })
+
+  h.case('fake command arguments follow both historical and current offered tool schemas', async () => {
+    const fake = await h.server(FAKE_SERVER)
+    try {
+      for (const historical of [true, false]) {
+        const properties = {
+          CommandLine: { type: 'string' },
+          WaitMsBeforeAsync: { type: 'number' },
+          toolSummary: { type: 'string' },
+          ...(historical ? { Cwd: { type: 'string' }, toolAction: { type: 'string' } } : {}),
+        }
+        const response = await fetch(`${fake.url}/v1beta/models/gemini-3.8-flash:streamGenerateContent`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-goog-api-key': FAKE_KEY },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: '[[scenario:command]]' }] }],
+            tools: [{ functionDeclarations: [{ name: 'run_command', parameters: { type: 'object', properties } }] }],
+          }),
+        })
+        h.assert.equal(response.status, 200)
+        const line = (await response.text()).split('\n').find(line => line.startsWith('data: '))
+        const args = JSON.parse(line.slice(6)).candidates[0].content.parts[0].functionCall.args
+        h.assert.equal(args.CommandLine, 'echo FAKE_CMD > fake_cmd.txt')
+        h.assert.equal(Object.hasOwn(args, 'Cwd'), historical)
+        h.assert.equal(Object.hasOwn(args, 'toolAction'), historical)
+      }
+    } finally {
+      fake.stop()
+    }
+  })
 
   h.case('answer reaches the parent; instructions reach the system prompt of a generated agent', async () => {
     await withAgy({ roles: [role('worker')] }, async x => {
@@ -236,6 +323,7 @@ export async function cases(h) {
     await withAgy({ roles: [admin], world: { sandboxMode: 'danger-full-access' } }, async x => {
       const { notice } = await run(x.w, 'admin', 'run [[scenario:command]]')
       h.assert.match(notice, /FAKE_DONE tool=run_command/)
+      h.assert.ok(existsSync(join(x.ws, 'fake_cmd.txt')), `command did not create its expected output: ${notice}`)
       h.assert.equal(readFileSync(join(x.ws, 'fake_cmd.txt'), 'utf8').trim(), 'FAKE_CMD')
       const [request] = await x.main()
       h.assert.ok(request.system.includes('You are Antigravity'), 'the default identity prompt is kept')

@@ -11,7 +11,7 @@ vi.mock('@deepseek-ai/dsh-storage-domain', () => import('./host-fakes.ts').then(
 
 const route = { provider: 'configured-provider', model: 'configured-model' }
 
-async function run(script: string) {
+async function run(script: string, args: unknown = { text: 'from args' }) {
   const calls: { prompt: unknown; options: unknown }[] = []
   const agent = (prompt: unknown, options?: unknown) => {
     calls.push({ prompt, options })
@@ -19,7 +19,7 @@ async function run(script: string) {
   }
   const parallel = (items: (() => unknown)[]) => Promise.all(items.map(item => item()))
   const pipeline = (items: unknown[], stage: (item: unknown) => unknown) => Promise.all(items.map(stage))
-  const context = vm.createContext({ agent, parallel, pipeline, args: { text: 'from args' }, phase() {}, log() {} })
+  const context = vm.createContext({ agent, parallel, pipeline, args, phase() {}, log() {} })
   const value = await new vm.Script(`(async () => {${workflowScript(script, route)}\n})()`).runInContext(context)
   return { calls, value }
 }
@@ -85,6 +85,8 @@ describe('workflow script adapter', () => {
       await agent('provider only', {provider:'explicit'});
       await agent('invalid model', {model:null});
       await agent('empty provider', {provider:''});
+      await agent('undefined provider', {provider:undefined});
+      await agent('undefined model', {model:undefined});
     `)
     expect(calls.map(c => c.options)).toEqual([
       { provider: 'explicit', model: 'explicit-model' },
@@ -92,7 +94,63 @@ describe('workflow script adapter', () => {
       { provider: 'explicit' },
       { model: null },
       { provider: '' },
+      { provider: undefined },
+      { model: undefined },
     ])
+  })
+
+  it.each([Object.freeze({ label: 'from JSON' }), Object.assign(Object.create(null), { label: 'from JSON' })])(
+    'applies defaults to cross-realm plain options without mutating them',
+    async options => {
+      const { calls } = await run('return await agent("task", args.options);', { options })
+      expect(calls[0]?.options).toEqual({ ...route, label: 'from JSON' })
+      expect(options).toEqual({ label: 'from JSON' })
+      expect(Object.hasOwn(options, 'provider')).toBe(false)
+    },
+  )
+
+  it('leaves accessors, non-enumerable and symbol properties for native materialization', async () => {
+    const { calls, value } = await run(`
+      let reads = 0;
+      const options = {get label() { reads++; if (this !== options) throw Error('changed receiver'); return 'label'; }};
+      await agent('accessor', options);
+      await agent('throwing accessor', {get label() { throw Error('invalid option'); }});
+      await agent('symbol', Object.defineProperty({}, Symbol('invalid'), {value: true}));
+      await agent('hidden', Object.defineProperty({}, 'unexpected', {get() { throw Error('hidden'); }}));
+      return reads;
+    `)
+    expect(value).toBe(0)
+    expect((calls[0]!.options as { label: string }).label).toBe('label')
+    expect(() => (calls[1]!.options as { label: string }).label).toThrow('invalid option')
+    expect(Object.getOwnPropertySymbols(calls[2]!.options as object)).toHaveLength(1)
+    expect(Object.getOwnPropertyDescriptor(calls[3]!.options, 'unexpected')?.enumerable).toBe(false)
+    expect(Object.keys(calls[3]!.options as object)).toEqual(['provider', 'model'])
+  })
+
+  it('keeps throwing proxy reads native and passes introspection failures through unchanged', async () => {
+    const { calls, value } = await run(`
+      const prototype = new Proxy({}, {getPrototypeOf() { throw Error('prototype'); }});
+      const keys = new Proxy({}, {ownKeys() { throw Error('keys'); }});
+      await agent('prototype', prototype);
+      await agent('keys', keys);
+      await agent('read', new Proxy({label:'label'}, {get() { throw Error('read'); }}));
+      return [prototype, keys];
+    `)
+    expect(calls[0]!.options).toBe(value[0])
+    expect(calls[1]!.options).toBe(value[1])
+    expect(() => (calls[2]!.options as { label: string }).label).toThrow('read')
+  })
+
+  it.each(['null', 'Object.prototype'])('preserves array identity with a %s prototype', async prototype => {
+    const { calls, value } = await run(`
+      const options = Object.setPrototypeOf([], ${prototype});
+      await agent('array', options);
+      return options;
+    `)
+    expect(calls[0]!.options).toBe(value)
+    expect(Array.isArray(calls[0]!.options)).toBe(true)
+    expect(Object.hasOwn(value, 'provider')).toBe(false)
+    expect(Object.hasOwn(value, 'model')).toBe(false)
   })
 
   it('passes malformed options through and retains unknown keys for native rejection', async () => {
@@ -157,7 +215,7 @@ describe('official workflow tool decoration', () => {
     const world = fakeWorld()
     apply(world.ctx, { workflowModel: route })
     const { agent, original } = enableWorkflow(world, 'root')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(agent.ctx.tools.get).toHaveBeenCalledWith('workflow', agent)
     const wrapped = agent.registered.find(tool => tool.name === 'workflow')
     expect(wrapped).toBeDefined()
@@ -165,39 +223,64 @@ describe('official workflow tool decoration', () => {
     expect(original.execute).toHaveBeenCalledTimes(1)
     expect(world.subagents.startActivation).not.toHaveBeenCalled()
     const child = world.newAgent('workflow-child', { parentSession: agent.session.id })
-    world.emitCreated(child)
+    await world.emitCreated(child)
     expect(world.runtimeContext(child)).toBe('')
     expect(world.storedRole(child.session.id)).toBeUndefined()
     expect(child.guards).toEqual([])
     expect(child.session.log).toEqual([])
     world.emitDisposed(agent)
     expect(agent.disposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true)
-    world.teardown()
+    await world.teardown()
   })
 
-  it.each([undefined, null])('does not decorate with an unset setting %j', workflowModel => {
+  it.each([true, false])(
+    'honors host executable eligibility %j without falling back to visible definitions',
+    async eligible => {
+      const world = fakeWorld()
+      apply(world.ctx, { workflowModel: route })
+      const { agent, original } = enableWorkflow(world, 'conditional')
+      const executable = vi.fn(() => (eligible ? original : undefined))
+      Object.assign(agent.ctx.tools, { executable })
+      await world.emitCreated(agent)
+      expect(executable).toHaveBeenCalledWith('workflow', agent)
+      expect(agent.ctx.tools.get).not.toHaveBeenCalled()
+      const wrapped = agent.registered.find(tool => tool.name === 'workflow')
+      if (eligible) {
+        expect(wrapped).toBeDefined()
+        const args = { script: 'return agent("task")' }
+        await wrapped?.execute(args, execContext(agent))
+        expect(original.execute).toHaveBeenCalledWith({ script: workflowScript(args.script, route) }, expect.anything())
+      } else {
+        expect(wrapped).toBeUndefined()
+        expect(original.execute).not.toHaveBeenCalled()
+      }
+      await world.teardown()
+    },
+  )
+
+  it.each([undefined, null])('does not decorate with an unset setting %j', async workflowModel => {
     const world = fakeWorld()
     apply(world.ctx, { workflowModel })
     const { agent } = enableWorkflow(world, 'root')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(agent.registered.map(tool => tool.name)).toEqual(['delegate'])
-    world.teardown()
+    await world.teardown()
   })
 
-  it('keeps workflow absent in a preset without it and honors the master switch', () => {
+  it('keeps workflow absent in a preset without it and honors the master switch', async () => {
     const world = fakeWorld()
     apply(world.ctx, { workflowModel: route })
     const agent = world.newAgent('no-workflow')
     agent.ctx.tools.get = () => undefined
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(agent.registered.map(tool => tool.name)).toEqual(['delegate'])
-    world.teardown()
+    await world.teardown()
     const disabled = fakeWorld()
     apply(disabled.ctx, { enabled: false, workflowModel: route })
     const { agent: off } = enableWorkflow(disabled, 'off')
-    disabled.emitCreated(off)
+    await disabled.emitCreated(off)
     expect(off.registered).toEqual([])
-    disabled.teardown()
+    await disabled.teardown()
   })
 
   it('lazily refreshes external changes and makes captured wrappers fail closed', async () => {
@@ -221,7 +304,7 @@ describe('official workflow tool decoration', () => {
         world.emitToolsChange()
       }
     }
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(registrations).toBe(1)
     const captured = shadow
     const first = inherited
@@ -247,10 +330,10 @@ describe('official workflow tool decoration', () => {
     world.emitDisposed(agent)
     expect(shadow).toBeUndefined()
     expect(() => captured?.execute(args, execContext(agent))).toThrow('no longer available')
-    world.teardown()
+    await world.teardown()
   })
 
-  it('logs a same-layer collision without losing delegate or its cleanup', () => {
+  it('logs a same-layer collision without losing delegate or its cleanup', async () => {
     const world = fakeWorld()
     apply(world.ctx, { workflowModel: route })
     const { agent } = enableWorkflow(world, 'collision')
@@ -259,12 +342,12 @@ describe('official workflow tool decoration', () => {
       if (tool.name === 'workflow') throw new Error('duplicate workflow')
       return register(tool)
     }
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     expect(agent.registered.map(tool => tool.name)).toEqual(['delegate'])
     expect(world.logger.warn).toHaveBeenCalledWith(expect.stringContaining('could not decorate workflow'))
     world.emitDisposed(agent)
     expect(agent.disposers[0]).toHaveBeenCalledOnce()
-    world.teardown()
+    await world.teardown()
   })
 
   it('snapshots settings per session, including resume, and keeps new sessions independent', async () => {
@@ -272,24 +355,24 @@ describe('official workflow tool decoration', () => {
     let configured = route
     apply(world.ctx, { workflowModel: { get: () => configured } })
     const { agent } = enableWorkflow(world, 'root')
-    world.emitCreated(agent)
+    await world.emitCreated(agent)
     configured = { provider: 'new-provider', model: 'new-model' }
     const { agent: next } = enableWorkflow(world, 'next')
-    world.emitCreated(next)
+    await world.emitCreated(next)
     const first = agent.registered.find(tool => tool.name === 'workflow')
     const second = next.registered.find(tool => tool.name === 'workflow')
     const args = { script: 'return agent("task")' }
     expect(await first?.execute(args, execContext(agent))).toEqual({ script: workflowScript(args.script, route) })
     expect(await second?.execute(args, execContext(next))).toEqual({ script: workflowScript(args.script, configured) })
     await world.settle()
-    world.teardown()
+    await world.teardown()
     const resumed = fakeWorld(world.storage)
     apply(resumed.ctx, { workflowModel: configured })
     const { agent: restored } = enableWorkflow(resumed, 'root')
     await resumed.settle()
-    resumed.emitCreated(restored, 'resume')
+    await resumed.emitCreated(restored, 'resume')
     const tool = restored.registered.find(tool => tool.name === 'workflow')
     expect(await tool?.execute(args, execContext(restored))).toEqual({ script: workflowScript(args.script, route) })
-    resumed.teardown()
+    await resumed.teardown()
   })
 })

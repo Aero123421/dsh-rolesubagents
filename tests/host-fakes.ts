@@ -14,6 +14,7 @@ import type {
   LlmPort,
   LoggerPort,
   SandboxPolicyPort,
+  SandboxPort,
   SessionPort,
   StorageDomainPort,
   SubagentProviderPort,
@@ -241,6 +242,31 @@ export function fakeAgent(id: string, session: FakeSession = fakeSession(`sessio
   return { id, session, registered, disposers, register, guards, guardDisposers, ctx: { tools: { register, guard } } }
 }
 
+/** Model installed ToolRuntime: explicit scoped lookup; restrictions validate inherited, not own, names. */
+export function validatingToolView(agent: FakeAgent, parent?: FakeAgent, globals: ToolDefinition[] = []) {
+  const denied = new Set<string>()
+  const own = (owner: FakeAgent, name: string) =>
+    owner.registered.findLast((tool, i) => tool.name === name && owner.disposers[i]?.mock.calls.length === 0)
+  const inherited = (name: string) => (parent && own(parent, name)) ?? globals.find(tool => tool.name === name)
+  const get = vi.fn<NonNullable<AgentPort['ctx']['tools']['get']>>((name, scope) => {
+    if (scope === undefined) return globals.find(tool => tool.name === name)
+    if (scope !== agent) throw new Error('unexpected tool lookup scope')
+    return own(agent, name) ?? (denied.has(name) ? undefined : inherited(name))
+  })
+  const restrict = vi.fn<NonNullable<AgentPort['ctx']['tools']['restrict']>>(patch => {
+    for (const name of patch.deny) {
+      if (!inherited(name)) throw new Error(`tools.restrict() names unknown global tool "${name}"`)
+    }
+    for (const name of patch.deny) denied.add(name)
+    return vi.fn(() => {
+      for (const name of patch.deny) denied.delete(name)
+    })
+  })
+  agent.ctx.tools.get = get
+  agent.ctx.tools.restrict = restrict
+  return { get, restrict }
+}
+
 /** The tool an Agent had registered; fails the test when it has none. */
 export function registeredTool(agent: FakeAgent): ToolDefinition {
   const [tool] = agent.registered
@@ -294,6 +320,8 @@ export interface FakeWorld {
     storageDomain?: StorageDomainPort
     subprocess?: SubprocessPort
     sandboxPolicy?: SandboxPolicyPort
+    sandbox?: SandboxPort
+    settings?: unknown
   }
   /** The fake storage-domain backend every state instance in this world shares. */
   readonly storage: FakeStorage
@@ -315,15 +343,18 @@ export interface FakeWorld {
   readonly contexts: RuntimeContext[]
   /** A new Agent with its own Session, registered with the `sessions` service. Nothing is emitted. */
   newAgent(id: string, header?: SessionPort['header']): FakeAgent
-  emitCreated(agent: AgentPort, source?: string): void
+  /** Like native Context.serial, waits for every listener before the first turn. */
+  emitCreated(agent: AgentPort, source?: string): Promise<void>
   emitDisposed(agent: AgentPort): void
   emitToolsChange(): void
+  emitVolatileUpdate(): void
+  emitModelCatalogUpdate(): void
   /** Append a sandbox mode and publish it on `session/event`, as a live Session does. */
   emitSandbox(session: FakeSession, mode: string): void
   /** The text the plugin's runtime-context provider contributes for an Agent (or for none). */
   runtimeContext(agent?: AgentPort): string
   /** Run the plugin's `ctx.effect` cleanups, as the Host does when the plugin is unloaded. */
-  teardown(): void
+  teardown(): Promise<void>
 }
 
 /**
@@ -331,11 +362,13 @@ export interface FakeWorld {
  * (depth one deeper than the parent) and fires `agent/created` with source `startup` before it resolves.
  */
 export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
-  const created: ((payload: CreatedPayload) => void)[] = []
+  const created: ((payload: CreatedPayload) => void | Promise<void>)[] = []
   const disposed: ((payload: DisposedPayload) => void)[] = []
   const sessionEvents: SessionListener[] = []
   const toolsChanged: (() => void)[] = []
-  const cleanups: (() => void)[] = []
+  const volatileChanged: (() => void)[] = []
+  const catalogChanged: (() => void)[] = []
+  const cleanups: (() => void | Promise<void>)[] = []
   const providers = new Map<string, SubagentProviderPort>([
     ['spawn', fakeProvider('spawn')],
     [
@@ -404,7 +437,7 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
           delegationDepth: (parent.session.header.delegationDepth ?? 0) + 1,
         })
         world.children.push(child)
-        world.emitCreated(child, 'startup')
+        await world.emitCreated(child, 'startup')
         return { childId }
       }),
     },
@@ -413,14 +446,20 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
       sessions.set(agent.session.id, agent.session)
       return agent
     },
-    emitCreated(agent, source = 'startup') {
-      for (const listener of created) listener({ agent, source })
+    async emitCreated(agent, source = 'startup') {
+      for (const listener of [...created]) await listener({ agent, source })
     },
     emitDisposed(agent) {
       for (const listener of disposed) listener({ agent })
     },
     emitToolsChange() {
       for (const listener of [...toolsChanged]) listener()
+    },
+    emitVolatileUpdate() {
+      for (const listener of [...volatileChanged]) listener()
+    },
+    emitModelCatalogUpdate() {
+      for (const listener of [...catalogChanged]) listener()
     },
     emitSandbox(session, mode) {
       session.append('sandbox/mode', { mode })
@@ -432,8 +471,8 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
       if (context === undefined) throw new Error('the plugin registered no runtime context')
       return context.text(agent === undefined ? {} : { agent })
     },
-    teardown() {
-      for (const cleanup of cleanups.splice(0)) cleanup()
+    async teardown() {
+      await Promise.all(cleanups.splice(0).map(cleanup => cleanup()))
     },
   }
 
@@ -442,6 +481,7 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
   function get(name: 'storageDomain'): StorageDomainPort | undefined
   function get(name: 'subprocess'): SubprocessPort | undefined
   function get(name: 'sandboxPolicy'): SandboxPolicyPort | undefined
+  function get(name: 'sandbox'): SandboxPort | undefined
   function get(name: string): unknown
   function get(name: string): unknown {
     if (name === 'llm') return services.llm
@@ -449,22 +489,44 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
     if (name === 'storageDomain') return services.storageDomain
     if (name === 'subprocess') return services.subprocess
     if (name === 'sandboxPolicy') return services.sandboxPolicy
+    if (name === 'sandbox') return services.sandbox
+    if (name === 'settings') return services.settings
     return undefined
   }
 
-  function on(event: 'agent/created', listener: (payload: CreatedPayload) => void): unknown
+  function on(event: 'agent/created', listener: (payload: CreatedPayload) => void | Promise<void>): unknown
   function on(event: 'agent/disposed', listener: (payload: DisposedPayload) => void): unknown
   function on(event: 'session/event', listener: SessionListener): unknown
   function on(event: 'tools/change', listener: () => void): unknown
   function on(event: string, listener: (...args: never[]) => void): unknown {
-    if (event === 'agent/created') created.push(listener as (payload: CreatedPayload) => void)
-    else if (event === 'agent/disposed') disposed.push(listener as (payload: DisposedPayload) => void)
-    else if (event === 'tools/change') {
+    if (event === 'agent/created') {
+      const fn = listener as (payload: CreatedPayload) => void | Promise<void>
+      created.push(fn)
+      return () => {
+        const index = created.indexOf(fn)
+        if (index >= 0) created.splice(index, 1)
+      }
+    } else if (event === 'agent/disposed') {
+      const fn = listener as (payload: DisposedPayload) => void
+      disposed.push(fn)
+      return () => {
+        const index = disposed.indexOf(fn)
+        if (index >= 0) disposed.splice(index, 1)
+      }
+    } else if (event === 'tools/change') {
       const fn = listener as () => void
       toolsChanged.push(fn)
       return () => {
         const index = toolsChanged.indexOf(fn)
         if (index >= 0) toolsChanged.splice(index, 1)
+      }
+    } else if (event === 'loader/volatile-update' || event === 'llm/adapters-updated') {
+      const list = event === 'loader/volatile-update' ? volatileChanged : catalogChanged
+      const fn = listener as () => void
+      list.push(fn)
+      return () => {
+        const i = list.indexOf(fn)
+        if (i >= 0) list.splice(i, 1)
       }
     } else if (event === 'session/event') {
       const fn = listener as SessionListener
@@ -474,7 +536,6 @@ export function fakeWorld(sharedStorage?: FakeStorage): FakeWorld {
         if (index >= 0) sessionEvents.splice(index, 1)
       }
     } else throw new Error(`unexpected event ${event}`)
-    return () => {}
   }
 
   const ctx: HostContext = {

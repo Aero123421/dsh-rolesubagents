@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-22T10:54:07.610Z",
+  "dshVersion": "0.2.1-rc.2",
+  "platform": "linux",
+  "arch": "x64",
+  "variants": {
+    "codexSandboxBackend": "default"
+  },
+  "binaries": {
+    "grok-build": {
+      "path": "grok-1.0.62-linux-x86_64",
+      "sha256": "2a46d9e4d7ebd7a9cff7f95716714b19dad5f21dd2a497822400b1fb128969aa",
+      "version": "1.0.62",
+      "expectedVersion": "1.0.62"
+    },
+    "pi": {
+      "path": "cli.js",
+      "sha256": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
+      "version": "1.3.0",
+      "expectedVersion": "1.3.0"
+    }
+  },
+  "cases": [
+    {
+      "cli": "grok-build",
+      "name": "native Grok returns final text and uses configured local model and role instructions",
+      "status": "pass",
+      "durationMs": 617
+    },
+    {
+      "cli": "grok-build",
+      "name": "native Grok real stream tolerates synthetic unknown and malformed line injection",
+      "status": "pass",
+      "durationMs": 613
+    },
+    {
+      "cli": "grok-build",
+      "name": "native Grok tool loop keeps only final response",
+      "status": "pass",
+      "durationMs": 645
+    },
+    {
+      "cli": "grok-build",
+      "name": "native Grok max token limit is not success",
+      "status": "pass",
+      "durationMs": 609
+    },
+    {
+      "cli": "grok-build",
+      "name": "native Grok parallel runs settle independently",
+      "status": "pass",
+      "durationMs": 631
+    },
+    {
+      "cli": "grok-build",
+      "name": "native Grok provider errors cannot be mistaken for success",
+      "status": "pass",
+      "durationMs": 605
+    },
+    {
+      "cli": "grok-build",
+      "name": "native Grok wall-clock timeout terminates streaming process and owned descendants",
+      "status": "pass",
+      "durationMs": 2256
+    },
+    {
+      "cli": "grok-build",
+      "name": "restricted parent refuses native Grok before backend startup",
+      "status": "pass",
+      "durationMs": 148
+    },
+    {
+      "cli": "grok-build",
+      "name": "native Grok missing key is diagnosed before inference",
+      "status": "pass",
+      "durationMs": 501
+    },
+    {
+      "cli": "grok-build",
+      "name": "native Grok cancellation stops streaming and owned descendants",
+      "status": "pass",
+      "durationMs": 648
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi returns final text and preserves instructions and configured provider",
+      "status": "pass",
+      "durationMs": 410
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi real stream tolerates synthetic unknown and malformed line injection",
+      "status": "pass",
+      "durationMs": 360
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi retains extensions and handles prompt disposition handled",
+      "status": "pass",
+      "durationMs": 402
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi tool loop keeps only final answer",
+      "status": "pass",
+      "durationMs": 406
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi max token limit is not success",
+      "status": "pass",
+      "durationMs": 395
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi extension dialogs are denied without approving",
+      "status": "pass",
+      "durationMs": 458
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi parallel runs settle independently",
+      "status": "pass",
+      "durationMs": 406
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi reports provider errors without leaking raw output",
+      "status": "pass",
+      "durationMs": 402
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi wall-clock timeout terminates streaming process and owned descendants",
+      "status": "pass",
+      "durationMs": 2199
+    },
+    {
+      "cli": "pi",
+      "name": "restricted parent refuses native Pi before extension startup",
+      "status": "pass",
+      "durationMs": 143
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi missing key is diagnosed before inference",
+      "status": "pass",
+      "durationMs": 380
+    },
+    {
+      "cli": "pi",
+      "name": "native Pi cancellation stops streaming and owned descendants",
+      "status": "pass",
+      "durationMs": 402
+    }
+  ],
+  "totals": {
+    "passes": 22,
+    "failures": 0,
+    "skips": 0
+  },
+  "archiveNormalization": "Resolved executable paths reduced to basename; version, SHA256, timestamp and case outcomes unchanged."
+}

@@ -66,9 +66,57 @@ describe('translator', () => {
 
   it('states the save outcome in both languages', () => {
     expect(translator('en')('foot.saved')).toBe(
-      'Saved. Changes apply to new sessions; running sessions keep their roles and workflow default model.',
+      'Saved. New root conversations use these settings. AI can explicitly use apply_current to update its own roles for future delegations, never existing children. Running sessions keep their workflow default model.',
     )
-    expect(translator('ja')('foot.saved')).toContain('新しいセッション')
+    expect(translator('ja')('foot.saved')).toContain('新しい親の会話')
+    expect(translator('ja')('foot.saved')).toContain('apply_current')
+    expect(translator('ja')('foot.saved')).toContain('既存の子は変更しません')
+  })
+})
+
+describe('AI management permission text', () => {
+  it('describes an independent Host/profile permission with an authoritative immediate-save state', () => {
+    const en = translator('en')
+    const ja = translator('ja')
+    expect(en('management.label')).toBe('Allow AI role management')
+    expect(ja('management.label')).toBe('AIによるロール管理を許可')
+    expect(en('management.hint')).toContain('Host/profile')
+    expect(en('management.hint')).toContain('ordinary workspace-write')
+    expect(en('management.hint')).toContain('Children do not inherit')
+    expect(en('management.hint')).toContain('authentication changes')
+    expect(en('management.immediate')).toContain('Host-accepted')
+    expect(ja('management.hint')).toContain('子には継承しません')
+    for (const key of [
+      'management.saving',
+      'management.saved',
+      'management.failed',
+      'management.conflict',
+      'management.noRevision',
+    ] as const) {
+      expect(en(key)).not.toBe(ja(key))
+      expect(en(key)).not.toContain('{')
+      expect(ja(key)).not.toContain('{')
+    }
+  })
+})
+
+describe('role-write safety text', () => {
+  it('explains unsupported executable settings and fixed unavailable/conflict outcomes in both languages', () => {
+    const en = translator('en')
+    const ja = translator('ja')
+    expect(en('foot.expression-backed-role-settings')).toContain('native profile configuration')
+    expect(en('foot.expression-backed-role-settings')).toContain('draft is unchanged')
+    expect(ja('foot.expression-backed-role-settings')).toContain('実行可能な式')
+    expect(ja('foot.expression-backed-role-settings')).toContain('プロファイル設定')
+    for (const key of [
+      'foot.expression-backed-role-settings',
+      'foot.role-write-safety-unavailable',
+      'foot.role-write-safety-conflict',
+    ] as const) {
+      expect(en(key)).not.toBe(ja(key))
+      expect(en(key)).not.toContain('{')
+      expect(ja(key)).not.toContain('{')
+    }
   })
 })
 
@@ -131,6 +179,15 @@ describe('issueText', () => {
 })
 
 describe('dictionaries', () => {
+  it('distinguishes unverified Grok sandbox integration from Pi native-only limitations', () => {
+    const en = translator('en')
+    expect(readOnlyHelp(en, 'grok-build')).toContain('provides official OS sandbox profiles')
+    expect(readOnlyHelp(en, 'grok-build')).toContain('has not verified')
+    expect(readOnlyHelp(en, 'pi')).toContain('no built-in OS permission boundary')
+    expect(confinementHelp(en, 'grok-build', 'native')).toContain('native CLI restrictions may still apply')
+    expect(readOnlyHelp(translator('ja'), 'grok-build')).toContain('公式OSサンドボックス')
+    expect(readOnlyHelp(translator('ja'), 'pi')).toContain('標準のOS権限境界を持ちません')
+  })
   it('has a Japanese text for every key, and no key without an English one', () => {
     const en = Object.keys(DICTIONARIES.en).sort()
     expect(Object.keys(DICTIONARIES.ja).sort()).toEqual(en)

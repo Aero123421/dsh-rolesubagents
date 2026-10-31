@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { mergeKnownRoles } from '../src/shared/role-management.ts'
 import {
   addBlankRole,
   addTemplateRole,
@@ -21,6 +22,7 @@ import {
   routeLabel,
   runnerModelLabel,
   sameSettings,
+  sameRawRoles,
   setAgentPreset,
   setCliSettings,
   setContext,
@@ -64,6 +66,111 @@ describe('createDraft', () => {
     const draft = patchRole(fresh(), 3, { description: 'changed', enabled: false })
     expect(roleOf(draft, 3).description).toBe('changed')
     expect(DEFAULT_ROLES.find(role => role.id === 'worker')?.description).not.toBe('changed')
+  })
+})
+
+describe('raw role origins', () => {
+  it('retains a copied raw baseline and stable source id through edit, rename, move and runner changes', () => {
+    const raw = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, metadata: { nested: ['opaque'] } } : role))
+    let draft = createDraft(defaults(), 7, raw)
+    expect(draft.rawBaseRoles).toEqual(raw)
+    expect(draft.rawBaseRoles).not.toBe(raw)
+    draft = patchRole(draft, 3, { id: 'renamed' })
+    draft = moveRow(draft, 3, 1)
+    draft = setRunner(draft, 3, 'pi')
+    expect(draft.rows.find(row => row.uid === 3)).toMatchObject({ sourceId: 'worker', role: { id: 'renamed' } })
+    expect(draftSettings(draft)).not.toHaveProperty('rawBaseRoles')
+    expect(draftSettings(draft)).not.toHaveProperty('allowAiRoleManagement')
+    expect(draftSettings(draft).roles.some(role => 'sourceId' in role)).toBe(false)
+    expect(raw.find(role => role.id === 'worker')).toHaveProperty('metadata')
+  })
+
+  it('only assigns origins to actually selected raw rows when repairing duplicates and missing builtins', () => {
+    const raw = [
+      ...DEFAULT_ROLES.filter(role => role.builtin !== 'general'),
+      { ...DEFAULT_ROLES[2], metadata: 'SECRET_DISCARDED' },
+    ]
+    const settings = normalizeSettings({ roles: raw }).settings
+    const draft = createDraft(settings, 7, raw)
+    expect(draft.rows.find(row => row.role.builtin === 'general')?.sourceId).toBeUndefined()
+    expect(draft.rows.find(row => row.role.id === 'worker')?.sourceId).toBe('worker')
+    const merged = mergeKnownRoles(
+      draft.rawBaseRoles,
+      settings.roles,
+      draft.rows.flatMap(row => (row.sourceId ? [{ id: row.role.id, sourceId: row.sourceId }] : [])),
+    )
+    expect(normalizeSettings({ roles: merged }).problems).toEqual([])
+    expect(JSON.stringify(merged)).not.toContain('SECRET_DISCARDED')
+  })
+
+  it('uses builtin effective ids when the raw builtin id is corrected', () => {
+    const raw = DEFAULT_ROLES.map(role =>
+      role.builtin === 'general' ? { ...role, id: 'raw_wrong_id', metadata: 'retained' } : role,
+    )
+    const settings = normalizeSettings({ roles: raw }).settings
+    const draft = createDraft(settings, 7, raw)
+    expect(draft.rows[0]).toMatchObject({ sourceId: 'general', role: { id: 'general', builtin: 'general' } })
+    expect(
+      mergeKnownRoles(
+        draft.rawBaseRoles,
+        settings.roles,
+        draft.rows.flatMap(row => (row.sourceId ? [{ id: row.role.id, sourceId: row.sourceId }] : [])),
+      )[0],
+    ).toHaveProperty('metadata', 'retained')
+  })
+
+  it('uses normalized roles as the raw-backed legacy baseline when raw roles are omitted', () => {
+    const draft = fresh()
+    expect(draft.rawBaseRoles).toEqual(defaults().roles)
+    expect(draft.rows.map(row => row.sourceId)).toEqual(idsOf(draft))
+    expect(
+      mergeKnownRoles(
+        draft.rawBaseRoles,
+        draftSettings(draft).roles,
+        draft.rows.flatMap(row => (row.sourceId ? [{ id: row.role.id, sourceId: row.sourceId }] : [])),
+      ),
+    ).toEqual(defaults().roles)
+  })
+
+  it('snapshots nested raw metadata independently so in-place Host changes are detectable', () => {
+    const metadata = { nested: ['before'] }
+    const raw = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, metadata } : role))
+    const draft = createDraft(defaults(), 7, raw)
+    metadata.nested[0] = 'after'
+    expect(draft.rawBaseRoles?.[2]).toHaveProperty('metadata.nested.0', 'before')
+    expect(sameRawRoles(draft.rawBaseRoles, raw)).toBe(false)
+  })
+
+  it('keeps nested accessor metadata inert while copying and comparing raw baselines', () => {
+    const getter = vi.fn(() => {
+      throw new Error('SECRET_ACCESSOR')
+    })
+    const metadata = {}
+    Object.defineProperty(metadata, 'unsafe', { enumerable: true, get: getter })
+    const raw = DEFAULT_ROLES.map(role => (role.id === 'worker' ? { ...role, metadata } : role))
+    const draft = createDraft(defaults(), 7, raw)
+    expect(getter).not.toHaveBeenCalled()
+    // Do not let matcher deep-equality diagnostics traverse these deliberately accessor-bearing objects.
+    expect(draft.rawBaseRoles === raw).toBe(false)
+    const otherMetadata = {}
+    Object.defineProperty(otherMetadata, 'unsafe', { enumerable: true, get: getter })
+    expect(sameRawRoles([{ metadata }], [{ metadata: otherMetadata }])).toBe(false)
+    expect(getter).not.toHaveBeenCalled()
+  })
+
+  it('does not give newly added or duplicated rows a raw source origin', () => {
+    let draft = duplicateRow(fresh(), 3)
+    expect(draft.rows.find(row => row.role.id === 'worker-2')?.sourceId).toBeUndefined()
+    draft = addBlankRole(draft)
+    expect(draft.rows.find(row => row.role.id === 'role')?.sourceId).toBeUndefined()
+  })
+
+  it('compares unknown nested values without ignoring their changes or object-key ordering', () => {
+    expect(sameRawRoles([{ opaque: { a: 1, b: [2, 3] } }], [{ opaque: { b: [2, 3], a: 1 } }])).toBe(true)
+    expect(sameRawRoles([{ opaque: { a: 1 } }], [{ opaque: { a: 2 } }])).toBe(false)
+    expect(sameRawRoles([{}], [{ opaque: undefined }])).toBe(false)
+    expect(sameRawRoles(undefined, [])).toBe(false)
+    expect(sameRawRoles([[]], [Array(1)])).toBe(false)
   })
 })
 

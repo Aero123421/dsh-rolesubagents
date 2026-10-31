@@ -72,6 +72,7 @@ function Page() {
         </div>
       )}
       <MasterSwitch state={state} />
+      <ManagementSwitch state={state} />
       <section className="dshrs-section">
         <WorkflowModelFields state={state} />
       </section>
@@ -100,6 +101,47 @@ function MasterSwitch({ state }: { state: PageState }) {
           <h3 className="dshrs-heading">{t('master.label')}</h3>
           <p className="dshrs-hint" id={hint}>
             {t('master.hint')}
+          </p>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function ManagementSwitch({ state }: { state: PageState }) {
+  const c = useController()
+  const t = useT()
+  const hint = useId()
+  const { management } = state
+  const message =
+    management.save === 'idle'
+      ? !management.hasRevision
+        ? t('management.noRevision')
+        : t('management.immediate')
+      : t(`management.${management.save}`)
+  return (
+    <section className="dshrs-section" aria-busy={management.save === 'saving' || undefined}>
+      <div className="dshrs-master">
+        <Switch
+          checked={management.enabled}
+          label={t('management.label')}
+          describedBy={hint}
+          disabled={!management.canToggle}
+          onChange={enabled => {
+            void c.setAllowAiRoleManagement(enabled)
+          }}
+        />
+        <div className="dshrs-master-text">
+          <h3 className="dshrs-heading">{t('management.label')}</h3>
+          <p className="dshrs-hint" id={hint}>
+            {t('management.hint')}
+          </p>
+          <p
+            className={`dshrs-status${management.save === 'failed' || management.save === 'conflict' ? ' dshrs-bad' : ''}`}
+            role="status"
+            aria-live="polite"
+          >
+            {message}
           </p>
         </div>
       </div>
@@ -259,16 +301,19 @@ function Footer({ state }: { state: PageState }) {
   const t = useT()
   const issuesId = useId()
   const saving = state.save === 'saving'
+  const blocked = saving || state.management.save === 'saving'
   const message =
     state.save === 'saving'
       ? { text: t('foot.saving'), tone: '' }
-      : state.conflict
-        ? { text: t('foot.conflict'), tone: ' dshrs-bad' }
-        : state.save === 'failed'
-          ? { text: t('foot.failed'), tone: ' dshrs-bad' }
-          : state.save === 'saved'
-            ? { text: t('foot.saved'), tone: ' dshrs-ok' }
-            : { text: t(state.dirty ? 'foot.unsaved' : 'foot.clean'), tone: '' }
+      : state.saveIssue !== undefined
+        ? { text: t(`foot.${state.saveIssue}`), tone: ' dshrs-bad' }
+        : state.conflict
+          ? { text: t('foot.conflict'), tone: ' dshrs-bad' }
+          : state.save === 'failed'
+            ? { text: t('foot.failed'), tone: ' dshrs-bad' }
+            : state.save === 'saved'
+              ? { text: t('foot.saved'), tone: ' dshrs-ok' }
+              : { text: t(state.dirty ? 'foot.unsaved' : 'foot.clean'), tone: '' }
   return (
     <div className="dshrs-footer">
       {state.issues.length === 0 ? null : (
@@ -290,8 +335,12 @@ function Footer({ state }: { state: PageState }) {
           {message.text}
         </p>
         <div className="dshrs-footer-actions">
-          {state.conflict ? <Button onClick={() => c.discard()}>{t('foot.reload')}</Button> : null}
-          <Button disabled={saving || !(state.dirty || state.conflict)} onClick={() => c.discard()}>
+          {state.conflict && state.saveIssue !== 'role-save-unconfirmed' ? (
+            <Button disabled={blocked} onClick={() => c.discard()}>
+              {t('foot.reload')}
+            </Button>
+          ) : null}
+          <Button disabled={blocked || !(state.dirty || state.conflict)} onClick={() => c.discard()}>
             {t('foot.discard')}
           </Button>
           <Button

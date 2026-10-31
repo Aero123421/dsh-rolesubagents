@@ -83,6 +83,7 @@ describe('claude-code plan', () => {
       '--tools',
       'Read,Glob,Grep,WebFetch,WebSearch,Edit,Write,NotebookEdit',
     ],
+    nativeAcceptEdits: ['--permission-mode', 'acceptEdits'],
     auto: ['--permission-mode', 'auto'],
     bypassPermissions: ['--permission-mode', 'bypassPermissions'],
   }
@@ -107,7 +108,7 @@ describe('claude-code plan', () => {
         it(`${preset.id} / ${variant.name} / ${instructions === '' ? 'no instructions' : 'instructions'}`, () => {
           const plan = claudeCodeAdapter.plan(input({ preset: preset.id, ...variant.patch, instructions }), 'n')
           expect(plan.argv).toEqual([
-            ...BASE_ARGS,
+            ...BASE_ARGS.filter(arg => preset.id !== 'nativeAcceptEdits' || arg !== '--strict-mcp-config'),
             ...variant.extra,
             ...(presetArgs[preset.id] as string[]),
             ...(instructions === '' ? [] : ['--append-system-prompt', instructions]),
@@ -117,7 +118,7 @@ describe('claude-code plan', () => {
             DISABLE_AUTOUPDATER: '1',
             CLAUDECODE: undefined,
           })
-          expect(plan.envRemovePrefixes).toEqual(['CLAUDE_CODE_'])
+          expect(plan.envRemovePrefixes).toEqual(preset.id === 'nativeAcceptEdits' ? [] : ['CLAUDE_CODE_'])
           expect(plan.files).toBeUndefined()
           expect(plan.preflight).toBeUndefined()
           expect(plan.cancelGraceMs).toBe(0)
@@ -167,7 +168,7 @@ describe('claude-code plan', () => {
     expect(permissionArgs({ preset: 'auto', access: 'full-access' })).toEqual(['--permission-mode', 'auto'])
     for (const access of ['read-only', 'workspace-write', 'full-access'] as AccessLevel[]) {
       expect(permissionArgs({ preset: 'nonsense', access })).toEqual(
-        permissionArgs({ preset: CLAUDE_CODE.presetForAccess[access], access }),
+        permissionArgs({ preset: CLAUDE_CODE.presetForAccess[access]!, access }),
       )
     }
   })
@@ -390,5 +391,29 @@ describe('claude-code probe', () => {
     expect(await claudeCodeAdapter.probe?.('/c', runner({ code: null, timedOut: true }), signal, {})).toMatchObject({
       message: 'version-timeout',
     })
+  })
+
+  it.each(['2.1.303-beta.1', '2.1.303+build.7', '2.1.303-beta.1+build.7'])(
+    'preserves the exact prerelease/build version %s',
+    async version => {
+      const result = await claudeCodeAdapter.probe?.(
+        '/c',
+        runner({ code: 0, stdout: `${version} (Claude Code)\n` }),
+        signal,
+        {},
+      )
+      expect(result?.version).toBe(version)
+    },
+  )
+
+  it('does not turn an unrecognized version token into a stable version', async () => {
+    const result = await claudeCodeAdapter.probe?.(
+      '/c',
+      runner({ code: 0, stdout: '2.1.303unknown (Claude Code)\n' }),
+      signal,
+      {},
+    )
+    expect(result?.version).toBeUndefined()
+    expect(result?.message).toBe('version-unreadable')
   })
 })

@@ -14,6 +14,9 @@ import { join } from 'node:path'
 
 const FAKE_KEY = 'sk-fake-codex-check-0000'
 const SERVER = 'tests/support/fake-models/codex.mjs'
+// Test-only selection: never changes production settings or disables a sandbox.
+const SANDBOX_BACKEND = process.env.CHECK_CODEX_SANDBOX_BACKEND ?? 'default'
+if (!['default', 'legacy-landlock'].includes(SANDBOX_BACKEND)) throw new Error('unknown CHECK_CODEX_SANDBOX_BACKEND')
 
 /**
  * Start a fake Responses server for `script` and an isolated Codex home configured for it.
@@ -44,6 +47,7 @@ async function fakeCodex(h, script, { forwardKey = true, extraConfig = [] } = {}
       '[analytics]',
       'enabled = false',
       '',
+      ...(SANDBOX_BACKEND === 'legacy-landlock' ? ['[features]', 'use_legacy_landlock = true', ''] : []),
       ...extraConfig,
     ].join('\n'),
   })
@@ -63,7 +67,7 @@ async function fakeCodex(h, script, { forwardKey = true, extraConfig = [] } = {}
       NO_PROXY: '127.0.0.1,localhost',
       no_proxy: '127.0.0.1,localhost',
     },
-    clis: { codex: { envPassthrough: passthrough } },
+    clis: { codex: { executable: h.executable, envPassthrough: passthrough } },
   }
 }
 
@@ -289,6 +293,11 @@ export async function cases(h) {
       const { childId } = await w.delegate({ role: 'coder', prompt: 'Create created.txt' })
       h.assert.ok((await w.notice(childId, 60_000)).includes('CEILING_DONE'))
       h.assert.equal(existsSync(join(ws, 'created.txt')), false)
+      const outputs = functionOutputs(fake.requests()[1]?.body ?? {})
+      h.assert.ok(
+        outputs.some(output => /Read-only file system/.test(output)),
+        `tool output: ${outputs}`,
+      )
     } finally {
       await w.close()
     }
@@ -314,6 +323,44 @@ export async function cases(h) {
       await h.wait(() => pids.every(pid => !h.alive(pid)), 10_000, 'every Codex process to exit')
       h.assert.deepEqual(processesMentioning(ws), [])
     } finally {
+      await w.close()
+    }
+  })
+
+  h.case('wall-clock timeout terminates the real streaming Codex process', async () => {
+    const fake = await fakeCodex(h, [{ kind: 'hold' }])
+    const ws = h.workspace()
+    const w = await h.world({ cwd: ws, roles: [], clis: fake.clis, env: fake.env })
+    let run
+    try {
+      const { codexAdapter } = await import('../../src/host/cli/codex/index.ts')
+      run = await h.engine.startExternalRun(
+        {
+          adapter: codexAdapter,
+          input: {
+            runner: { cli: 'codex', permission: 'workspace-write' },
+            preset: 'workspace-write',
+            access: 'workspace-write',
+            instructions: '',
+            task: 'wait forever',
+            cwd: ws,
+          },
+          settings: fake.clis.codex,
+          timeoutMs: 2000,
+          signal: new AbortController().signal,
+        },
+        h.engineDeps(w),
+      )
+      const result = await run.result
+      h.assert.match(result.diagnostic ?? '', /timeout/)
+      h.assert.ok(fake.requests().length > 0, 'real CLI reached the local streaming backend')
+      h.assert.ok(
+        fake.requests().every(r => r.headers.authorization === `Bearer ${FAKE_KEY}`),
+        'only dummy auth reached backend',
+      )
+      await h.wait(() => processesMentioning(ws).length === 0, 10_000, 'timed-out Codex process to exit')
+    } finally {
+      await run?.dispose()
       await w.close()
     }
   })

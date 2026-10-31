@@ -1,0 +1,22 @@
+
+> dsh-rolesubagents@0.2.1 check:cli <checkout>
+> node scripts/check-cli.mjs pi
+
+DSH runtime: /usr/lib/node_modules/@deepseek-ai/dsh
+BINARY pi: cli.js; version 1.3.0
+FAIL pi: host-confined Pi denies outside inode overwrite through a workspace hardlink
+     AssertionError [ERR_ASSERTION]: outside inode bytes must not change through the workspace alias
++ actual - expected
+
++ 'ESCAPED_HARDLINK'
+- 'OUTSIDE_UNCHANGED\n'
+
+    at file://<checkout>/scripts/check-cli/host-confined.mjs:265:16
+    at async withFixture (file://<checkout>/scripts/check-cli/host-confined.mjs:213:7)
+    at async Object.fn (file://<checkout>/scripts/check-cli/host-confined.mjs:262:5)
+    at async runSuite (file://<checkout>/scripts/check-cli.mjs:596:7)
+    at async file://<checkout>/scripts/check-cli.mjs:662:5
+REPORT <checkout>/artifacts/host-confined-pi-hardlink-20261023-1534.json
+
+0 passed, 1 failed, 0 skipped
+ ELIFECYCLE  Command failed with exit code 1.

@@ -1,6 +1,6 @@
 /** The inline editor of one role: fields, model and preset pickers (or the CLI runner fields), and the preview. */
 
-import { useEffect, useId, useRef } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { CLI_IDS, cliDescriptor, isCliId } from '../shared/cli/index.ts'
 import {
   type ForkScope,
@@ -10,6 +10,7 @@ import {
   type RoleModel,
   type RoleRunner,
 } from '../shared/roles.ts'
+import { CliModelRefresh } from './CliSection.tsx'
 import { useController, useT } from './context.tsx'
 import { cliSuggestions, type PageState } from './controller.ts'
 import { childText, type DraftRow, ID_MAX_LENGTH, type IssueField, parentLine, permissionAllowed } from './draft.ts'
@@ -218,7 +219,8 @@ function RunnerFields(props: {
   // Plain characters only: some DOMs resolve `list` through a CSS selector, where React's `:r1:` ids are invalid.
   const lists = `dshrs-list${useId().replace(/[^\w-]/g, '')}`
   const modelError = errorOf('runnerModel')
-  const effortList = descriptor.effortFreeText ? [...suggestions.efforts] : [...descriptor.efforts]
+  const effortList =
+    descriptor.effortFreeText || suggestions.efforts.length > 0 ? [...suggestions.efforts] : [...descriptor.efforts]
   const textInput = { className: 'dshrs-input', spellCheck: false, autoComplete: 'off', disabled } as const
   return (
     <fieldset className="dshrs-group">
@@ -272,12 +274,12 @@ function RunnerFields(props: {
                 onChange={event => c.patchRunner(uid, { effort: event.target.value })}
               >
                 <option value="">{t('ed.effortDefault')}</option>
-                {descriptor.efforts.map(id => (
+                {effortList.map(id => (
                   <option key={id} value={id}>
                     {id}
                   </option>
                 ))}
-                {effort !== '' && !descriptor.efforts.includes(effort) ? (
+                {effort !== '' && !effortList.includes(effort) ? (
                   <option value={effort}>{t('ed.unlisted', { value: effort })}</option>
                 ) : null}
               </select>
@@ -286,6 +288,7 @@ function RunnerFields(props: {
         ) : null}
       </div>
       <p className="dshrs-hint">{t(descriptor.needsProvider ? 'ed.cliModelOpenCode' : 'ed.cliModelHelp', { cli })}</p>
+      <CliModelRefresh cli={runner.cli} state={state} />
       <datalist id={`${lists}-providers`}>
         {suggestions.providers.map(id => (
           <option key={id} value={id} />
@@ -327,7 +330,10 @@ function RunnerFields(props: {
                   value={preset.id}
                   disabled={!permissionAllowed(runner.cli, preset.id, role.readOnly)}
                 >
-                  {t('ed.permissionOption', { name: presetName(t, preset.id), access: accessName(t, preset.access) })}
+                  {t('ed.permissionOption', {
+                    name: preset.confinement === 'host-sandbox' ? t('preset.host-workspace') : presetName(t, preset.id),
+                    access: preset.nativeHarness ? t('access.native') : accessName(t, preset.access),
+                  })}
                 </option>
               ))}
               {descriptor.permissions.some(preset => preset.id === runner.permission) ? null : (
@@ -426,6 +432,7 @@ function ModelFields({
   const c = useController()
   const t = useT()
   const { catalog } = state
+  const [manual, setManual] = useState(false)
   const fork = role?.context === 'fork'
   const disabled = !state.canEdit || fork
   const selected = workflow ? state.draft?.workflowModel : role?.model
@@ -442,13 +449,21 @@ function ModelFields({
   const option = group?.models.find(candidate => candidate.id === model)
   const efforts = option?.efforts ?? []
   const listed = catalog.groups.length > 0
+  const chooseFromList = listed && !manual
+  const typeRoute = (next: Partial<RoleModel>) => {
+    // Do not replace a focused input when a delayed catalog arrives.
+    setManual(true)
+    route(next)
+  }
   const hint = fork
     ? t('ed.modelForkNote')
-    : listed
-      ? t('ed.modelParentNote')
-      : catalog.status === 'error' || catalog.status === 'ready'
-        ? t('ed.catalogFailed')
-        : t('ed.catalogLoading')
+    : catalog.status === 'loading' || catalog.status === 'idle'
+      ? t('ed.catalogLoading')
+      : catalog.status === 'error'
+        ? t(listed ? 'ed.catalogStale' : 'ed.catalogFailed')
+        : !listed
+          ? t('ed.catalogEmpty')
+          : t('ed.modelParentNote')
 
   return (
     <fieldset className="dshrs-group">
@@ -456,7 +471,7 @@ function ModelFields({
       <div className="dshrs-model-grid">
         <Field label={t('ed.provider')} error={error}>
           {a11y =>
-            listed ? (
+            chooseFromList ? (
               <select
                 {...a11y}
                 className="dshrs-select"
@@ -486,15 +501,16 @@ function ModelFields({
                 disabled={disabled}
                 spellCheck={false}
                 autoComplete="off"
-                onChange={event => route({ provider: event.target.value })}
+                onFocus={() => setManual(true)}
+                onChange={event => typeRoute({ provider: event.target.value, reasoningEffort: undefined })}
               />
             )
           }
         </Field>
-        {listed && provider === '' ? null : (
+        {chooseFromList && provider === '' ? null : (
           <Field label={t('ed.modelId')}>
             {a11y =>
-              listed ? (
+              chooseFromList ? (
                 <select
                   {...a11y}
                   className="dshrs-select"
@@ -520,16 +536,18 @@ function ModelFields({
                   disabled={disabled}
                   spellCheck={false}
                   autoComplete="off"
-                  onChange={event => route({ model: event.target.value })}
+                  onFocus={() => setManual(true)}
+                  onChange={event => typeRoute({ model: event.target.value, reasoningEffort: undefined })}
                 />
               )
             }
           </Field>
         )}
-        {workflow || (listed && (provider === '' || model === '' || (efforts.length === 0 && effort === ''))) ? null : (
+        {workflow ||
+        (chooseFromList && (provider === '' || model === '' || (efforts.length === 0 && effort === ''))) ? null : (
           <Field label={t('ed.effort')}>
             {a11y =>
-              listed ? (
+              chooseFromList ? (
                 <select
                   {...a11y}
                   className="dshrs-select"
@@ -555,7 +573,8 @@ function ModelFields({
                   disabled={disabled}
                   spellCheck={false}
                   autoComplete="off"
-                  onChange={event => route({ reasoningEffort: event.target.value })}
+                  onFocus={() => setManual(true)}
+                  onChange={event => typeRoute({ reasoningEffort: event.target.value })}
                 />
               )
             }
@@ -567,9 +586,19 @@ function ModelFields({
         {hint}
         {catalog.partial && listed && !fork ? ` ${t('ed.catalogPartial')}` : ''}
       </p>
-      {!fork && catalog.status === 'error' ? (
-        <div>
-          <Button onClick={() => (workflow ? c.loadWorkflowCatalog() : c.loadReference())}>{t('ed.retry')}</Button>
+      {!fork ? (
+        <div className="dshrs-bar-actions">
+          {listed ? (
+            <Button onClick={() => setManual(!manual)}>{t(manual ? 'ed.modelChoose' : 'ed.modelManual')}</Button>
+          ) : null}
+          <Button disabled={catalog.status === 'loading'} onClick={() => c.refreshCatalog()}>
+            {t(catalog.status === 'error' || catalog.partial ? 'ed.retryModels' : 'ed.refreshModels')}
+          </Button>
+          {!chooseFromList && selected !== undefined ? (
+            <Button disabled={disabled} onClick={() => setModel(undefined)}>
+              {t('ed.parentModel')}
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </fieldset>
@@ -580,48 +609,70 @@ function PresetField({ uid, role, state, error }: PickerProps) {
   const c = useController()
   const t = useT()
   const { presets } = state
+  const [manual, setManual] = useState(false)
   const fork = role.context === 'fork'
   const preset = role.agentPreset ?? ''
-  const typed = presets.status === 'error'
+  const typed = manual || presets.status === 'error'
   const help = fork
     ? t('ed.presetFork')
     : presets.status === 'ready' && presets.options.length === 0
       ? `${t('ed.presetHelp')} ${t('ed.presetNoneAvailable')}`
       : t('ed.presetHelp')
   return (
-    <Field label={t('ed.preset')} help={help} error={error}>
-      {a11y =>
-        typed ? (
-          <input
-            {...a11y}
-            className="dshrs-input"
-            value={preset}
-            disabled={!state.canEdit || fork}
-            spellCheck={false}
-            autoComplete="off"
-            onChange={event => c.setAgentPreset(uid, event.target.value)}
-          />
-        ) : (
-          <select
-            {...a11y}
-            className="dshrs-select"
-            value={preset}
-            disabled={!state.canEdit || fork}
-            onChange={event => c.setAgentPreset(uid, event.target.value)}
-          >
-            <option value="">{t('ed.presetNone')}</option>
-            {presets.options.map(option => (
-              <option key={option.id} value={option.id}>
-                {option.name}
-              </option>
-            ))}
-            {preset !== '' && !presets.options.some(option => option.id === preset) ? (
-              <option value={preset}>{t('ed.unlisted', { value: preset })}</option>
-            ) : null}
-          </select>
-        )
-      }
-    </Field>
+    <div className="dshrs-field">
+      <Field label={t('ed.preset')} help={help} error={error}>
+        {a11y =>
+          typed ? (
+            <input
+              {...a11y}
+              className="dshrs-input"
+              value={preset}
+              disabled={!state.canEdit || fork}
+              spellCheck={false}
+              autoComplete="off"
+              onFocus={() => setManual(true)}
+              onChange={event => {
+                setManual(true)
+                c.setAgentPreset(uid, event.target.value)
+              }}
+            />
+          ) : (
+            <select
+              {...a11y}
+              className="dshrs-select"
+              value={preset}
+              disabled={!state.canEdit || fork}
+              onChange={event => c.setAgentPreset(uid, event.target.value)}
+            >
+              <option value="">{t('ed.presetNone')}</option>
+              {presets.options.map(option => (
+                <option key={option.id} value={option.id}>
+                  {option.name}
+                </option>
+              ))}
+              {preset !== '' && !presets.options.some(option => option.id === preset) ? (
+                <option value={preset}>{t('ed.unlisted', { value: preset })}</option>
+              ) : null}
+            </select>
+          )
+        }
+      </Field>
+      {!fork && presets.status === 'error' ? (
+        <p className="dshrs-hint" role="status">
+          {t('ed.presetFailed')}
+        </p>
+      ) : null}
+      {!fork ? (
+        <div className="dshrs-bar-actions">
+          {manual && presets.status === 'ready' ? (
+            <Button onClick={() => setManual(false)}>{t('ed.presetChoose')}</Button>
+          ) : null}
+          <Button disabled={presets.status === 'loading'} onClick={() => c.refreshPresets()}>
+            {t(presets.status === 'error' ? 'ed.retryPresets' : 'ed.refreshPresets')}
+          </Button>
+        </div>
+      ) : null}
+    </div>
   )
 }
 

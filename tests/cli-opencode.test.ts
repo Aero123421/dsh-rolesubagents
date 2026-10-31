@@ -1,5 +1,5 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: run-plan placeholders are literal ${...} strings.
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -685,6 +685,8 @@ describe('opencode through the engine', () => {
       },
     })
     const workspace = mkdtempSync(join(tmpdir(), 'rolesubagents-opencode-ws-'))
+    // Model a worktree root even when the executor's temp directory has an ancestor .git marker.
+    mkdirSync(join(workspace, '.git'))
     const runs = new Set<SubagentRunPort>()
     const run = await startExternalRun(
       {

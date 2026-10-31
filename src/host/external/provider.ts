@@ -76,9 +76,14 @@ export async function startExternalDelegation(delegation: ExternalDelegation): P
     async start(request): Promise<SubagentRunPort> {
       const cwd = assertUsableCwd(request.cwd)
       assertCwdAllowed(cwd, permission.access, ceiling.workspaceRoot)
-      return startExternalRun(
+      const startedAt = new Date().toISOString()
+      let terminalStatus: Exclude<import('../../shared/role-display.ts').ExternalRunStatus, 'running'> | undefined
+      const run = await startExternalRun(
         {
           adapter,
+          onTerminalStatus: status => {
+            terminalStatus = status
+          },
           input: {
             runner: role.runner,
             preset: permission.preset,
@@ -94,6 +99,39 @@ export async function startExternalDelegation(delegation: ExternalDelegation): P
         },
         delegation.engine,
       )
+      const store = delegation.engine.observability
+      store?.start({
+        id: run.id,
+        parentSessionId: delegation.parent.session.id,
+        roleId: role.id,
+        cli: role.runner.cli,
+        ...(role.runner.model ? { model: role.runner.model.slice(0, 256) } : {}),
+        label: delegation.label.slice(0, 512),
+        startedAt,
+      })
+      // Capture only the parsed final answer. DSH still owns the original activation and disposal.
+      const result = run.result.then(
+        value => {
+          store?.finish(
+            run.id,
+            terminalStatus ??
+              (value.stopReason === 'aborted'
+                ? 'cancelled'
+                : value.stopReason === 'completed'
+                  ? 'succeeded'
+                  : 'failed'),
+            value,
+          )
+          return value
+        },
+        error => {
+          store?.finish(run.id, 'failed')
+          throw error
+        },
+      )
+      // Keep the engine's tracked identity: Host unload and DSH must dispose the
+      // same run, and waiting for its result must include the history observer.
+      return Object.assign(run, { result })
     },
   }
   const unregister = register(provider)

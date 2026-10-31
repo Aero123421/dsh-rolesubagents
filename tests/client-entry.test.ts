@@ -1,8 +1,16 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply, inject, PROBE_ENDPOINT, probeCaller } from '../src/client/index.ts'
+import {
+  apply,
+  inject,
+  PROBE_ENDPOINT,
+  probeCaller,
+  ROLE_WRITE_SAFETY_ENDPOINT,
+  ROLE_WRITE_SAFETY_TIMEOUT_MS,
+  roleWriteSafetyCaller,
+} from '../src/client/index.ts'
 import { type Controller, ProbeUnavailableError } from '../src/client/controller.ts'
-import type { DshClientContext } from '../src/client/dsh.ts'
+import type { ConnectionLike, DshClientContext } from '../src/client/dsh.ts'
 import { RolesPage } from '../src/client/RolesPage.tsx'
 import { fakeForm, fakeRemote } from './client-helpers.ts'
 
@@ -178,6 +186,173 @@ describe('client entry', () => {
   })
 })
 
+describe('role-write safety production wiring', () => {
+  it('preserves guarded saves and reset wiring when both catalog overrides are installed', async () => {
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({
+      ok: true,
+      value: { safe: true, revision: 1, reason: 'literal-role-settings' },
+    }))
+    const f = fakeContext('en', {
+      connection: { rpc: { call } },
+      sessions: { refreshProjections() {} },
+      uiWorkspace: { openSession() {} },
+      sidebarRight: { openResource() {} },
+    })
+    Object.assign(f.ctx.slots, {
+      spec: (key: string) => ({ kind: key.endsWith('actions') ? 'list' : 'single', scope: 'session' }),
+    })
+    apply(f.ctx)
+    expect(f.registrations.map(entry => entry.slot)).toEqual([
+      'conversation.session.header.actions',
+      'conversation.session.header.lineage',
+      'plugins.bundle.config',
+    ])
+    const controller = controllerOf(f.registrations.find(entry => entry.slot === 'plugins.bundle.config'))
+    controller.setEnabled(false)
+    await controller.save()
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(call.mock.calls[0]?.[1]).toBe(ROLE_WRITE_SAFETY_ENDPOINT)
+    expect(f.form.calls).toHaveLength(1)
+    f.eventListeners.get('connection/reset')?.()
+    f.unload()
+    expect(f.registrations).toHaveLength(0)
+    expect(f.eventListeners.size).toBe(0)
+    expect(document.head.querySelector('style[data-plugin-css="dsh-rolesubagents/catalog"]')).toBeNull()
+  })
+
+  it('requires the fixed metadata-only endpoint and reads the connection lazily on each attempt', async () => {
+    const services: Record<string, unknown> = {}
+    const { ctx } = fakeContext('en', services)
+    const check = roleWriteSafetyCaller(ctx)
+    const signal = new AbortController().signal
+    await expect(check(7, signal)).rejects.toThrow('role-write-safety-unavailable')
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({
+      ok: true,
+      value: { safe: true, revision: 7, reason: 'literal-role-settings' },
+    }))
+    services.connection = { rpc: { call } }
+    await expect(check(7, signal)).resolves.toEqual({
+      ok: true,
+      value: { safe: true, revision: 7, reason: 'literal-role-settings' },
+    })
+    expect(ROLE_WRITE_SAFETY_ENDPOINT).toBe('rolesubagentsManagement/writeSafety')
+    expect(call).toHaveBeenCalledExactlyOnceWith(
+      '/api',
+      ROLE_WRITE_SAFETY_ENDPOINT,
+      { args: { request: { expectedRevision: 7 } } },
+      expect.any(AbortSignal),
+    )
+    expect(inject).not.toContain('connection')
+  })
+
+  it('normalizes missing endpoint and transport errors without a fallback or raw message', async () => {
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({
+      ok: false,
+      error: { code: 'gateway/method-unavailable', message: 'SECRET endpoint data' },
+    }))
+    const { ctx } = fakeContext('en', { connection: { rpc: { call } } })
+    const check = roleWriteSafetyCaller(ctx)
+    await expect(check(1, new AbortController().signal)).rejects.toThrow(/^role-write-safety-unavailable$/)
+    call.mockRejectedValueOnce(new Error('SECRET transport error'))
+    await expect(check(1, new AbortController().signal)).rejects.toThrow(/^role-write-safety-unavailable$/)
+    expect(call).toHaveBeenCalledTimes(2)
+    expect(call.mock.calls.every(args => args[1] === ROLE_WRITE_SAFETY_ENDPOINT)).toBe(true)
+  })
+
+  it('bounds a stalled request to ten seconds and aborts its transport signal', async () => {
+    vi.useFakeTimers()
+    try {
+      const call = vi.fn<ConnectionLike['rpc']['call']>(() => new Promise(() => {}))
+      const { ctx } = fakeContext('en', { connection: { rpc: { call } } })
+      const pending = roleWriteSafetyCaller(ctx)(1, new AbortController().signal)
+      const rejected = expect(pending).rejects.toThrow(/^role-write-safety-unavailable$/)
+      await vi.advanceTimersByTimeAsync(ROLE_WRITE_SAFETY_TIMEOUT_MS)
+      await rejected
+      expect(call).toHaveBeenCalledTimes(1)
+      expect(call.mock.calls[0]?.[3]?.aborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not start a request with an already-aborted owner signal', async () => {
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({ ok: true, value: {} }))
+    const { ctx } = fakeContext('en', { connection: { rpc: { call } } })
+    const abort = new AbortController()
+    abort.abort()
+    await expect(roleWriteSafetyCaller(ctx)(1, abort.signal)).rejects.toThrow(/^role-write-safety-unavailable$/)
+    expect(call).not.toHaveBeenCalled()
+  })
+
+  it('always injects the guard in production, failing role saves closed without blocking management OFF', async () => {
+    const { ctx, form, registrations } = fakeContext()
+    form.set({ value: { ...(form.form.getSnapshot().value as object), allowAiRoleManagement: true } })
+    apply(ctx)
+    const controller = controllerOf(registrations[0])
+    const uid = controller.getSnapshot().draft?.rows[2]?.uid ?? -1
+    controller.patchRole(uid, { description: 'unsaved' })
+    await controller.save()
+    expect(form.calls).toHaveLength(0)
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      save: 'failed',
+      saveIssue: 'role-write-safety-unavailable',
+    })
+    await controller.setAllowAiRoleManagement(false)
+    expect(form.calls).toEqual([{ ops: [{ op: 'set', path: ['allowAiRoleManagement'], value: false }], revision: 1 }])
+  })
+
+  it('invalidates and aborts a pending role guard on connection/reset even when a new Host reuses its revision', async () => {
+    let release: (value: { ok: true; value: unknown }) => void = () => {}
+    const call = vi.fn<ConnectionLike['rpc']['call']>(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        }),
+    )
+    const { ctx, form, registrations, eventListeners } = fakeContext('en', { connection: { rpc: { call } } })
+    apply(ctx)
+    const controller = controllerOf(registrations[0])
+    controller.setEnabled(false)
+    const pending = controller.save()
+    await Promise.resolve()
+    expect(call).toHaveBeenCalledTimes(1)
+    eventListeners.get('connection/reset')?.()
+    await pending
+    expect(call.mock.calls[0]?.[3]?.aborted).toBe(true)
+    expect(form.calls).toHaveLength(0)
+    expect(controller.getSnapshot()).toMatchObject({
+      dirty: true,
+      canSave: false,
+      saveIssue: 'role-write-safety-conflict',
+    })
+    release({ ok: true, value: { safe: true, revision: 1, reason: 'literal-role-settings' } })
+    await Promise.resolve()
+    await controller.save()
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(form.calls).toHaveLength(0)
+  })
+
+  it('permits a literal role save with a positive same-revision response even while AI management is OFF', async () => {
+    const call = vi.fn<ConnectionLike['rpc']['call']>(async () => ({
+      ok: true,
+      value: { safe: true, revision: 1, reason: 'literal-role-settings' },
+    }))
+    const { ctx, form, registrations } = fakeContext('en', { connection: { rpc: { call } } })
+    apply(ctx)
+    const controller = controllerOf(registrations[0])
+    controller.setEnabled(false)
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({
+      save: 'saved',
+      saveIssue: undefined,
+      management: { enabled: false },
+    })
+    expect(form.calls).toHaveLength(1)
+    expect(call.mock.calls[0]?.[2]).toEqual({ args: { request: { expectedRevision: 1 } } })
+  })
+})
+
 describe('CLI connection test wiring', () => {
   it('keeps connection out of the required services and reads it lazily', async () => {
     expect(inject).not.toContain('connection')
@@ -207,11 +382,13 @@ describe('CLI connection test wiring', () => {
     await expect(probe?.('codex', new AbortController().signal)).rejects.toBeInstanceOf(ProbeUnavailableError)
   })
 
-  it('offers the test only when the context can read optional services, and resets it on reconnect', async () => {
+  it('reports missing connection per attempt and resets diagnostics on reconnect', async () => {
     const plain = fakeContext()
     apply(plain.ctx)
-    expect(probeCaller(plain.ctx)).toBeUndefined()
-    expect(controllerOf(plain.registrations[0]).getSnapshot().probes.available).toBe(false)
+    await expect(probeCaller(plain.ctx)('codex', new AbortController().signal)).rejects.toBeInstanceOf(
+      ProbeUnavailableError,
+    )
+    expect(controllerOf(plain.registrations[0]).getSnapshot().probes.available).toBe(true)
 
     const call = vi.fn(async () => ({ ok: false as const, error: { code: 'gateway/method-unavailable', message: '' } }))
     const wired = fakeContext('en', { connection: { rpc: { call } } })
@@ -220,7 +397,12 @@ describe('CLI connection test wiring', () => {
     expect(controller.getSnapshot().probes.available).toBe(true)
     controller.probeCli('codex')
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(controller.getSnapshot().probes.available).toBe(false)
+    expect(controller.getSnapshot().probes.clis.codex).toEqual({
+      status: 'error',
+      issue: 'remote-unavailable',
+      checkedAt: expect.any(Number),
+    })
+    expect(controller.getSnapshot().probes.available).toBe(true)
     wired.eventListeners.get('connection/reset')?.()
     expect(controller.getSnapshot().probes.available).toBe(true)
   })
