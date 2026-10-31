@@ -4,6 +4,8 @@
 
 This is a selective successor to [PR5](https://github.com/Aero123421/dsh-rolesubagents/pull/5), based on v0.3.0 rather than a wholesale merge of the old branch. It preserves the existing management CAS, raw-literal safety checks, Session-keyed refresh shield, rollback, delegation admission epoch and independent owner lifetime.
 
+Later follow-up: the model-ID manual entry and independent model/preset refresh UI deferred below were implemented against current main. The original dependency/Node floor change remains intentionally unadopted; supported versions and checked runtimes are documented separately. The table and validation below describe this historical correctness patch.
+
 | Old PR5 area | Disposition |
 | --- | --- |
 | Storage-readiness race / absent-role cache / first-turn persistence | Fixed: native `agent/created` is awaited; restore and persistence complete before its serial listener returns. |
