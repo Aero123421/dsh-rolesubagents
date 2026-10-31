@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update bundled Zod to 4.6.7 so storage and audit array parsing no longer retains an issue object for every element of an oversized array (GHSA-mrhx-c7xc-m3w5). A pnpm override keeps the DSH packages' Zod on the same version; mixing 4.4 and 4.6 made `tsc` grow without bound. Development-only Vitest 4.1.12 and Happy DOM 21.0.4 close GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp, and GHSA-834v-8h66-3h79.
+- Keep the retained draft when the Host accepts a role save but the settings mirror has not confirmed it. The footer no longer offers “Reload latest settings” in that state, because that action rebases onto the current mirror and can discard the unconfirmed draft.
+
 ## 0.6.0
 
 - Redesign the scoped Web subagent catalog: compact click/keyboard-only trigger, current/attention entries first, collapsed completed/cancelled history, native list/button semantics, opaque theme surfaces and mobile sizing. Keep positive role metadata across reopen and external refresh state independent per parent; unknown/stopped/stale is not idle or success.
