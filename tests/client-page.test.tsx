@@ -10,6 +10,8 @@ import { RolesPage } from '../src/client/RolesPage.tsx'
 import { DEFAULT_ROLES } from '../src/shared/roles.ts'
 import { cleanup, fireEvent, render, screen, settle, update, waitFor, within } from './client-dom.ts'
 import {
+  CATALOG,
+  PRESETS,
   type FakeForm,
   fail,
   fakeForm,
@@ -265,6 +267,82 @@ describe('role editor', () => {
     expect(within(rowOf('worker')).getByText("Model: parent's model")).toBeTruthy()
   })
 
+  it('allows unlisted model IDs and refreshes models and presets independently', async () => {
+    const { remote } = await mount()
+    fireEvent.click(button('Edit role worker'))
+    const row = within(rowOf('worker'))
+    fireEvent.click(row.getByRole('button', { name: 'Enter model IDs manually' }))
+    const provider = row.getByLabelText('Provider') as HTMLInputElement
+    fireEvent.change(provider, { target: { value: 'custom-provider' } })
+    fireEvent.change(row.getByLabelText('Model'), { target: { value: 'private-model' } })
+    const modelsBefore = remote.session.modelCatalog.mock.calls.length
+    const presetsBefore = remote.agentPresets.list.mock.calls.length
+    fireEvent.click(row.getByRole('button', { name: 'Refresh DSH models' }))
+    await settle()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(modelsBefore + 1)
+    expect(remote.agentPresets.list).toHaveBeenCalledTimes(presetsBefore)
+    expect(row.getByLabelText('Provider')).toBe(provider)
+    expect(provider.value).toBe('custom-provider')
+    expect((row.getByLabelText('Model') as HTMLInputElement).value).toBe('private-model')
+    fireEvent.click(row.getByRole('button', { name: 'Refresh presets' }))
+    await settle()
+    expect(remote.session.modelCatalog).toHaveBeenCalledTimes(modelsBefore + 1)
+    expect(remote.agentPresets.list).toHaveBeenCalledTimes(presetsBefore + 1)
+    fireEvent.click(row.getByRole('button', { name: 'Choose from model list' }))
+    expect(row.getByRole('option', { name: 'custom-provider (not listed)' })).toBeTruthy()
+    expect(row.getByRole('option', { name: 'private-model (not listed)' })).toBeTruthy()
+  })
+
+  it('keeps typed model inputs mounted when delayed lists arrive', async () => {
+    const remote = fakeRemote()
+    let resolveCatalog!: (value: ReturnType<typeof ok<typeof CATALOG>>) => void
+    let resolvePresets!: (value: ReturnType<typeof ok<typeof PRESETS>>) => void
+    remote.session.modelCatalog.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveCatalog = resolve
+        }),
+    )
+    remote.agentPresets.list.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolvePresets = resolve
+        }),
+    )
+    await mount({ remote, preload: false })
+    fireEvent.click(button('Edit role worker'))
+    const row = within(rowOf('worker'))
+    const provider = row.getByLabelText('Provider') as HTMLInputElement
+    fireEvent.change(provider, { target: { value: 'custom' } })
+    fireEvent.change(row.getByLabelText('Model'), { target: { value: 'model' } })
+    resolveCatalog(ok(CATALOG))
+    resolvePresets(ok(PRESETS))
+    await settle()
+    expect(row.getByLabelText('Provider')).toBe(provider)
+    expect(provider.value).toBe('custom')
+    expect((row.getByLabelText('Model') as HTMLInputElement).value).toBe('model')
+  })
+
+  it('does not replace a focused input when a delayed catalog arrives before typing', async () => {
+    const remote = fakeRemote()
+    let resolveCatalog!: (value: ReturnType<typeof ok<typeof CATALOG>>) => void
+    remote.session.modelCatalog.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveCatalog = resolve
+        }),
+    )
+    await mount({ remote, preload: false })
+    fireEvent.click(button('Edit role worker'))
+    const row = within(rowOf('worker'))
+    const provider = row.getByLabelText('Provider') as HTMLInputElement
+    update(() => provider.focus())
+    resolveCatalog(ok(CATALOG))
+    await settle()
+    expect(row.getByLabelText('Provider')).toBe(provider)
+    expect(document.activeElement).toBe(provider)
+  })
+
   it('keeps a stored route that the catalog no longer lists', async () => {
     const roles = DEFAULT_ROLES.map(role =>
       role.id === 'worker' ? { ...role, model: { provider: 'gone', model: 'old' } } : role,
@@ -297,9 +375,26 @@ describe('role editor', () => {
     fireEvent.change(preset, { target: { value: 'ptc' } })
     expect(within(rowOf('worker')).getByText('Preset: ptc')).toBeTruthy()
     remote.session.modelCatalog.mockResolvedValue({ ok: true, value: { groups: [], failures: [] } })
-    fireEvent.click(within(rowOf('worker')).getByRole('button', { name: 'Retry' }))
+    fireEvent.click(within(rowOf('worker')).getByRole('button', { name: 'Retry models' }))
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps typed preset ID during retry and permits switching to the recovered list', async () => {
+    const remote = fakeRemote()
+    remote.agentPresets.list.mockRejectedValueOnce(new Error('down'))
+    await mount({ remote, preload: false })
+    fireEvent.click(button('Edit role worker'))
+    await settle()
+    const row = within(rowOf('worker'))
+    const preset = row.getByLabelText('Agent preset') as HTMLInputElement
+    fireEvent.change(preset, { target: { value: 'custom-preset' } })
+    fireEvent.click(row.getByRole('button', { name: 'Retry presets' }))
+    await settle()
+    expect(row.getByLabelText('Agent preset')).toBe(preset)
+    expect(preset.value).toBe('custom-preset')
+    fireEvent.click(row.getByRole('button', { name: 'Choose from preset list' }))
+    expect(row.getByRole('option', { name: 'custom-preset (not listed)' })).toBeTruthy()
   })
 
   it('offers the agent presets and explains what a preset changes', async () => {
@@ -656,7 +751,7 @@ describe('workflow model section', () => {
     expect(picker.queryByLabelText('Reasoning effort')).toBeNull()
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(1)
-    fireEvent.click(picker.getByRole('button', { name: 'Retry' }))
+    fireEvent.click(picker.getByRole('button', { name: 'Retry models' }))
     await settle()
     expect(remote.session.modelCatalog).toHaveBeenCalledTimes(2)
   })

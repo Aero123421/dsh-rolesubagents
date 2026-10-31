@@ -82,6 +82,8 @@ Model candidates carry provenance, timestamps and partial/unknown status; listin
 | Agent preset | Starts the child with this preset's system prompt and tools; fresh roles only |
 | Read-only | Keeps the file sandbox at `read-only` and refuses write-like MCP and plugin tools. Tools are classified by name; see Limitations |
 
+For DSH roles and the workflow default, model provider and model IDs can be entered manually even when a catalog is available. Model and preset lists can be refreshed independently; a failed model refresh retains the last list and marks it stale. Manual IDs are still validated by the Host when used.
+
 ### Workflow default model
 
 The Plugins page has a separate **Workflow model** provider/model setting. It changes only the default LLM route for children started by the official `workflow` tool's `agent()` helper; it does not select a role or add role instructions, an Agent Preset, reasoning effort, or read-only restrictions.
