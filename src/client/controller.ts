@@ -228,6 +228,10 @@ export interface Controller {
   save(): Promise<void>
   /** Drop the edits and any conflict, and show the Host's current settings. */
   discard(): void
+  /** Explicitly refresh the model list without reloading presets. */
+  refreshCatalog(): void
+  /** Explicitly refresh the preset list without reloading models. */
+  refreshPresets(): void
   /** Load the model catalog and the preset list when they are not loaded; retries after a failure. */
   loadReference(): void
   /** Forget both lists (the Host's models changed or the connection reset); reload when the editor needs them. */
@@ -916,6 +920,12 @@ export function createController(options: ControllerOptions): Controller {
       publish()
     },
     loadReference,
+    refreshCatalog() {
+      if (!disposed && catalog.status !== 'loading') void loadCatalog()
+    },
+    refreshPresets() {
+      if (!disposed && presets.status !== 'loading') void loadPresets()
+    },
     invalidateReference() {
       catalogRun++
       presetRun++
