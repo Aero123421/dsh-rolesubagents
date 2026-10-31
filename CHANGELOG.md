@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.1
+
 - Allow manual provider/model IDs with a populated DSH catalog, keep focused or edited inputs through delayed catalog responses, and refresh model and preset lists independently. Failed model refreshes retain and label the last list. Manual entries remain subject to Host validation.
 - Preserve inherited conditional workflow activation on DSH `0.2.2-alpha.2` by leaving that workflow native instead of registering an unconditional model-default wrapper. Add the exact checked alpha to DSH peer ranges; retain existing RC support.
 - Preserve complete CLI prerelease/build versions for Claude Code, Grok Build and Pi. Abort connection probes after asynchronous resolution/completion so cancelled probes cannot continue or publish stale success.
