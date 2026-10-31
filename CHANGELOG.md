@@ -5,6 +5,8 @@
 - Preserve inherited conditional workflow activation on DSH `0.2.2-alpha.2` by leaving that workflow native instead of registering an unconditional model-default wrapper. Add the exact checked alpha to DSH peer ranges; retain existing RC support.
 - Preserve complete CLI prerelease/build versions for Claude Code, Grok Build and Pi. Abort connection probes after asynchronous resolution/completion so cancelled probes cannot continue or publish stale success.
 - Update isolated installed-Host checks for explicit native executors, batch dispatch, projection registration and pre-step model selection. Observe acknowledged storage changes through the public domain event; align CLI start-receipt checks with v0.6.0. See [DSH compatibility validation](docs/dsh-compatibility-20261029.md).
+- Update bundled Zod to 4.6.7 so storage and audit array parsing no longer retains an issue object for every element of an oversized array (GHSA-mrhx-c7xc-m3w5). A pnpm override keeps the DSH packages' Zod on the same version; mixing 4.4 and 4.6 made `tsc` grow without bound. Development-only Vitest 4.1.12 and Happy DOM 21.0.4 close GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp, and GHSA-834v-8h66-3h79.
+- Keep the retained draft when the Host accepts a role save but the settings mirror has not confirmed it. The footer no longer offers “Reload latest settings” in that state, because that action rebases onto the current mirror and can discard the unconfirmed draft.
 
 ## 0.6.0
 

@@ -2,6 +2,8 @@
 
 Baseline: `Aero123421/dsh-rolesubagents` main **9db2d2df542d27403fdeb30fd34715582e225a2e**, including [PR26 / v0.6.0](https://github.com/Aero123421/dsh-rolesubagents/pull/26). The supplied workspace initially contained older main `3e13214`; all changes and final checks use the new baseline. No repository or ancestor `AGENTS.md` or applicable `.agents/skills` files were found.
 
+**Later integration note:** [PR25](https://github.com/Aero123421/dsh-rolesubagents/pull/25) was merged after this historical baseline. The PR25 status and advisory findings below describe the baseline at the time of this report, not the current main branch.
+
 ## Official versions and provenance
 
 The [official npm package](https://registry.npmjs.org/@deepseek-ai%2Fdsh) identifies [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (`apps/cli`) as its repository. At the fixed acceptance cutoff **2026-10-29 15:00 UTC**, **no stable SemVer version was published**. npm's `latest` tag remains `0.2.1-rc.2` and must not be called a stable release. `next` advanced from the initially tested `0.2.1-rc.4` to `0.2.1-rc.5`, published **2026-10-29T14:15:23.355Z**, before the cutoff. The rc.4 results remain valid historical baseline evidence; later releases are outside this acceptance window.
